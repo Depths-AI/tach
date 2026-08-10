@@ -1,0 +1,53 @@
+{
+  "name": "@depths/tach",
+  "version": "0.0.0",
+  "description": "Managed TypeScript runtime and native compiler for Tach GPU kernels",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "cli.mjs",
+    "dist/",
+    "scripts/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./compiler": {
+      "types": "./dist/compiler.d.ts",
+      "import": "./dist/compiler.js"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js"
+    }
+  },
+  "bin": {
+    "tach": "./cli.mjs"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "prepare": "npm run build",
+    "postinstall": "node scripts/install.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Depths-AI/tach.git",
+    "directory": "tach-ts"
+  },
+  "license": "AGPL-3.0-only"
+}

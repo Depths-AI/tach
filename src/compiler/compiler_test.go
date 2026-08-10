@@ -124,9 +124,10 @@ func TestNumericLiteralCanonicalization(t *testing.T) {
 @workgroupSize(1)
 export compute numbers(out: storage<u32[], read_write>) {
   const mask: u32 = 0xff00_ff00u;
+  const hex: u32 = 0xff;
   const count: u32 = 0b1010u;
   const scale: f32 = 1.25e-3f;
-  if (globalId.x < out.length) { out[globalId.x] = mask + count + u32(scale); }
+  if (globalId.x < out.length) { out[globalId.x] = mask + hex + count + u32(scale); }
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +137,7 @@ export compute numbers(out: storage<u32[], read_write>) {
 			t.Fatalf("IR retained source literal spelling %q:\n%s", bad, r.IR)
 		}
 	}
-	if !strings.Contains(r.IR, "4278255360") || !strings.Contains(r.IR, "10") {
+	if !strings.Contains(r.IR, "4278255360") || !strings.Contains(r.IR, "255") || !strings.Contains(r.IR, "10") {
 		t.Fatalf("IR did not canonicalize integer literals:\n%s", r.IR)
 	}
 }
@@ -313,7 +314,7 @@ export compute step(data: storage<u32[], read_write>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const entry = "_tach_k_step"
+	const entry = "step"
 	if !strings.Contains(r.WGSL, "fn "+entry+"(") {
 		t.Fatalf("WGSL does not export ABI entry %q:\n%s", entry, r.WGSL)
 	}

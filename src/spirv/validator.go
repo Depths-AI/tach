@@ -700,8 +700,6 @@ func (v *validation) requireValue(id uint32, ctx string) (uint32, error) {
 	}
 	return t, nil
 }
-func same(a, b uint32) bool { return a == b }
-
 func (v *validation) validateReferencesAndTypes() error {
 	for _, in := range v.m.Instructions {
 		a := in.Operands

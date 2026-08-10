@@ -48,3 +48,17 @@ export compute second(
 		t.Fatalf("CheckAndLower error = %v, want duplicate parameter diagnostic", err)
 	}
 }
+
+func TestComputeKernelRequiresStorage(t *testing.T) {
+	m, err := parser.Parse("uniform-only.tach", `
+@workgroupSize(1)
+export compute invisible(params: uniform<u32>) { }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sema.CheckAndLower(m)
+	if err == nil || !strings.Contains(err.Error(), "requires at least one storage parameter") {
+		t.Fatalf("CheckAndLower error = %v, want storage-parameter diagnostic", err)
+	}
+}

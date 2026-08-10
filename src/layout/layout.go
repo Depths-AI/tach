@@ -7,8 +7,8 @@ import (
 )
 
 // Tach's portable host ABI intentionally uses one layout for every host-visible
-// structure. It is the strict superset of WGSL storage layout and the legacy
-// uniform layout constraints, so the same bytes are valid for WebGPU storage,
+// structure. It is the strict superset of WGSL storage and uniform layout
+// constraints, so the same bytes are valid for WebGPU storage,
 // WebGPU uniform, and Vulkan block layouts.
 type TypeLayout struct {
 	Size    uint32
@@ -24,11 +24,18 @@ type FieldLayout struct {
 	Layout TypeLayout
 }
 
-func roundUp(a, v uint32) uint32 {
-	if a == 0 {
-		return v
+func checkedSize(value uint64) (uint32, error) {
+	if value > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("host layout exceeds the 32-bit ABI size limit")
 	}
-	return (v + a - 1) &^ (a - 1)
+	return uint32(value), nil
+}
+
+func roundUp(a, v uint32) (uint32, error) {
+	if a == 0 {
+		return v, nil
+	}
+	return checkedSize((uint64(v) + uint64(a) - 1) &^ uint64(a-1))
 }
 
 func Of(t *types.Type) (TypeLayout, error) {
@@ -67,8 +74,15 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 		if e.Runtime || t.Count == 0 {
 			return TypeLayout{}, fmt.Errorf("invalid fixed array %s", t)
 		}
-		stride := roundUp(e.Align, e.Size)
-		return TypeLayout{Size: stride * t.Count, Align: e.Align, Stride: stride}, nil
+		stride, err := roundUp(e.Align, e.Size)
+		if err != nil {
+			return TypeLayout{}, err
+		}
+		size, err := checkedSize(uint64(stride) * uint64(t.Count))
+		if err != nil {
+			return TypeLayout{}, err
+		}
+		return TypeLayout{Size: size, Align: e.Align, Stride: stride}, nil
 	case types.RuntimeArray:
 		e, err := of(t.Elem, seen)
 		if err != nil {
@@ -76,7 +90,10 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 		}
 		// Runtime arrays are storage-only. Their natural stride remains valid for
 		// both WGSL storage and Vulkan storage buffers.
-		stride := roundUp(e.Align, e.Size)
+		stride, err := roundUp(e.Align, e.Size)
+		if err != nil {
+			return TypeLayout{}, err
+		}
 		return TypeLayout{Align: e.Align, Stride: stride, Runtime: true}, nil
 	case types.Struct:
 		if seen[t.Name] {
@@ -103,16 +120,25 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 			if f.Type.Kind == types.Struct && req < 16 {
 				req = 16
 			}
-			off = roundUp(req, off)
+			off, err = roundUp(req, off)
+			if err != nil {
+				return TypeLayout{}, err
+			}
 			fields = append(fields, FieldLayout{Name: f.Name, Offset: off, Layout: fl})
 			if fl.Runtime {
 				runtimeSeen = true
 			} else {
 				sz := fl.Size
 				if f.Type.Kind == types.Struct {
-					sz = roundUp(16, sz)
+					sz, err = roundUp(16, sz)
+					if err != nil {
+						return TypeLayout{}, err
+					}
 				}
-				off += sz
+				off, err = checkedSize(uint64(off) + uint64(sz))
+				if err != nil {
+					return TypeLayout{}, err
+				}
 			}
 			if req > align {
 				align = req
@@ -124,12 +150,14 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 		if runtimeSeen {
 			return TypeLayout{Size: off, Align: align, Fields: fields, Runtime: true}, nil
 		}
-		return TypeLayout{Size: roundUp(align, off), Align: align, Fields: fields}, nil
+		size, err := roundUp(align, off)
+		if err != nil {
+			return TypeLayout{}, err
+		}
+		return TypeLayout{Size: size, Align: align, Fields: fields}, nil
 	case types.Void:
 		return TypeLayout{}, fmt.Errorf("void has no host layout")
 	default:
 		return TypeLayout{}, fmt.Errorf("unsupported host type %s", t)
 	}
 }
-
-func Field(l TypeLayout, index int) FieldLayout { return l.Fields[index] }

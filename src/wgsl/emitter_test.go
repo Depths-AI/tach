@@ -38,14 +38,14 @@ func TestParticlesWGSL(t *testing.T) {
 }
 
 func TestValidatorRejectsMalformedGeneratedShape(t *testing.T) {
-	bad := `@compute @workgroup_size(1, 1, 1) fn _tach_k_bad() { let _v1: u32 = 1u }`
+	bad := `@compute @workgroup_size(1, 1, 1) fn bad() { let _v1: u32 = 1u }`
 	if err := wgsl.Validate(bad); err == nil {
 		t.Fatal("WGSL validator accepted a generated statement without semicolon")
 	}
 }
 
 func TestValidatorRejectsReservedDoubleUnderscoreIdentifier(t *testing.T) {
-	bad := `@compute @workgroup_size(1, 1, 1) fn __tach_k_bad() { return; }`
+	bad := `@compute @workgroup_size(1, 1, 1) fn __bad() { return; }`
 	if err := wgsl.Validate(bad); err == nil || !strings.Contains(err.Error(), "reserved identifier") {
 		t.Fatalf("WGSL validator error = %v, want reserved identifier", err)
 	}

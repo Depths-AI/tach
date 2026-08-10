@@ -231,12 +231,3 @@ func analyzeUniformLoop(m *Module, f *Function, loop *Loop, outer uniformEnv, fm
 	}
 	return outer, control, nil
 }
-
-func allTrue(xs []bool) bool {
-	for _, x := range xs {
-		if !x {
-			return false
-		}
-	}
-	return true
-}

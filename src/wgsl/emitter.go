@@ -9,7 +9,7 @@ import (
 	"tach/src/types"
 )
 
-func MangleKernel(name string) string     { return abi.KernelEntry(name) }
+func kernelName(name string) string       { return abi.KernelEntry(name) }
 func mangleFunc(name string) string       { return "_tach_f_" + abi.Mangle(name) }
 func mangleType(name string) string       { return "_tach_t_" + abi.Mangle(name) }
 func resourceName(i int) string           { return fmt.Sprintf("_tach_r%d", i) }
@@ -201,7 +201,7 @@ func builtinParam(k ir.BuiltinKind) (attr, name, ty string) {
 }
 func (e *emitter) funcName(f *ir.Function) string {
 	if f.Compute {
-		return MangleKernel(f.Name)
+		return kernelName(f.Name)
 	}
 	return mangleFunc(f.Name)
 }

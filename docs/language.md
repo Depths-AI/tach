@@ -206,6 +206,10 @@ params: uniform<Params>
 
 Uniform resources are read-only.
 
+Every exported compute kernel has at least one storage parameter. Besides
+making the kernel's result observable, that storage buffer carries the
+`GPUDevice` used by the generated direct JavaScript function.
+
 ### Binding locations
 
 Bindings may be explicit:

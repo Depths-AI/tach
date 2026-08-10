@@ -360,10 +360,14 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body}
 	nextBinding := uint32(0)
 	localBindings := map[[2]uint32]bool{}
+	hasStorage := false
 	for _, p := range d.Params {
 		kind, ty, access, err := c.resourceType(p.Type)
 		if err != nil {
 			return err
+		}
+		if kind == ir.Storage {
+			hasStorage = true
 		}
 		group, binding, explicit, err := bindingAttrs(p.Attrs)
 		if err != nil {
@@ -408,6 +412,9 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 		}
 		e.syms[p.Name] = symbol{name: p.Name, ty: ty, resource: idx, workgroup: -1}
 		f.ResourceParams = append(f.ResourceParams, ir.ResourceParam{Name: p.Name, Resource: idx})
+	}
+	if !hasStorage {
+		return diag(d.Span, "compute kernel %s requires at least one storage parameter", d.Name)
 	}
 	if err := c.lowerBlock(b, d.Body, e, "function"); err != nil {
 		return err
@@ -548,14 +555,14 @@ func constU32(e ast.Expr) (uint32, error) {
 
 func splitNumberLiteral(raw string) (body string, suffix byte, basePrefixed bool) {
 	body = strings.ReplaceAll(raw, "_", "")
+	basePrefixed = strings.HasPrefix(body, "0x") || strings.HasPrefix(body, "0X") || strings.HasPrefix(body, "0b") || strings.HasPrefix(body, "0B")
 	if len(body) > 0 {
 		last := body[len(body)-1]
-		if last == 'u' || last == 'i' || last == 'f' {
+		if last == 'u' || last == 'i' || last == 'f' && !basePrefixed {
 			suffix = last
 			body = body[:len(body)-1]
 		}
 	}
-	basePrefixed = strings.HasPrefix(body, "0x") || strings.HasPrefix(body, "0X") || strings.HasPrefix(body, "0b") || strings.HasPrefix(body, "0B")
 	return body, suffix, basePrefixed
 }
 

@@ -17,6 +17,7 @@ function annotation(result, type) {
 export default class MarkdownReporter {
   constructor(options = {}) {
     this.outputFile = resolve(process.cwd(), options.outputFile ?? "test-report.md");
+    this.errors = [];
     this.tests = new Map();
     this.totalTests = 0;
   }
@@ -40,10 +41,16 @@ export default class MarkdownReporter {
     });
   }
 
+  onError(error) {
+    this.errors.push(error.message);
+  }
+
   onEnd(run) {
     const tests = [...this.tests.values()];
     const counts = new Map();
     for (const test of tests) counts.set(test.status, (counts.get(test.status) ?? 0) + 1);
+    const failed = this.errors.length + (counts.get("failed") ?? 0) +
+      (counts.get("timedOut") ?? 0) + (counts.get("interrupted") ?? 0);
     const webGPU = tests.find((test) => test.mode);
     let cliVersion = "unknown";
     try {
@@ -62,7 +69,7 @@ export default class MarkdownReporter {
       `- Status: **${run.status.toUpperCase()}**`,
       `- Tests: ${tests.length}/${this.totalTests}`,
       `- Passed: ${counts.get("passed") ?? 0}`,
-      `- Failed: ${(counts.get("failed") ?? 0) + (counts.get("timedOut") ?? 0)}`,
+      `- Failed: ${failed}`,
       `- Skipped: ${counts.get("skipped") ?? 0}`,
       `- Duration: ${duration(run.duration)}`,
       `- Tach CLI: \`${oneLine(cliVersion)}\``,
@@ -82,10 +89,15 @@ export default class MarkdownReporter {
 
     const icons = { failed: "❌", interrupted: "⚠️", passed: "✅", skipped: "⏭️", timedOut: "⏱️" };
     for (const test of tests) {
-      lines.push(`| ${icons[test.status] ?? test.status} ${test.status} | ${oneLine(test.title)} | ${duration(test.duration)} |`);
+      lines.push(
+        `| ${icons[test.status] ?? test.status} ${test.status} | ${oneLine(test.title)} | ${duration(test.duration)} |`,
+      );
     }
 
-    const failures = tests.filter((test) => test.error);
+    const failures = [
+      ...this.errors.map((error) => ({ title: "Harness setup", error })),
+      ...tests.filter((test) => test.error),
+    ];
     if (failures.length > 0) {
       lines.push("", "## Failures", "");
       for (const failure of failures) {

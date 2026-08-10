@@ -1,0 +1,27 @@
+{
+  "name": "@tach/showcase-ts",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Pure TypeScript showcase for Tach-generated WebGPU kernels",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "kernel": "node scripts/build-kernel.mjs",
+    "check": "npm run kernel && tsc --noEmit",
+    "build": "npm run check && vite build",
+    "dev": "npm run kernel && vite",
+    "preview": "vite preview",
+    "test": "npm run build && playwright test"
+  },
+  "dependencies": {
+    "@depths/tach": "0.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  }
+}

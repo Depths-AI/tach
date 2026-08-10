@@ -1,0 +1,24 @@
+type Params = {
+  dt: f32,
+  count: u32,
+};
+
+type Particle = {
+  position: vec4f,
+  velocity: vec4f,
+};
+
+@workgroupSize(256)
+export compute integrate(
+  particles: storage<Particle[], read_write>,
+  params: uniform<Params>,
+) {
+  const i = globalId.x;
+  if (i >= params.count) {
+    return;
+  }
+  particles[i] = {
+    position: particles[i].position + particles[i].velocity * params.dt,
+    velocity: particles[i].velocity,
+  };
+}

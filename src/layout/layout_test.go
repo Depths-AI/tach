@@ -96,6 +96,12 @@ func TestFixedArrayStride(t *testing.T) {
 	}
 }
 
+func TestFixedArraySizeCannotOverflow(t *testing.T) {
+	if _, err := Of(types.Array(types.TU32, ^uint32(0))); err == nil {
+		t.Fatal("expected an overflowing fixed array layout to be rejected")
+	}
+}
+
 func TestBoolHasNoHostLayout(t *testing.T) {
 	if _, err := Of(types.TBool); err == nil {
 		t.Fatal("expected bool host layout to be rejected")

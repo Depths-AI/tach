@@ -5,7 +5,7 @@ const probeButton = document.querySelector("#probe");
 
 function adapterReport(info) {
   const identity = info.description || [info.vendor, info.architecture].filter(Boolean).join(" ") || "unnamed adapter";
-  const identityLooksSoftware = /swiftshader|software|llvmpipe|warp/i.test(
+  const identityLooksSoftware = /swiftshader|software|llvmpipe|lavapipe|softpipe|warp|basic render/i.test(
     [info.description, info.vendor, info.architecture, info.device].filter(Boolean).join(" "),
   );
   const software = info.isFallbackAdapter === true || identityLooksSoftware;
@@ -53,13 +53,12 @@ async function loadExamples() {
   const manifest = await response.json();
   examplesBody.replaceChildren();
   for (const entry of manifest.examples) {
-    const generated = await import(entry.module);
     const row = document.createElement("tr");
     const cells = [
       entry.name,
-      generated.metadata.kernels.map((kernel) => kernel.name).join(", "),
-      String(generated.metadata.resources.length),
-      `${new TextEncoder().encode(generated.wgsl).byteLength} bytes`,
+      entry.kernels.join(", "),
+      String(entry.resources),
+      `${entry.wgslBytes} bytes`,
     ];
     for (const value of cells) {
       const cell = document.createElement("td");

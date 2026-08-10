@@ -16,30 +16,30 @@ Tach owns every stage of that pipeline, including validation of its IR, generate
 
 ## Install
 
-Release binaries are published through GitHub Releases for Linux, macOS, and Windows on amd64 and arm64.
-
-Unix (Linux or macOS):
+Install the TypeScript runtime and compiler as one project dependency (Node.js
+22 or newer):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Depths-AI/tach/master/install.sh | sh
+npm install @depths/tach
+npx tach version
 ```
 
-This installs `tach` to `~/.local/bin` by default. Set `TACH_INSTALL_DIR` on the `sh` process to choose another directory.
+The package detects Linux, macOS, or Windows and x64 or arm64, fetches the
+matching native compiler from the package version's GitHub Release, and
+verifies it against that release's SHA-256 manifest. npm exposes `tach` to
+project scripts and through `npx` on every platform. A global install is also
+available when a machine-wide command is preferable:
 
-Windows PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/Depths-AI/tach/master/install.ps1 | iex
+```sh
+npm install --global @depths/tach
 ```
-
-This installs `tach.exe` to `%LOCALAPPDATA%\Tach\bin` and adds that directory to the user `PATH`. Both installers verify the downloaded release archive against the published SHA-256 checksum manifest.
 
 ## Build
 
 Tach requires Go 1.23 or newer.
 
 ```sh
-go build -o bin/tach .
+go build -o dist/ .
 ```
 
 Run the full test suite:
@@ -49,37 +49,48 @@ go test ./...
 go vet ./...
 ```
 
+The repository is one npm workspace containing the published runtime plus its
+private browser and showcase consumers:
+
+```sh
+npm ci
+npm test
+```
+
+`npm run check` performs the compiler build and strict TypeScript checks without
+launching the browser suites.
+
 ## Release
 
-Releases are built entirely on the local development machine. To run the tests,
-cross-compile all six supported OS/architecture targets, package them, and write
-their checksum manifest under `dist/VERSION/`:
+Releases are built entirely on the local development machine. To run the Go,
+package, showcase, and browser tests; cross-compile all six native targets; pack
+`@depths/tach`; and write the checksum manifest under `dist/VERSION/`:
 
 ```sh
 ./release.sh v0.1.0
 ```
 
-To perform the same local build and then upload the completed archives to GitHub
-Releases:
+To perform the same local build, upload the raw native binaries to GitHub
+Releases, and publish the wrapper to npm:
 
 ```sh
 ./release.sh v0.1.0 --publish
 ```
 
-Publishing requires an authenticated GitHub CLI and a clean, committed worktree.
-GitHub stores the finished archives; it does not compile or test them.
+Publishing requires authenticated GitHub and npm CLIs plus a clean, committed
+worktree. GitHub stores the finished native binaries; it does not compile or
+test them.
 
 ## Browser testing
 
-`browser-test/` is a standalone npm project that compiles every example through
-the external Tach CLI, loads the generated modules in headless Chromium, checks
-their browser/ABI interfaces, and executes every kernel when WebGPU is available.
+`browser-test/` is a private workspace that compiles every example through
+`@depths/tach`, loads the generated direct kernel functions in headless
+Chromium, checks their browser/ABI interfaces, and executes every kernel.
 
 ```sh
-cd browser-test
 npm ci
-npm run install:browser
-npm test
+npm run install:browser --workspace=@tach/browser-test
+npm test --workspace=@tach/browser-test
 ```
 
 The same `npm test` command runs the full suite on every machine. Chromium
@@ -127,23 +138,59 @@ export compute integrate(
 Validate the entire compilation pipeline:
 
 ```sh
-bin/tach check particles.tach
+npx tach check particles.tach
 ```
 
 Build all artifacts:
 
 ```sh
-bin/tach build particles.tach
+npx tach build particles.tach
 ```
 
 Artifacts are written to `build/` using the source filename as their base name.
 
+The generated JavaScript/TypeScript interface mirrors the Tach source:
+
+```ts
+import { tach } from "@depths/tach";
+import { integrate, type Particle } from "./build/particles.js";
+
+const initial: readonly Particle[] = [
+  {
+    position: [1, 2, 3, 1],
+    velocity: [2, 4, 6, 0],
+  },
+];
+
+const result = await tach(async (gpu) => {
+  const particles = gpu.buffer(initial);
+  await integrate(particles, { dt: 0.5, count: initial.length });
+  return particles.read();
+});
+
+if (result.ok) {
+  console.log(result.value);
+} else {
+  console.error(result.error.code, result.error.message);
+}
+```
+
+Tach structs become ordinary TypeScript interfaces and exported kernels become
+same-named positional functions. Storage parameters use the single persistent
+`ComputeBuffer<T>` abstraction created by the scope; uniform parameters are
+plain values. `tach(...)` owns adapter, device, buffers, queued work, and cleanup
+and returns failures as a discriminated result. Invocation count is inferred
+from the first runtime-sized storage buffer, with an optional final number or
+`[x, y, z]` available for kernels that need an explicit size.
+See [`showcase-ts/`](showcase-ts/) for a standalone strict-TypeScript app using
+this interface end to end.
+
 Inspect individual compiler stages:
 
 ```sh
-bin/tach ir particles.tach
-bin/tach wgsl particles.tach
-bin/tach spirv-dis particles.tach
+npx tach ir particles.tach
+npx tach wgsl particles.tach
+npx tach spirv-dis particles.tach
 ```
 
 ## Language shape
@@ -216,6 +263,8 @@ See:
 
 ```text
 main.go             CLI entry point
+package.json        private npm workspace root
+tach-ts/            published @depths/tach runtime + compiler delivery
 src/lexer/          source tokenizer
 src/parser/         source parser
 src/ast/            syntax tree
@@ -229,7 +278,8 @@ src/spirv/          SPIR-V emitter + decoder + validator + disassembler
 src/bindings/       WebGPU JS/TS + metadata generation/validation
 src/compiler/       end-to-end compilation pipeline
 examples/           executable Tach examples
-browser-test/       standalone headless-browser and WebGPU test project
+browser-test/       private headless-browser and WebGPU test workspace
+showcase-ts/        private strict-TypeScript consumption showcase
 ```
 
 ## Design invariants
@@ -239,3 +289,8 @@ browser-test/       standalone headless-browser and WebGPU test project
 3. **The ABI belongs to Tach.** Resource bindings, physical buffer layout, entry-point naming, and reflection are computed before backend emission.
 4. **One semantic program reaches both targets.** Portable semantics such as shift behavior and barrier/atomic meaning are fixed in Tach rather than left to backend interpretation.
 5. **Generated artifacts are checked before success.** `Compile` returns only after every owned verification layer succeeds.
+
+## License
+
+Tach is licensed under the [GNU Affero General Public License version 3](LICENSE)
+only (`AGPL-3.0-only`).

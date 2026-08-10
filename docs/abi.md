@@ -32,21 +32,11 @@ binding -> WGSL @binding   -> SPIR-V Binding
 
 ## 2. Entry-point naming
 
-Tach defines backend-neutral entry-point names through `src/abi`.
-
-A source kernel named:
-
-```text
-integrate
-```
-
-is exported to both shader backends as:
-
-```text
-_tach_k_integrate
-```
-
-Generated reflection records that exact ABI name.
+Exported kernel names preserve their source spelling across Tach, WGSL,
+SPIR-V, reflection, JavaScript, and TypeScript. A source kernel named
+`integrate` is therefore an `integrate` shader entry point and an exported
+`integrate` JavaScript function. Compiler-private names may be transformed,
+but no private naming scheme leaks into the public contract.
 
 ## 3. Logical vs physical types
 
@@ -132,11 +122,10 @@ Reflection deliberately records both concepts.
 
 Every build emits `<name>.tach.json` with compiler-owned metadata describing the generated program.
 
-The metadata includes:
+The metadata is deliberately plain and unversioned while Tach is under active
+development. It includes:
 
-- ABI/schema version
-- source/kernel names
-- backend entry-point name
+- source kernel name and identical backend entry-point name
 - workgroup dimensions
 - resource group/binding
 - resource kind/access
@@ -144,15 +133,46 @@ The metadata includes:
 - physical/minimum binding size
 - runtime-array tail/stride information where applicable
 
-The generated JS runtime consumes the same compiler data; it does not parse WGSL to recover reflection.
+The generated JS module passes the same compiler data to `@depths/tach`; the
+runtime never parses WGSL to recover reflection.
 
-## 8. JavaScript packing
+## 8. JavaScript and TypeScript bindings
 
-Generated JS uses `DataView`-based packers from the Tach physical layout.
+The generated public interface mirrors Tach source directly:
 
-For a struct/resource value the generated code writes fields at compiler-computed byte offsets. Runtime resources derive the final allocation size from the runtime element count and compiler-recorded stride.
+```ts
+import { tach } from "@depths/tach";
+import { integrate, type Particle } from "./particles.js";
 
-The generated binding contract is validated before `Compile` succeeds.
+const result = await tach(async (gpu) => {
+  const particles = gpu.buffer(initialParticles);
+  await integrate(particles, { dt: 0.5, count: initialParticles.length });
+  return particles.read();
+});
+```
+
+Named Tach structs become TypeScript interfaces. Exported kernels become
+same-named positional functions. Storage parameters become the single
+`ComputeBuffer<T>` host abstraction; uniforms remain ordinary typed values.
+The enclosing `tach(...)` scope owns its adapter, device, buffers, queued work,
+and cleanup, so a kernel call needs no module/context object or synthetic device
+parameter. The scope resolves to either `{ ok: true, value }` or `{ ok: false,
+error }`; WebGPU, compiler, lifecycle, and application failures therefore have
+one explicit error-as-data boundary.
+
+Buffers are lazy: their first kernel use supplies the exact compiler layout,
+at which point `@depths/tach` packs the value and creates the physical WebGPU
+buffer. Pipelines and bind-group layouts are also created lazily and cached per
+device. Calls infer their logical invocation count from the first runtime-sized
+storage buffer and accept an optional final size only when an explicit count or
+`[x, y, z]` is required.
+
+Packing and unpacking remain private implementation details. They use
+`DataView`, compiler-computed byte offsets, and compiler-recorded runtime
+strides. Generated JavaScript imports only `@depths/tach/internal` and exports
+only the source kernels; its declarations import `ComputeBuffer` from
+`@depths/tach`. The generated binding contract is validated before `Compile`
+succeeds.
 
 ## 9. SPIR-V physical representation
 

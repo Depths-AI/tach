@@ -19,7 +19,6 @@ import (
 // passed the validators owned by the Tach compiler.
 type Result struct {
 	SourceName string
-	Module     *ir.Module
 	IR         string
 	WGSL       string
 	SPIRV      []byte
@@ -44,27 +43,13 @@ func Compile(sourceName, source string) (*Result, error) {
 	if err := opt.Run(module); err != nil {
 		return nil, fmt.Errorf("IR optimization: %w", err)
 	}
-	if err := ir.Verify(module); err != nil {
-		return nil, fmt.Errorf("IR verification: %w", err)
-	}
-
 	wgslSource, err := wgsl.Emit(module)
 	if err != nil {
 		return nil, fmt.Errorf("WGSL backend: %w", err)
 	}
-	// Emit currently validates too. Keeping this call explicit makes the
-	// compiler pipeline invariant visible here and catches future emitter
-	// refactors that might otherwise weaken it.
-	if err := wgsl.Validate(wgslSource); err != nil {
-		return nil, fmt.Errorf("WGSL validation: %w", err)
-	}
-
 	spv, err := spirv.Emit(module)
 	if err != nil {
 		return nil, fmt.Errorf("SPIR-V backend: %w", err)
-	}
-	if err := spirv.Validate(spv); err != nil {
-		return nil, fmt.Errorf("SPIR-V validation: %w", err)
 	}
 	spvAsm, err := spirv.Disassemble(spv)
 	if err != nil {
@@ -78,7 +63,6 @@ func Compile(sourceName, source string) (*Result, error) {
 
 	return &Result{
 		SourceName: sourceName,
-		Module:     module,
 		IR:         ir.Dump(module),
 		WGSL:       wgslSource,
 		SPIRV:      spv,
@@ -95,19 +79,6 @@ func CompileFile(path string) (*Result, error) {
 		return nil, err
 	}
 	return Compile(path, string(data))
-}
-
-// OutputNames returns the stable artifact filenames produced for a source base.
-func OutputNames(base string) []string {
-	return []string{
-		base + ".tir",
-		base + ".wgsl",
-		base + ".spv",
-		base + ".spvasm",
-		base + ".js",
-		base + ".d.ts",
-		base + ".tach.json",
-	}
 }
 
 // WriteDirectory writes a complete, already-validated compilation to dir.

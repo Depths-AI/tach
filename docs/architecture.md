@@ -210,7 +210,9 @@ That one result drives:
 
 Host bindings never reverse-engineer generated WGSL.
 
-Kernel entry-point names are also ABI-owned and shared by both backends (`_tach_k_<mangled-name>`).
+Kernel entry-point names are ABI-owned and preserve the exported Tach source
+name in both backends and generated host functions. Mangling is limited to
+compiler-private symbols.
 
 ## 10. Portable semantics belong to Core IR
 
@@ -288,15 +290,30 @@ The disassembler consumes binary bytes as well; it is not an emitter-side debug 
 The binding generator consumes Core IR + ABI metadata and emits:
 
 - embedded WGSL
-- reflection metadata
-- typed struct/resource packers
-- WebGPU buffer creation/write helpers
-- bind-group layout construction
-- compute pipeline creation
-- dispatch encoding
-- TypeScript declarations
+- private resource/layout descriptors consumed by `@depths/tach`
+- plain unversioned reflection metadata
+- direct same-named JavaScript functions for exported Tach kernels
+- ordinary TypeScript interfaces for Tach structs
 
-The generated contract validator checks metadata/version invariants, exports, declaration correspondence, bindings, and generated source shape before compilation succeeds.
+Generated modules contain no WebGPU lifecycle implementation. They import the
+internal module executor from `@depths/tach`, pass it the compiler-owned
+descriptors, and forward each source-named function to that executor. The npm
+runtime owns:
+
+- adapter and device acquisition, loss tracking, error scopes, and cleanup
+- one lazy `ComputeBuffer<T>` abstraction for storage parameters
+- layout-driven packing/unpacking and temporary uniform staging
+- lazy per-device bind-group layout and compute-pipeline construction
+- inferred or explicitly sized dispatch
+- scope-level failures as discriminated `Result<T, TachError>` data
+
+There is no generated module factory, kernel object graph, public packer, or
+resource-map call convention. Uniform parameters are ordinary JavaScript
+values and kernel arguments remain positional in source order. Application code
+creates storage values with `gpu.buffer(value)` inside one `tach(async gpu =>
+...)` scope. The generated contract validator checks reflection invariants,
+direct export/declaration correspondence, bindings, package imports, and
+generated source shape before compilation succeeds.
 
 ## 16. Durability rule
 

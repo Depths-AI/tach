@@ -3,7 +3,6 @@ package bindings
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -13,56 +12,47 @@ import (
 	"tach/src/types"
 )
 
-const metadataFormat = "tach.module.v1"
-
 type Artifacts struct {
 	JavaScript   string
 	Declarations string
 	MetadataJSON []byte
 }
 
+// Metadata is a plain description of a compiled Tach module. Generated
+// bindings and metadata are rebuilt together directly from Tach source.
 type Metadata struct {
-	Format    string         `json:"format"`
-	ABI       ABI            `json:"abi"`
 	Types     []TypeMetadata `json:"types"`
 	Resources []ResourceMeta `json:"resources"`
 	Kernels   []KernelMeta   `json:"kernels"`
 }
 
-type ABI struct {
-	Layout     string `json:"layout"`
-	Endianness string `json:"endianness"`
-}
-
 type TypeMetadata struct {
-	Name    string      `json:"name"`
-	Size    uint32      `json:"size"`
-	Align   uint32      `json:"align"`
-	Runtime bool        `json:"runtime"`
-	Fields  []FieldMeta `json:"fields"`
+	Name      string      `json:"name"`
+	ByteSize  uint32      `json:"byteSize"`
+	Alignment uint32      `json:"alignment"`
+	Runtime   bool        `json:"runtime"`
+	Fields    []FieldMeta `json:"fields"`
 }
 
 type FieldMeta struct {
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-	Offset uint32 `json:"offset"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	ByteOffset uint32 `json:"byteOffset"`
 }
 
 type ResourceMeta struct {
-	Index          int    `json:"index"`
-	Name           string `json:"name"`
-	Group          uint32 `json:"group"`
-	Binding        uint32 `json:"binding"`
-	Kind           string `json:"kind"`
-	Access         string `json:"access"`
-	Type           string `json:"type"`
-	ValueSize      uint32 `json:"valueSize"`
-	BindingSize    uint32 `json:"bindingSize,omitempty"`
-	Align          uint32 `json:"align"`
-	Runtime        bool   `json:"runtime"`
-	RuntimeOffset  uint32 `json:"runtimeOffset,omitempty"`
-	RuntimeStride  uint32 `json:"runtimeStride,omitempty"`
-	MinBindingSize uint32 `json:"minBindingSize"`
+	Name            string `json:"name"`
+	Group           uint32 `json:"group"`
+	Binding         uint32 `json:"binding"`
+	Kind            string `json:"kind"`
+	Access          string `json:"access"`
+	Type            string `json:"type"`
+	ByteSize        uint32 `json:"byteSize,omitempty"`
+	Alignment       uint32 `json:"alignment"`
+	Runtime         bool   `json:"runtime"`
+	RuntimeOffset   uint32 `json:"runtimeOffset,omitempty"`
+	RuntimeStride   uint32 `json:"runtimeStride,omitempty"`
+	MinimumByteSize uint32 `json:"minimumByteSize"`
 }
 
 type KernelMeta struct {
@@ -73,15 +63,14 @@ type KernelMeta struct {
 }
 
 type KernelResourceMeta struct {
-	Param    string `json:"param"`
+	Name     string `json:"name"`
 	Resource int    `json:"resource"`
-	Group    uint32 `json:"group"`
-	Binding  uint32 `json:"binding"`
 }
 
-// Generate creates browser-native JavaScript bindings, TypeScript declarations,
-// and machine-readable ABI metadata directly from verified Tach IR. Reflection
-// is never reconstructed from WGSL.
+// Generate emits a JavaScript module whose public surface is a direct
+// translation of Tach: structs become TypeScript interfaces and exported
+// compute kernels become functions with positional parameters. The generated
+// module delegates WebGPU lifecycle and host-data plumbing to @depths/tach.
 func Generate(m *ir.Module, wgslSource string) (*Artifacts, error) {
 	if err := ir.Verify(m); err != nil {
 		return nil, err
@@ -94,7 +83,7 @@ func Generate(m *ir.Module, wgslSource string) (*Artifacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	js, err := emitJavaScript(m, wgslSource, meta, metaJSON)
+	js, err := emitJavaScript(m, wgslSource, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -105,78 +94,112 @@ func Generate(m *ir.Module, wgslSource string) (*Artifacts, error) {
 	if err := ValidateGenerated(js, dts, metaJSON); err != nil {
 		return nil, fmt.Errorf("Tach binding self-validation failed: %w", err)
 	}
-	return &Artifacts{JavaScript: js, Declarations: dts, MetadataJSON: append(metaJSON, '\n')}, nil
+	return &Artifacts{
+		JavaScript:   js,
+		Declarations: dts,
+		MetadataJSON: append(metaJSON, '\n'),
+	}, nil
 }
 
 func buildMetadata(m *ir.Module) (*Metadata, error) {
 	out := &Metadata{
-		Format: metadataFormat,
-		ABI:    ABI{Layout: "tach-portable-v1", Endianness: "little"},
-		Types:  []TypeMetadata{}, Resources: []ResourceMeta{}, Kernels: []KernelMeta{},
+		Types:     []TypeMetadata{},
+		Resources: []ResourceMeta{},
+		Kernels:   []KernelMeta{},
 	}
 	for _, t := range m.Structs {
 		l, err := layout.Of(t)
 		if err != nil {
 			return nil, err
 		}
-		tm := TypeMetadata{Name: t.Name, Size: l.Size, Align: l.Align, Runtime: l.Runtime}
-		for i, f := range t.Fields {
-			tm.Fields = append(tm.Fields, FieldMeta{Name: f.Name, Type: f.Type.String(), Offset: l.Fields[i].Offset})
+		item := TypeMetadata{
+			Name:      t.Name,
+			ByteSize:  l.Size,
+			Alignment: l.Align,
+			Runtime:   l.Runtime,
+			Fields:    []FieldMeta{},
 		}
-		out.Types = append(out.Types, tm)
+		for index, field := range t.Fields {
+			item.Fields = append(item.Fields, FieldMeta{
+				Name:       field.Name,
+				Type:       field.Type.String(),
+				ByteOffset: l.Fields[index].Offset,
+			})
+		}
+		out.Types = append(out.Types, item)
 	}
-	for i, r := range m.Resources {
-		l, err := layout.Of(r.Type)
+	for _, resource := range m.Resources {
+		l, err := layout.Of(resource.Type)
 		if err != nil {
-			return nil, fmt.Errorf("resource %s: %w", r.Name, err)
+			return nil, fmt.Errorf("resource %s: %w", resource.Name, err)
 		}
-		rm := ResourceMeta{Index: i, Name: r.Name, Group: r.Group, Binding: r.Binding, Type: r.Type.String(), ValueSize: l.Size, Align: l.Align, Runtime: l.Runtime}
-		if r.Kind == ir.Uniform {
-			rm.Kind = "uniform"
-		} else {
-			rm.Kind = "storage"
+		item := ResourceMeta{
+			Name:      resource.Name,
+			Group:     resource.Group,
+			Binding:   resource.Binding,
+			Type:      resource.Type.String(),
+			Alignment: l.Align,
+			Runtime:   l.Runtime,
 		}
-		if r.Access == ir.ReadWrite {
-			rm.Access = "read_write"
+		if resource.Kind == ir.Uniform {
+			item.Kind = "uniform"
 		} else {
-			rm.Access = "read"
+			item.Kind = "storage"
+		}
+		if resource.Access == ir.ReadWrite {
+			item.Access = "read_write"
+		} else {
+			item.Access = "read"
 		}
 		if l.Runtime {
-			off, stride, err := runtimeTail(r.Type)
+			offset, stride, err := runtimeTail(resource.Type)
 			if err != nil {
 				return nil, err
 			}
-			rm.RuntimeOffset, rm.RuntimeStride = off, stride
-			// WebGPU runtime arrays always have at least one element at dispatch.
-			rm.MinBindingSize = off + stride
+			item.RuntimeOffset = offset
+			item.RuntimeStride = stride
+			item.MinimumByteSize = offset + stride
 		} else {
-			// WGSL resources are emitted through a compiler-owned wrapper struct
-			// whose first member has @align(16). For fixed-size logical values the
-			// wrapper's physical store size is therefore rounded to 16 bytes.
-			rm.BindingSize = roundUp(16, l.Size)
-			rm.MinBindingSize = rm.BindingSize
+			// Both shader backends wrap fixed resources to this portable size.
+			item.ByteSize = roundUp(16, l.Size)
+			item.MinimumByteSize = item.ByteSize
 		}
-		out.Resources = append(out.Resources, rm)
+		out.Resources = append(out.Resources, item)
 	}
-	for _, f := range m.Functions {
-		if !f.Compute {
+	for _, function := range m.Functions {
+		if !function.Compute {
 			continue
 		}
-		km := KernelMeta{Name: f.Name, EntryPoint: abi.KernelEntry(f.Name), WorkgroupSize: f.Workgroup}
-		seen := map[[2]uint32]string{}
-		for _, rp := range f.ResourceParams {
-			if rp.Resource < 0 || rp.Resource >= len(m.Resources) {
-				return nil, fmt.Errorf("kernel %s resource index out of range", f.Name)
-			}
-			r := m.Resources[rp.Resource]
-			key := [2]uint32{r.Group, r.Binding}
-			if prev, ok := seen[key]; ok {
-				return nil, fmt.Errorf("kernel %s parameters %s and %s alias group=%d binding=%d", f.Name, prev, rp.Name, r.Group, r.Binding)
-			}
-			seen[key] = rp.Name
-			km.Resources = append(km.Resources, KernelResourceMeta{Param: rp.Name, Resource: rp.Resource, Group: r.Group, Binding: r.Binding})
+		item := KernelMeta{
+			Name:          function.Name,
+			EntryPoint:    abi.KernelEntry(function.Name),
+			WorkgroupSize: function.Workgroup,
+			Resources:     []KernelResourceMeta{},
 		}
-		out.Kernels = append(out.Kernels, km)
+		seen := map[[2]uint32]string{}
+		for _, parameter := range function.ResourceParams {
+			if parameter.Resource < 0 || parameter.Resource >= len(m.Resources) {
+				return nil, fmt.Errorf("kernel %s resource index out of range", function.Name)
+			}
+			resource := m.Resources[parameter.Resource]
+			key := [2]uint32{resource.Group, resource.Binding}
+			if previous, ok := seen[key]; ok {
+				return nil, fmt.Errorf(
+					"kernel %s parameters %s and %s alias group=%d binding=%d",
+					function.Name,
+					previous,
+					parameter.Name,
+					resource.Group,
+					resource.Binding,
+				)
+			}
+			seen[key] = parameter.Name
+			item.Resources = append(item.Resources, KernelResourceMeta{
+				Name:     parameter.Name,
+				Resource: parameter.Resource,
+			})
+		}
+		out.Kernels = append(out.Kernels, item)
 	}
 	return out, nil
 }
@@ -201,415 +224,284 @@ func runtimeTail(t *types.Type) (offset, stride uint32, err error) {
 	}
 	last := len(t.Fields) - 1
 	if t.Fields[last].Type.Kind != types.RuntimeArray {
-		return 0, 0, fmt.Errorf("runtime host type %s violates Tach trailing-array invariant", t)
+		return 0, 0, fmt.Errorf("runtime host type %s violates Tach's trailing-array invariant", t)
 	}
-	fl := l.Fields[last]
-	return fl.Offset, fl.Layout.Stride, nil
+	field := l.Fields[last]
+	return field.Offset, field.Layout.Stride, nil
 }
 
-func safeIdent(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		ok := r == '_' || r == '$' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r))
-		if ok && r < 128 {
-			b.WriteRune(r)
-		} else {
-			fmt.Fprintf(&b, "_x%x_", r)
-		}
-	}
-	if b.Len() == 0 {
-		return "tach"
-	}
-	if unicode.IsDigit(rune(b.String()[0])) {
-		return "_" + b.String()
-	}
-	return b.String()
+type hostLayout struct {
+	Kind    string            `json:"kind"`
+	Size    uint32            `json:"size,omitempty"`
+	Stride  uint32            `json:"stride,omitempty"`
+	Count   uint32            `json:"count,omitempty"`
+	Runtime bool              `json:"runtime,omitempty"`
+	Elem    *hostLayout       `json:"elem,omitempty"`
+	Fields  []hostLayoutField `json:"fields,omitempty"`
 }
 
-func jsQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
-
-func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata, metaJSON []byte) (string, error) {
-	var b strings.Builder
-	b.WriteString("// Generated by Tach. Browser-native WebGPU bindings.\n")
-	b.WriteString("// Tach owns the shader/resource ABI; no runtime reflection is performed.\n\n")
-	fmt.Fprintf(&b, "export const wgsl = %s;\n", jsQuote(wgslSource))
-	fmt.Fprintf(&b, "export const metadata = Object.freeze(%s);\n\n", string(metaJSON))
-	b.WriteString(`function __align4(n) { return (n + 3) & ~3; }
-function __target(target, byteOffset, size) {
-  if (target === undefined || target === null) {
-    const buffer = new ArrayBuffer(size);
-    return { buffer, byteOffset: 0, bytes: new Uint8Array(buffer) };
-  }
-  if (ArrayBuffer.isView(target)) {
-    const base = target.byteOffset + byteOffset;
-    if (base + size > target.byteOffset + target.byteLength) throw new RangeError("Tach pack target is too small");
-    return { buffer: target.buffer, byteOffset: base, bytes: new Uint8Array(target.buffer, base, size) };
-  }
-  if (byteOffset + size > target.byteLength) throw new RangeError("Tach pack target is too small");
-  return { buffer: target, byteOffset, bytes: new Uint8Array(target, byteOffset, size) };
-}
-function __view(t) { return new DataView(t.buffer, t.byteOffset); }
-function __binding(value) {
-  if (value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "buffer")) return value;
-  return { buffer: value };
-}
-function __workgroups(value) {
-  const v = typeof value === "number" ? [value, 1, 1] : value;
-  if (!Array.isArray(v) || v.length < 1 || v.length > 3) throw new TypeError("workgroups must be a positive integer or [x, y?, z?]");
-  const x = v[0], y = v[1] ?? 1, z = v[2] ?? 1;
-  for (const n of [x, y, z]) if (!Number.isInteger(n) || n <= 0) throw new RangeError("workgroup counts must be positive integers");
-  return [x, y, z];
-}
-function __upload(device, bytes, usage, label) {
-  const size = Math.max(4, __align4(bytes.byteLength));
-  const buffer = device.createBuffer({ label, size, usage, mappedAtCreation: true });
-  new Uint8Array(buffer.getMappedRange()).set(bytes);
-  buffer.unmap();
-  return buffer;
+type hostLayoutField struct {
+	Name   string      `json:"name"`
+	Offset uint32      `json:"offset"`
+	Type   *hostLayout `json:"type"`
 }
 
-`)
-	// Internal ABI writers and public struct packers.
-	for _, t := range m.Structs {
-		if err := emitWriter(&b, t); err != nil {
-			return "", err
-		}
+func describeHostLayout(t *types.Type) (*hostLayout, error) {
+	if t == nil {
+		return nil, fmt.Errorf("nil host type")
 	}
-	for _, t := range m.Structs {
-		if err := emitStructPacker(&b, t); err != nil {
-			return "", err
-		}
-	}
-	for _, r := range m.Resources {
-		if err := emitWriter(&b, r.Type); err != nil {
-			return "", err
-		}
-	}
-	for i, r := range m.Resources {
-		if err := emitResourcePacker(&b, i, r, meta.Resources[i]); err != nil {
-			return "", err
-		}
-	}
-
-	// Runtime WebGPU kernel object. Bind-group layouts are generated from Tach's
-	// own ABI metadata, including empty groups needed to preserve group indices.
-	b.WriteString(`class TachKernel {
-  constructor(device, shaderModule, info) {
-    this.device = device;
-    this.metadata = info;
-    const grouped = new Map();
-    let maxGroup = -1;
-    for (const p of info.resources) {
-      const r = metadata.resources[p.resource];
-      maxGroup = Math.max(maxGroup, r.group);
-      let entries = grouped.get(r.group);
-      if (!entries) grouped.set(r.group, entries = []);
-      entries.push({
-        binding: r.binding,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: {
-          type: r.kind === "uniform" ? "uniform" : (r.access === "read_write" ? "storage" : "read-only-storage"),
-          minBindingSize: r.minBindingSize,
-        },
-      });
-    }
-    this.bindGroupLayouts = [];
-    for (let group = 0; group <= maxGroup; group++) {
-      const entries = grouped.get(group) ?? [];
-      entries.sort((a, b) => a.binding - b.binding);
-      this.bindGroupLayouts.push(device.createBindGroupLayout({ label: "Tach " + info.name + " group " + group, entries }));
-    }
-    const layout = device.createPipelineLayout({ label: "Tach " + info.name + " layout", bindGroupLayouts: this.bindGroupLayouts });
-    this.pipeline = device.createComputePipeline({
-      label: "Tach " + info.name,
-      layout,
-      compute: { module: shaderModule, entryPoint: info.entryPoint },
-    });
-  }
-  bind(resources) {
-    const grouped = new Map();
-    for (const p of this.metadata.resources) {
-      const r = metadata.resources[p.resource];
-      if (!(p.param in resources)) throw new TypeError("missing Tach resource " + p.param);
-      let entries = grouped.get(r.group);
-      if (!entries) grouped.set(r.group, entries = []);
-      entries.push({ binding: r.binding, resource: __binding(resources[p.param]) });
-    }
-    const groups = [];
-    for (let group = 0; group < this.bindGroupLayouts.length; group++) {
-      const entries = grouped.get(group) ?? [];
-      entries.sort((a, b) => a.binding - b.binding);
-      groups.push(this.device.createBindGroup({ label: "Tach " + this.metadata.name + " group " + group, layout: this.bindGroupLayouts[group], entries }));
-    }
-    return groups;
-  }
-  encodeBound(pass, bindGroups, workgroups) {
-    const [x, y, z] = __workgroups(workgroups);
-    pass.setPipeline(this.pipeline);
-    for (let i = 0; i < bindGroups.length; i++) pass.setBindGroup(i, bindGroups[i]);
-    pass.dispatchWorkgroups(x, y, z);
-  }
-  encode(pass, resources, workgroups) { this.encodeBound(pass, this.bind(resources), workgroups); }
-  dispatch(encoder, resources, workgroups, passDescriptor) {
-    const pass = encoder.beginComputePass(passDescriptor);
-    this.encode(pass, resources, workgroups);
-    pass.end();
-  }
-}
-
-export function createTachProgram(device) {
-  const shaderModule = device.createShaderModule({ label: "Tach shader module", code: wgsl });
-  const kernels = Object.create(null);
-  for (const info of metadata.kernels) kernels[info.name] = new TachKernel(device, shaderModule, info);
-  return Object.freeze({ device, shaderModule, kernels: Object.freeze(kernels), metadata });
-}
-`)
-	return b.String(), nil
-}
-
-func writerName(t *types.Type) string {
-	switch t.Kind {
-	case types.I32:
-		return "__write_i32"
-	case types.U32:
-		return "__write_u32"
-	case types.F32:
-		return "__write_f32"
-	case types.Atomic:
-		return writerName(t.Elem)
-	case types.Vector:
-		return fmt.Sprintf("__write_vec%d_%s", t.Lanes, safeIdent(t.Elem.String()))
-	case types.Struct:
-		return "__write_" + safeIdent(t.Name)
-	case types.FixedArray:
-		return fmt.Sprintf("__write_array_%d_%s", t.Count, safeIdent(typeToken(t.Elem)))
-	case types.RuntimeArray:
-		return "__write_runtime_" + safeIdent(typeToken(t.Elem))
-	}
-	return "__write_invalid"
-}
-func typeToken(t *types.Type) string {
-	return strings.NewReplacer("<", "_", ">", "_", "[", "_", "]", "_", ",", "_", " ", "_").Replace(t.String())
-}
-
-func emitWriter(b *strings.Builder, t *types.Type) error {
-	name := writerName(t)
-	// Emit dependencies lazily through generated inline recursion is hard to dedupe;
-	// scalar/vector/runtime helpers are emitted once from a registry below via a
-	// local recursive walk per struct guarded by text-name set at generator level.
-	_ = name
-	return emitWriterSet(b, t, map[string]bool{})
-}
-
-// writerEmitted is intentionally encoded into the generated text marker search
-// rather than global Go state, keeping Generate reentrant.
-func emitWriterSet(b *strings.Builder, t *types.Type, seen map[string]bool) error {
-	// Atomics have the same host representation as their scalar element. Resolve
-	// that alias before deduplication so the shared scalar writer is actually
-	// emitted instead of marking its own name as already in progress.
 	if t.Kind == types.Atomic {
-		t = t.Elem
+		return describeHostLayout(t.Elem)
 	}
-	key := writerName(t)
-	if strings.Contains(b.String(), "function "+key+"(") {
-		return nil
+	l, err := layout.Of(t)
+	if err != nil {
+		return nil, err
 	}
-	if seen[key] {
-		return nil
+	description := &hostLayout{
+		Size:    l.Size,
+		Stride:  l.Stride,
+		Runtime: l.Runtime,
 	}
-	seen[key] = true
 	switch t.Kind {
 	case types.I32:
-		fmt.Fprintf(b, "function %s(v, o, x) { v.setInt32(o, x, true); }\n", key)
+		description.Kind = "i32"
 	case types.U32:
-		fmt.Fprintf(b, "function %s(v, o, x) { v.setUint32(o, x, true); }\n", key)
+		description.Kind = "u32"
 	case types.F32:
-		fmt.Fprintf(b, "function %s(v, o, x) { v.setFloat32(o, x, true); }\n", key)
+		description.Kind = "f32"
 	case types.Vector:
-		if err := emitWriterSet(b, t.Elem, seen); err != nil {
-			return err
-		}
-		fmt.Fprintf(b, "function %s(v, o, x) {", key)
-		for i := 0; i < t.Lanes; i++ {
-			fmt.Fprintf(b, " %s(v, o + %d, x[%d]);", writerName(t.Elem), i*4, i)
-		}
-		b.WriteString(" }\n")
+		description.Kind = "vector"
+		description.Count = uint32(t.Lanes)
+		description.Elem, err = describeHostLayout(t.Elem)
 	case types.FixedArray:
-		if err := emitWriterSet(b, t.Elem, seen); err != nil {
-			return err
-		}
-		l, err := layout.Of(t)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(b, "function %s(v, o, x) { if (x.length !== %d) throw new RangeError(\"Tach fixed array expects %d elements\"); for (let i = 0; i < %d; i++) %s(v, o + i * %d, x[i]); }\n", key, t.Count, t.Count, t.Count, writerName(t.Elem), l.Stride)
+		description.Kind = "array"
+		description.Count = t.Count
+		description.Elem, err = describeHostLayout(t.Elem)
 	case types.RuntimeArray:
-		if err := emitWriterSet(b, t.Elem, seen); err != nil {
-			return err
-		}
-		l, err := layout.Of(t)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(b, "function %s(v, o, x) { for (let i = 0; i < x.length; i++) %s(v, o + i * %d, x[i]); }\n", key, writerName(t.Elem), l.Stride)
+		description.Kind = "runtime"
+		description.Elem, err = describeHostLayout(t.Elem)
 	case types.Struct:
-		for _, f := range t.Fields {
-			if err := emitWriterSet(b, f.Type, seen); err != nil {
-				return err
+		description.Kind = "struct"
+		description.Fields = []hostLayoutField{}
+		for index, field := range t.Fields {
+			fieldDescription, fieldErr := describeHostLayout(field.Type)
+			if fieldErr != nil {
+				return nil, fieldErr
 			}
+			description.Fields = append(description.Fields, hostLayoutField{
+				Name:   field.Name,
+				Offset: l.Fields[index].Offset,
+				Type:   fieldDescription,
+			})
 		}
-		l, err := layout.Of(t)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(b, "function %s(v, o, x) {\n", key)
-		for i, f := range t.Fields {
-			fmt.Fprintf(b, "  %s(v, o + %d, x[%s]);\n", writerName(f.Type), l.Fields[i].Offset, jsQuote(f.Name))
-		}
-		b.WriteString("}\n")
 	default:
-		return fmt.Errorf("cannot generate host writer for %s", t)
+		return nil, fmt.Errorf("cannot describe host type %s", t)
 	}
-	return nil
+	if err != nil {
+		return nil, err
+	}
+	return description, nil
 }
 
-func dynamicSizeExpr(t *types.Type, value string) (string, error) {
-	l, err := layout.Of(t)
+type runtimeResource struct {
+	Name            string      `json:"name"`
+	Group           uint32      `json:"group"`
+	Binding         uint32      `json:"binding"`
+	Kind            string      `json:"kind"`
+	Access          string      `json:"access"`
+	ByteSize        uint32      `json:"byteSize,omitempty"`
+	MinimumByteSize uint32      `json:"minimumByteSize"`
+	Runtime         bool        `json:"runtime"`
+	Layout          *hostLayout `json:"layout"`
+}
+
+func runtimeResources(m *ir.Module, meta *Metadata) ([]runtimeResource, error) {
+	out := make([]runtimeResource, len(m.Resources))
+	for index, resource := range m.Resources {
+		description, err := describeHostLayout(resource.Type)
+		if err != nil {
+			return nil, fmt.Errorf("resource %s: %w", resource.Name, err)
+		}
+		item := meta.Resources[index]
+		out[index] = runtimeResource{
+			Name:            item.Name,
+			Group:           item.Group,
+			Binding:         item.Binding,
+			Kind:            item.Kind,
+			Access:          item.Access,
+			ByteSize:        item.ByteSize,
+			MinimumByteSize: item.MinimumByteSize,
+			Runtime:         item.Runtime,
+			Layout:          description,
+		}
+	}
+	return out, nil
+}
+
+func jsQuote(s string) string {
+	value, _ := json.Marshal(s)
+	return string(value)
+}
+
+func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, error) {
+	resources, err := runtimeResources(m, meta)
 	if err != nil {
 		return "", err
 	}
-	if !l.Runtime {
-		return fmt.Sprintf("%d", l.Size), nil
+	resourcesJSON, err := json.Marshal(resources)
+	if err != nil {
+		return "", err
 	}
-	if t.Kind == types.RuntimeArray {
-		return fmt.Sprintf("(%s.length * %d)", value, l.Stride), nil
+	kernelsJSON, err := json.Marshal(meta.Kernels)
+	if err != nil {
+		return "", err
 	}
-	last := len(t.Fields) - 1
-	fl := l.Fields[last]
-	return fmt.Sprintf("(%d + %s[%s].length * %d)", fl.Offset, value, jsQuote(t.Fields[last].Name), fl.Layout.Stride), nil
+	for _, kernel := range meta.Kernels {
+		if err := validateKernelExportName(kernel.Name); err != nil {
+			return "", err
+		}
+		hasStorage := false
+		for _, parameter := range kernel.Resources {
+			if !isASCIIIdentifier(parameter.Name) || typeScriptKeywords[parameter.Name] {
+				return "", fmt.Errorf(
+					"Tach parameter name %q is not a portable JavaScript identifier",
+					parameter.Name,
+				)
+			}
+			if m.Resources[parameter.Resource].Kind == ir.Storage {
+				hasStorage = true
+			}
+		}
+		if !hasStorage {
+			return "", fmt.Errorf("Tach kernel %q has no storage parameter to carry its GPUDevice", kernel.Name)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("// Generated by Tach. Typed WebGPU module.\n")
+	b.WriteString("// Rebuild this file from its .tach source; its public API mirrors that source.\n\n")
+	b.WriteString("import { defineModule as $defineModule } from \"@depths/tach/internal\";\n\n")
+	b.WriteString("const $tach = $defineModule({\n")
+	fmt.Fprintf(&b, "  source: %s,\n", jsQuote(wgslSource))
+	fmt.Fprintf(&b, "  resources: %s,\n", resourcesJSON)
+	fmt.Fprintf(&b, "  kernels: %s,\n", kernelsJSON)
+	b.WriteString("});\n\n")
+	for index, kernel := range meta.Kernels {
+		fmt.Fprintf(&b, "export function %s(", kernel.Name)
+		for parameterIndex, parameter := range kernel.Resources {
+			if parameterIndex > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(parameter.Name)
+		}
+		if len(kernel.Resources) > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("$size) {\n")
+		fmt.Fprintf(&b, "  return $tach.run(%d, [", index)
+		for parameterIndex, parameter := range kernel.Resources {
+			if parameterIndex > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(parameter.Name)
+		}
+		b.WriteString("], $size);\n}\n\n")
+	}
+	return b.String(), nil
 }
 
-func emitStructPacker(b *strings.Builder, t *types.Type) error {
-	l, err := layout.Of(t)
-	if err != nil {
-		return err
+var typeScriptKeywords = map[string]bool{
+	"any": true, "as": true, "asserts": true, "async": true, "await": true, "bigint": true,
+	"boolean": true, "break": true, "case": true, "catch": true, "class": true, "const": true,
+	"constructor": true, "continue": true, "declare": true, "default": true, "delete": true,
+	"do": true, "else": true, "enum": true, "export": true, "extends": true, "false": true,
+	"finally": true, "for": true, "from": true, "function": true, "get": true, "if": true,
+	"implements": true, "import": true, "in": true, "infer": true, "instanceof": true,
+	"interface": true, "is": true, "keyof": true, "let": true, "module": true, "namespace": true,
+	"never": true, "new": true, "null": true, "number": true, "object": true, "of": true,
+	"package": true, "private": true, "protected": true, "public": true, "readonly": true,
+	"require": true, "return": true, "set": true, "static": true, "string": true, "super": true,
+	"switch": true, "symbol": true, "this": true, "throw": true, "true": true, "try": true,
+	"type": true, "typeof": true, "undefined": true, "unique": true, "unknown": true,
+	"using": true, "var": true, "void": true, "while": true, "with": true, "yield": true,
+}
+
+func isASCIIIdentifier(s string) bool {
+	if s == "" {
+		return false
 	}
-	safe := safeIdent(t.Name)
-	sizeExpr, err := dynamicSizeExpr(t, "value")
-	if err != nil {
-		return err
+	for index, r := range s {
+		if r >= 128 || !(r == '_' || unicode.IsLetter(r) || index > 0 && unicode.IsDigit(r)) {
+			return false
+		}
 	}
-	if l.Runtime {
-		fmt.Fprintf(b, "export function byteSize%s(value) { return %s; }\n", safe, sizeExpr)
-	} else {
-		fmt.Fprintf(b, "export const byteSize%s = %d;\n", safe, l.Size)
+	return true
+}
+
+func typeScriptTypeName(name string) (string, error) {
+	if !isASCIIIdentifier(name) || typeScriptKeywords[name] {
+		return "", fmt.Errorf("Tach type name %q is not a portable TypeScript type identifier", name)
 	}
-	fmt.Fprintf(b, "export function pack%s(value, target, byteOffset = 0) {\n", safe)
-	if l.Runtime {
-		fmt.Fprintf(b, "  const size = byteSize%s(value);\n", safe)
-	} else {
-		fmt.Fprintf(b, "  const size = byteSize%s;\n", safe)
+	if name == "ComputeBuffer" {
+		return "", fmt.Errorf("Tach type name %q conflicts with the imported ComputeBuffer type", name)
 	}
-	b.WriteString("  const t = __target(target, byteOffset, size);\n")
-	fmt.Fprintf(b, "  %s(__view(t), 0, value);\n", writerName(t))
-	b.WriteString("  return t.bytes;\n}\n\n")
+	return name, nil
+}
+
+func validateKernelExportName(name string) error {
+	if !isASCIIIdentifier(name) || typeScriptKeywords[name] {
+		return fmt.Errorf("Tach kernel name %q is not a portable JavaScript export name", name)
+	}
 	return nil
 }
 
-func resourceHelperName(i int, r ir.Resource) string {
-	return fmt.Sprintf("%s_g%d_b%d", safeIdent(r.Name), r.Group, r.Binding)
-}
-func resourceUsageExpr(r ir.Resource) string {
-	if r.Kind == ir.Uniform {
-		return "GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST"
+func tsProperty(name string) string {
+	if isASCIIIdentifier(name) {
+		return name
 	}
-	return "GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC"
-}
-
-func emitResourcePacker(b *strings.Builder, i int, r ir.Resource, rm ResourceMeta) error {
-	h := resourceHelperName(i, r)
-	sizeExpr, err := dynamicSizeExpr(r.Type, "value")
-	if err != nil {
-		return err
-	}
-	if rm.Runtime {
-		fmt.Fprintf(b, "export function byteSize_%s(value) { return %s; }\n", h, sizeExpr)
-	} else {
-		fmt.Fprintf(b, "export const byteSize_%s = %d;\n", h, rm.BindingSize)
-	}
-	fmt.Fprintf(b, "export function pack_%s(value, target, byteOffset = 0) {\n", h)
-	if rm.Runtime {
-		fmt.Fprintf(b, "  const size = byteSize_%s(value);\n", h)
-		fmt.Fprintf(b, "  if (size < %d) throw new RangeError(%s);\n", rm.MinBindingSize, jsQuote("Tach runtime resource "+r.Name+" requires at least one element"))
-	} else {
-		fmt.Fprintf(b, "  const size = byteSize_%s;\n", h)
-	}
-	b.WriteString("  const t = __target(target, byteOffset, size);\n")
-	fmt.Fprintf(b, "  %s(__view(t), 0, value);\n", writerName(r.Type))
-	b.WriteString("  return t.bytes;\n}\n")
-	fmt.Fprintf(b, "export function create_%s(device, value, usage = %s) { return __upload(device, pack_%s(value), usage, %s); }\n", h, resourceUsageExpr(r), h, jsQuote("Tach "+r.Name))
-	fmt.Fprintf(b, "export function write_%s(device, buffer, value, offset = 0) { const bytes = pack_%s(value); device.queue.writeBuffer(buffer, offset, bytes.buffer, bytes.byteOffset, bytes.byteLength); return bytes.byteLength; }\n\n", h, h)
-	return nil
+	return jsQuote(name)
 }
 
 func emitDeclarations(m *ir.Module, meta *Metadata) (string, error) {
-	var b strings.Builder
-	b.WriteString("// Generated by Tach. TypeScript declarations for the browser bindings.\n\n")
 	for _, t := range m.Structs {
-		fmt.Fprintf(&b, "export interface %s {\n", safeIdent(t.Name))
-		for _, f := range t.Fields {
-			fmt.Fprintf(&b, "  %s: %s;\n", safeIdent(f.Name), tsType(f.Type))
+		if _, err := typeScriptTypeName(t.Name); err != nil {
+			return "", err
 		}
-		b.WriteString("}\n\n")
 	}
-	b.WriteString(`export type TachBufferBinding = GPUBuffer | GPUBufferBinding;
-export interface TachKernel<R> {
-  readonly metadata: Readonly<Record<string, unknown>>;
-  readonly pipeline: GPUComputePipeline;
-  bind(resources: R): readonly GPUBindGroup[];
-  encodeBound(pass: GPUComputePassEncoder, bindGroups: readonly GPUBindGroup[], workgroups: number | readonly [number, number?, number?]): void;
-  encode(pass: GPUComputePassEncoder, resources: R, workgroups: number | readonly [number, number?, number?]): void;
-  dispatch(encoder: GPUCommandEncoder, resources: R, workgroups: number | readonly [number, number?, number?], passDescriptor?: GPUComputePassDescriptor): void;
-}
+	for _, kernel := range meta.Kernels {
+		if err := validateKernelExportName(kernel.Name); err != nil {
+			return "", err
+		}
+	}
 
-`)
-	for _, k := range meta.Kernels {
-		tn := safeIdent(k.Name) + "Resources"
-		fmt.Fprintf(&b, "export interface %s {\n", tn)
-		for _, p := range k.Resources {
-			fmt.Fprintf(&b, "  %s: TachBufferBinding;\n", safeIdent(p.Param))
+	var b strings.Builder
+	b.WriteString("// Generated by Tach. Typed WebGPU module.\n\n")
+	b.WriteString("import type { ComputeBuffer } from \"@depths/tach\";\n\n")
+	for _, t := range m.Structs {
+		name, _ := typeScriptTypeName(t.Name)
+		fmt.Fprintf(&b, "export interface %s {\n", name)
+		for _, field := range t.Fields {
+			fmt.Fprintf(&b, "  readonly %s: %s;\n", tsProperty(field.Name), tsType(field.Type))
 		}
 		b.WriteString("}\n\n")
 	}
-	for _, t := range m.Structs {
-		l, _ := layout.Of(t)
-		safe := safeIdent(t.Name)
-		if l.Runtime {
-			fmt.Fprintf(&b, "export function byteSize%s(value: %s): number;\n", safe, safe)
-		} else {
-			fmt.Fprintf(&b, "export const byteSize%s: %d;\n", safe, l.Size)
+	for _, kernel := range meta.Kernels {
+		fmt.Fprintf(&b, "export function %s(\n", kernel.Name)
+		sizeName := "size"
+		for _, parameter := range kernel.Resources {
+			resource := m.Resources[parameter.Resource]
+			parameterType := tsType(resource.Type)
+			if resource.Kind == ir.Storage {
+				parameterType = "ComputeBuffer<" + parameterType + ">"
+			}
+			fmt.Fprintf(&b, "  %s: %s,\n", parameter.Name, parameterType)
+			if parameter.Name == sizeName {
+				sizeName = "$size"
+			}
 		}
-		fmt.Fprintf(&b, "export function pack%s(value: %s, target?: ArrayBuffer | ArrayBufferView, byteOffset?: number): Uint8Array;\n", safe, safe)
+		fmt.Fprintf(&b, "  %s?: number | readonly [x: number, y?: number, z?: number],\n", sizeName)
+		b.WriteString("): Promise<void>;\n\n")
 	}
-	b.WriteString("\n")
-	for i, r := range m.Resources {
-		h := resourceHelperName(i, r)
-		val := tsType(r.Type)
-		if meta.Resources[i].Runtime {
-			fmt.Fprintf(&b, "export function byteSize_%s(value: %s): number;\n", h, val)
-		} else {
-			fmt.Fprintf(&b, "export const byteSize_%s: %d;\n", h, meta.Resources[i].BindingSize)
-		}
-		fmt.Fprintf(&b, "export function pack_%s(value: %s, target?: ArrayBuffer | ArrayBufferView, byteOffset?: number): Uint8Array;\n", h, val)
-		fmt.Fprintf(&b, "export function create_%s(device: GPUDevice, value: %s, usage?: GPUBufferUsageFlags): GPUBuffer;\n", h, val)
-		fmt.Fprintf(&b, "export function write_%s(device: GPUDevice, buffer: GPUBuffer, value: %s, offset?: number): number;\n", h, val)
-	}
-	b.WriteString("\nexport const wgsl: string;\nexport const metadata: Readonly<Record<string, unknown>>;\n")
-	b.WriteString("export interface TachProgram {\n  readonly device: GPUDevice;\n  readonly shaderModule: GPUShaderModule;\n  readonly metadata: typeof metadata;\n  readonly kernels: {\n")
-	for _, k := range meta.Kernels {
-		fmt.Fprintf(&b, "    readonly %s: TachKernel<%sResources>;\n", safeIdent(k.Name), safeIdent(k.Name))
-	}
-	b.WriteString("  };\n}\nexport function createTachProgram(device: GPUDevice): TachProgram;\n")
 	return b.String(), nil
 }
 
@@ -619,169 +511,65 @@ func tsType(t *types.Type) string {
 		return "number"
 	case types.Vector:
 		parts := make([]string, t.Lanes)
-		for i := range parts {
-			parts[i] = "number"
+		for index := range parts {
+			parts[index] = "number"
 		}
 		return "readonly [" + strings.Join(parts, ", ") + "]"
 	case types.Struct:
-		return safeIdent(t.Name)
-	case types.FixedArray:
-		return "readonly " + tsType(t.Elem) + "[]"
-	case types.RuntimeArray:
+		return t.Name
+	case types.FixedArray, types.RuntimeArray:
 		return "readonly " + tsType(t.Elem) + "[]"
 	}
 	return "never"
 }
 
-// ValidateGenerated validates the cross-artifact contract owned by Tach: JSON
-// metadata shape/version, mandatory JS exports, balanced generated delimiters,
-// and declaration/export correspondence. It intentionally validates Tach's
-// generated grammar rather than accepting arbitrary JavaScript.
+// ValidateGenerated checks the compiler-owned cross-artifact invariants. It is
+// intentionally scoped to generated output rather than arbitrary JavaScript.
 func ValidateGenerated(js, dts string, metaJSON []byte) error {
-	var m Metadata
-	if err := json.Unmarshal(metaJSON, &m); err != nil {
+	var metadata Metadata
+	if err := json.Unmarshal(metaJSON, &metadata); err != nil {
 		return fmt.Errorf("metadata JSON: %w", err)
 	}
-	if m.Format != metadataFormat {
-		return fmt.Errorf("metadata format %q", m.Format)
-	}
-	if m.ABI.Layout != "tach-portable-v1" || m.ABI.Endianness != "little" {
-		return fmt.Errorf("unexpected ABI descriptor")
-	}
-	for _, needle := range []string{"export const wgsl =", "export const metadata =", "export function createTachProgram(device)", "class TachKernel"} {
+	for _, needle := range []string{
+		"import { defineModule as $defineModule } from \"@depths/tach/internal\"",
+		"const $tach = $defineModule({",
+	} {
 		if !strings.Contains(js, needle) {
 			return fmt.Errorf("JavaScript missing %q", needle)
 		}
 	}
-	if err := balancedGeneratedJS(js); err != nil {
-		return err
-	}
-	for _, k := range m.Kernels {
-		if !strings.Contains(dts, "interface "+safeIdent(k.Name)+"Resources") {
-			return fmt.Errorf("declarations missing kernel %s", k.Name)
-		}
+	if !strings.Contains(dts, "import type { ComputeBuffer } from \"@depths/tach\"") {
+		return fmt.Errorf("TypeScript declarations are missing the compute buffer import")
 	}
 	pairs := map[[2]uint32]bool{}
-	for _, r := range m.Resources {
-		p := [2]uint32{r.Group, r.Binding}
-		if pairs[p] {
-			return fmt.Errorf("duplicate metadata binding %v", p)
+	for _, resource := range metadata.Resources {
+		pair := [2]uint32{resource.Group, resource.Binding}
+		if pairs[pair] {
+			return fmt.Errorf("duplicate metadata binding %v", pair)
 		}
-		pairs[p] = true
-		if r.Runtime && r.MinBindingSize != r.RuntimeOffset+r.RuntimeStride {
-			return fmt.Errorf("runtime resource %s minimum binding size invariant failed", r.Name)
+		pairs[pair] = true
+		if resource.Runtime &&
+			resource.MinimumByteSize != resource.RuntimeOffset+resource.RuntimeStride {
+			return fmt.Errorf(
+				"runtime resource %s minimum byte-size invariant failed",
+				resource.Name,
+			)
 		}
-		if !r.Runtime && (r.BindingSize == 0 || r.MinBindingSize != r.BindingSize || r.BindingSize < r.ValueSize || r.BindingSize%16 != 0) {
-			return fmt.Errorf("fixed resource %s binding-size invariant failed", r.Name)
+		if !resource.Runtime &&
+			(resource.ByteSize == 0 ||
+				resource.MinimumByteSize != resource.ByteSize ||
+				resource.ByteSize%16 != 0) {
+			return fmt.Errorf("fixed resource %s byte-size invariant failed", resource.Name)
+		}
+	}
+	for _, kernel := range metadata.Kernels {
+		if kernel.EntryPoint != kernel.Name {
+			return fmt.Errorf("kernel %s has mangled entry point %q", kernel.Name, kernel.EntryPoint)
+		}
+		export := "export function " + kernel.Name + "("
+		if !strings.Contains(js, export) || !strings.Contains(dts, export) {
+			return fmt.Errorf("generated bindings are missing kernel function %s", kernel.Name)
 		}
 	}
 	return nil
-}
-
-func balancedGeneratedJS(s string) error {
-	var stack []rune
-	inString := rune(0)
-	escape := false
-	inLine := false
-	inBlock := false
-	inTemplate := false
-	for i := 0; i < len(s); i++ {
-		c := rune(s[i])
-		n := rune(0)
-		if i+1 < len(s) {
-			n = rune(s[i+1])
-		}
-		if inLine {
-			if c == '\n' {
-				inLine = false
-			}
-			continue
-		}
-		if inBlock {
-			if c == '*' && n == '/' {
-				inBlock = false
-				i++
-			}
-			continue
-		}
-		if inString != 0 {
-			if escape {
-				escape = false
-				continue
-			}
-			if c == '\\' {
-				escape = true
-				continue
-			}
-			if c == inString {
-				inString = 0
-			}
-			continue
-		}
-		if inTemplate {
-			if escape {
-				escape = false
-				continue
-			}
-			if c == '\\' {
-				escape = true
-				continue
-			}
-			if c == '`' {
-				inTemplate = false
-			}
-			continue
-		}
-		if c == '/' && n == '/' {
-			inLine = true
-			i++
-			continue
-		}
-		if c == '/' && n == '*' {
-			inBlock = true
-			i++
-			continue
-		}
-		if c == '\'' || c == '"' {
-			inString = c
-			continue
-		}
-		if c == '`' {
-			inTemplate = true
-			continue
-		}
-		switch c {
-		case '(', '[', '{':
-			stack = append(stack, c)
-		case ')', ']', '}':
-			if len(stack) == 0 {
-				return fmt.Errorf("generated JS closes %c without opener", c)
-			}
-			o := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if (o == '(' && c != ')') || (o == '[' && c != ']') || (o == '{' && c != '}') {
-				return fmt.Errorf("generated JS mismatched %c and %c", o, c)
-			}
-		}
-	}
-	if inString != 0 || inBlock || inTemplate {
-		return fmt.Errorf("generated JS has unterminated literal/comment")
-	}
-	if len(stack) != 0 {
-		return fmt.Errorf("generated JS has unclosed delimiter %c", stack[len(stack)-1])
-	}
-	return nil
-}
-
-// StableResourceOrder is exposed for consumers that want to reproduce Tach's
-// canonical descriptor ordering in native bindings.
-func StableResourceOrder(meta *Metadata) []ResourceMeta {
-	out := append([]ResourceMeta(nil), meta.Resources...)
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Group != out[j].Group {
-			return out[i].Group < out[j].Group
-		}
-		return out[i].Binding < out[j].Binding
-	})
-	return out
 }

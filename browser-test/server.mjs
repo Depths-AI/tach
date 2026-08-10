@@ -5,6 +5,8 @@ import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
+const tachDist = dirname(fileURLToPath(import.meta.resolve("@depths/tach")));
+const tachPrefix = "/@depths/tach/";
 const host = "127.0.0.1";
 const port = Number.parseInt(process.env.PORT ?? "4173", 10);
 const contentTypes = new Map([
@@ -36,8 +38,12 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  const filePath = resolve(root, `.${pathname}`);
-  if (filePath !== root && !filePath.startsWith(root + sep)) {
+  const contentRoot = pathname.startsWith(tachPrefix) ? tachDist : root;
+  const contentPath = pathname.startsWith(tachPrefix)
+    ? pathname.slice(tachPrefix.length)
+    : pathname.slice(1);
+  const filePath = resolve(contentRoot, contentPath);
+  if (filePath !== contentRoot && !filePath.startsWith(contentRoot + sep)) {
     response.writeHead(403);
     response.end("forbidden\n");
     return;

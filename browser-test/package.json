@@ -2,7 +2,8 @@
   "name": "@tach/browser-test",
   "version": "0.0.0",
   "private": true,
-  "description": "Standalone headless-browser and WebGPU harness for Tach-generated modules",
+  "license": "AGPL-3.0-only",
+  "description": "Private headless-browser and WebGPU harness for Tach-generated modules",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -11,10 +12,13 @@
     "build:examples": "node scripts/build-examples.mjs",
     "install:browser": "playwright install --with-deps chromium",
     "start": "node server.mjs",
-    "test": "npm run build:examples && playwright test",
-    "test:interface": "npm run build:examples && playwright test tests/interface.spec.mjs",
-    "test:headed": "npm run build:examples && playwright test --headed",
+    "test": "playwright test",
+    "test:interface": "playwright test tests/interface.spec.mjs",
+    "test:headed": "playwright test --headed",
     "report": "playwright show-report"
+  },
+  "dependencies": {
+    "@depths/tach": "0.0.0"
   },
   "devDependencies": {
     "@playwright/test": "1.62.0"

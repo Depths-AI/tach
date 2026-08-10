@@ -88,8 +88,6 @@ func emit(dst *[]uint32, op Op, operands ...uint32) int {
 	return start
 }
 
-func appendInst(dst *[]uint32, op Op, operands []uint32) int { return emit(dst, op, operands...) }
-
 func encodeString(s string) []uint32 {
 	buf := append([]byte(s), 0)
 	for len(buf)%4 != 0 {
@@ -303,7 +301,7 @@ func (b *builder) emitStructDebugAndLayouts() error {
 		emit(&b.debug, OpName, append([]uint32{id}, encodeString(t.Name)...)...)
 		for i, f := range t.Fields {
 			ops := []uint32{id, uint32(i)}
-			ops = append(ops, encodeString(abi.KernelEntry(f.Name))...)
+			ops = append(ops, encodeString(f.Name)...)
 			emit(&b.debug, OpMemberName, ops...)
 		}
 	}
