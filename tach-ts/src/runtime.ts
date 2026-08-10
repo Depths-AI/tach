@@ -25,6 +25,13 @@ export interface ComputeBuffer<T> {
   destroy(): void;
 }
 
+export type DispatchSize = number | readonly [x: number, y?: number, z?: number];
+
+export interface DispatchOptions {
+  readonly size?: DispatchSize;
+  readonly dispatches?: number;
+}
+
 export interface TachOptions {
   readonly gpu?: GPU;
   readonly adapter?: GPURequestAdapterOptions;

@@ -1,0 +1,260 @@
+type ParticleParams = {
+  dt: f32,
+  count: u32,
+};
+
+type FractalParams = {
+  width: u32,
+  height: u32,
+  maxIterations: u32,
+  scale: f32,
+  centerX: f32,
+  centerY: f32,
+};
+
+type MatrixParams = {
+  size: u32,
+};
+
+type OptionParams = {
+  count: u32,
+};
+
+type RenderParams = {
+  width: u32,
+  height: u32,
+  time: f32,
+};
+
+fn normalCDF(x: f32): f32 {
+  const magnitude = abs(x);
+  const t = 1.0 / (1.0 + 0.2316419 * magnitude);
+  const polynomial = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const density = 0.398942280 * exp(-0.5 * magnitude * magnitude);
+  const positive = 1.0 - density * polynomial;
+  return x < 0.0 ? 1.0 - positive : positive;
+}
+
+fn saturate(x: f32): f32 {
+  return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
+}
+
+fn smoothRange(edge0: f32, edge1: f32, x: f32): f32 {
+  const t = saturate((x - edge0) / (edge1 - edge0));
+  return t * t * (3.0 - 2.0 * t);
+}
+
+fn blend(base: f32, layer: f32, amount: f32): f32 {
+  return base + (layer - base) * saturate(amount);
+}
+
+fn hashPixel(x: u32, y: u32): f32 {
+  let value = x * 374761393u + y * 668265263u;
+  value = (value ^ (value >> 13u)) * 1274126177u;
+  value ^= value >> 16u;
+  return f32(value & 65535u) / 65535.0;
+}
+
+@workgroupSize(256)
+export compute integrateParticles(
+  positions: storage<f32[], read_write>,
+  velocities: storage<f32[], read>,
+  params: uniform<ParticleParams>,
+) {
+  const i = globalId.x;
+  if (i < params.count) {
+    positions[i] += velocities[i] * params.dt;
+  }
+}
+
+@workgroupSize(16, 16, 1)
+export compute mandelbrot(
+  output: storage<u32[], read_write>,
+  params: uniform<FractalParams>,
+) {
+  const x = globalId.x;
+  const y = globalId.y;
+  if (x >= params.width || y >= params.height) {
+    return;
+  }
+
+  const cx = (f32(x) - f32(params.width) * 0.5) * params.scale + params.centerX;
+  const cy = (f32(y) - f32(params.height) * 0.5) * params.scale + params.centerY;
+  let zx = 0.0;
+  let zy = 0.0;
+  let iteration = 0u;
+  while (iteration < params.maxIterations && zx * zx + zy * zy <= 4.0) {
+    const nextX = zx * zx - zy * zy + cx;
+    zy = 2.0 * zx * zy + cy;
+    zx = nextX;
+    iteration++;
+  }
+  output[y * params.width + x] = iteration;
+}
+
+@workgroupSize(16, 16, 1)
+export compute multiplyMatrices(
+  left: storage<f32[], read>,
+  right: storage<f32[], read>,
+  output: storage<f32[], read_write>,
+  params: uniform<MatrixParams>,
+) {
+  workgroup leftTile: f32[256];
+  workgroup rightTile: f32[256];
+
+  const row = globalId.y;
+  const column = globalId.x;
+  let sum = 0.0;
+  let tile = 0u;
+  while (tile < params.size) {
+    const leftColumn = tile + localId.x;
+    const rightRow = tile + localId.y;
+    if (row < params.size && leftColumn < params.size) {
+      leftTile[localIndex] = left[row * params.size + leftColumn];
+    } else {
+      leftTile[localIndex] = 0.0;
+    }
+    if (rightRow < params.size && column < params.size) {
+      rightTile[localIndex] = right[rightRow * params.size + column];
+    } else {
+      rightTile[localIndex] = 0.0;
+    }
+    workgroupBarrier();
+
+    for (let k = 0u; k < 16u; k++) {
+      sum += leftTile[localId.y * 16u + k] * rightTile[k * 16u + localId.x];
+    }
+    workgroupBarrier();
+    tile += 16u;
+  }
+
+  if (row < params.size && column < params.size) {
+    output[row * params.size + column] = sum;
+  }
+}
+
+@workgroupSize(256)
+export compute priceOptions(
+  output: storage<f32[], read_write>,
+  params: uniform<OptionParams>,
+) {
+  const i = globalId.x;
+  if (i >= params.count) {
+    return;
+  }
+
+  const spot = 80.0 + f32(i % 400u) * 0.1;
+  const strike = 90.0 + f32(i % 200u) * 0.1;
+  const years = 0.25 + f32(i % 365u) / 365.0;
+  const volatility = 0.15 + f32(i % 100u) * 0.001;
+  const rate = 0.03;
+  const sigmaRootTime = volatility * sqrt(years);
+  const d1 = (log(spot / strike) + (rate + 0.5 * volatility * volatility) * years) / sigmaRootTime;
+  const d2 = d1 - sigmaRootTime;
+  output[i] = spot * normalCDF(d1) - strike * exp(-rate * years) * normalCDF(d2);
+}
+
+@workgroupSize(16, 16, 1)
+export compute proceduralScene(
+  rgba: storage<u32[], read_write>,
+  params: uniform<RenderParams>,
+) {
+  const x = globalId.x;
+  const y = globalId.y;
+  if (x >= params.width || y >= params.height) {
+    return;
+  }
+
+  const u = (f32(x) + 0.5) / f32(params.width);
+  const v = (f32(y) + 0.5) / f32(params.height);
+  const aspect = f32(params.width) / f32(params.height);
+  const px = (u - 0.5) * aspect;
+  const py = 0.5 - v;
+
+  let red = 0.015 + 0.18 * v;
+  let green = 0.025 + 0.06 * v;
+  let blue = 0.11 + 0.22 * (1.0 - v);
+
+  const cloudWave = 0.5 + 0.5 * sin(px * 5.0 + sin(py * 9.0 + params.time) * 1.7);
+  const auroraHeight = 0.14 + 0.055 * sin(px * 3.2 + params.time * 0.7) +
+    0.025 * sin(px * 11.0 - params.time);
+  const aurora = exp(-abs(py - auroraHeight) * 20.0) * (0.35 + 0.65 * cloudWave);
+  red += aurora * 0.08;
+  green += aurora * 0.42;
+  blue += aurora * 0.48;
+
+  const sunX = px - 0.33;
+  const sunY = py - 0.12;
+  const sunDistance = sqrt(sunX * sunX + sunY * sunY);
+  const halo = exp(-sunDistance * 7.0);
+  const disk = smoothRange(0.145, 0.125, sunDistance);
+  const rings = exp(-abs(sunDistance - 0.205) * 95.0) +
+    0.55 * exp(-abs(sunDistance - 0.255) * 120.0);
+  red += halo * 0.38 + rings * 0.55;
+  green += halo * 0.08 + rings * 0.12;
+  blue += halo * 0.16 + rings * 0.68;
+  red = blend(red, 1.0, disk * 0.96);
+  green = blend(green, 0.44 + 0.3 * (sunY / 0.145 + 0.5), disk * 0.96);
+  blue = blend(blue, 0.16, disk * 0.96);
+
+  const cellSize = 12u;
+  const cellX = x / cellSize;
+  const cellY = y / cellSize;
+  const seed = hashPixel(cellX, cellY);
+  if (seed > 0.91 && py > -0.06) {
+    const centerX = 2.0 + hashPixel(cellX + 17u, cellY + 31u) * 8.0;
+    const centerY = 2.0 + hashPixel(cellX + 47u, cellY + 11u) * 8.0;
+    const starX = f32(x % cellSize) - centerX;
+    const starY = f32(y % cellSize) - centerY;
+    const core = exp(-(starX * starX + starY * starY) * 1.7);
+    const rays = 0.22 * exp(-abs(starX) * 4.0 - abs(starY) * 0.45) +
+      0.22 * exp(-abs(starY) * 4.0 - abs(starX) * 0.45);
+    const sparkle = (core + rays) * (0.45 + seed * 0.8);
+    red += sparkle;
+    green += sparkle * 0.88;
+    blue += sparkle * 1.15;
+  }
+
+  const distantHeight = -0.075 + 0.045 * sin(px * 6.5 + 0.4) +
+    0.022 * sin(px * 16.0 - 1.3);
+  const distant = smoothRange(distantHeight + 0.018, distantHeight - 0.012, py);
+  red = blend(red, 0.075, distant);
+  green = blend(green, 0.045, distant);
+  blue = blend(blue, 0.16, distant);
+  const ridge = exp(-abs(py - distantHeight) * 150.0);
+  red += ridge * 0.24;
+  blue += ridge * 0.38;
+
+  const nearHeight = -0.19 + 0.065 * sin(px * 4.3 - 0.8) +
+    0.038 * sin(px * 12.5 + 1.7);
+  const near = smoothRange(nearHeight + 0.014, nearHeight - 0.018, py);
+  red = blend(red, 0.018, near);
+  green = blend(green, 0.025, near);
+  blue = blend(blue, 0.055, near);
+
+  const ground = smoothRange(-0.20, -0.235, py);
+  const perspective = 0.57 + py;
+  const verticalGrid = exp(-abs(sin(px * 14.0 / perspective)) * 22.0);
+  const horizontalGrid = exp(-abs(sin(1.35 / perspective + params.time * 0.35)) * 24.0);
+  const grid = saturate(verticalGrid + horizontalGrid);
+  const reflection = exp(-abs(px - 0.33) * 7.0) *
+    (0.45 + 0.55 * sin(py * 210.0 + sin(px * 19.0) * 2.0));
+  red = blend(red, 0.018 + grid * 0.55 + reflection * 0.32, ground);
+  green = blend(green, 0.035 + grid * 0.12 + reflection * 0.06, ground);
+  blue = blend(blue, 0.09 + grid * 0.72 + reflection * 0.42, ground);
+
+  const vignette = saturate(1.0 - (px * px * 0.5 + (v - 0.5) * (v - 0.5)) * 1.35);
+  const grain = 0.97 + hashPixel(x + 101u, y + 79u) * 0.06;
+  const scanline = 0.975 + 0.025 * sin(f32(y) * 1.65);
+  const exposure = (0.62 + 0.38 * vignette) * grain * scanline;
+  red *= exposure;
+  green *= exposure;
+  blue *= exposure;
+  const alpha = 0.94 + 0.06 * vignette;
+
+  const red8 = u32(saturate(red) * 255.0 + 0.5);
+  const green8 = u32(saturate(green) * 255.0 + 0.5);
+  const blue8 = u32(saturate(blue) * 255.0 + 0.5);
+  const alpha8 = u32(saturate(alpha) * 255.0 + 0.5);
+  rgba[y * params.width + x] = red8 | (green8 << 8u) | (blue8 << 16u) | (alpha8 << 24u);
+}

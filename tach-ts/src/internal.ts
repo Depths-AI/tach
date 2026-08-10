@@ -3,6 +3,8 @@ import {
   type BufferCodec,
   type BufferState,
   type ComputeBuffer,
+  type DispatchOptions,
+  type DispatchSize,
   type RuntimeOwner,
 } from "./runtime.js";
 import { normalizeError, TachFailure, tachError } from "./result.js";
@@ -78,7 +80,7 @@ export interface DefinedModule {
   run(
     kernel: number,
     values: readonly unknown[],
-    size?: number | readonly [x: number, y?: number, z?: number],
+    options?: DispatchOptions,
   ): Promise<void>;
 }
 
@@ -248,6 +250,40 @@ function bytesOf(source: ArrayBuffer | ArrayBufferView): Uint8Array {
   return new Uint8Array(source);
 }
 
+const littleEndian = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+const scalarArrayConstructors = {
+  f32: Float32Array,
+  i32: Int32Array,
+  u32: Uint32Array,
+} as const;
+
+function scalarArrayConstructor(type: HostLayout): typeof Float32Array | typeof Int32Array | typeof Uint32Array | undefined {
+  if (type.kind !== "runtime") return undefined;
+  const kind = type.elem?.kind;
+  return kind === "f32" || kind === "i32" || kind === "u32"
+    ? scalarArrayConstructors[kind]
+    : undefined;
+}
+
+function packedScalarArray(type: HostLayout, value: unknown, path: string): Uint8Array | undefined {
+  const constructor = scalarArrayConstructor(type);
+  if (!constructor || !ArrayBuffer.isView(value)) return undefined;
+  if (!(value instanceof constructor)) {
+    throw new TypeError(`${path} must use ${constructor.name} when passed as a typed array`);
+  }
+  return littleEndian ? bytesOf(value) : undefined;
+}
+
+function unpackedScalarArray(
+  type: HostLayout,
+  source: ArrayBuffer | ArrayBufferView,
+  representation: unknown,
+): Float32Array | Int32Array | Uint32Array | undefined {
+  const constructor = scalarArrayConstructor(type);
+  if (!littleEndian || !constructor || !(representation instanceof constructor)) return undefined;
+  return new constructor(bytesOf(source).slice().buffer);
+}
+
 function byteLength(resource: ResourceDefinition, value: unknown): number {
   return resource.runtime
     ? logicalByteLength(resource.layout, value, resource.name)
@@ -262,12 +298,18 @@ function pack(resource: ResourceDefinition, value: unknown): Uint8Array {
   if (size < resource.minimumByteSize) {
     throw new RangeError(`${resource.name} requires at least ${resource.minimumByteSize} bytes`);
   }
+  const direct = packedScalarArray(resource.layout, value, resource.name);
+  if (direct) return direct;
   const bytes = new Uint8Array(size);
   writeValue(new DataView(bytes.buffer), 0, resource.layout, value, resource.name);
   return bytes;
 }
 
-function unpack(resource: ResourceDefinition, source: ArrayBuffer | ArrayBufferView): unknown {
+function unpack(
+  resource: ResourceDefinition,
+  source: ArrayBuffer | ArrayBufferView,
+  representation: unknown,
+): unknown {
   const bytes = bytesOf(source);
   if (bytes.byteLength < resource.minimumByteSize) {
     throw new RangeError(`${resource.name} requires at least ${resource.minimumByteSize} bytes`);
@@ -287,6 +329,8 @@ function unpack(resource: ResourceDefinition, source: ArrayBuffer | ArrayBufferV
       throw new RangeError(`${resource.name} has a partial runtime element`);
     }
   }
+  const direct = unpackedScalarArray(resource.layout, bytes, representation);
+  if (direct) return direct;
   return readValue(
     new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
     0,
@@ -317,7 +361,7 @@ function materialize<T>(state: BufferState<T>, resource: ResourceDefinition): GP
     const codec: BufferCodec<T> = {
       key,
       pack: (value) => pack(resource, value),
-      unpack: (source) => unpack(resource, source) as T,
+      unpack: (source) => unpack(resource, source, state.value) as T,
     };
     const bytes = codec.pack(state.value);
     const gpu = upload(
@@ -346,7 +390,7 @@ function runtimeLength(resource: ResourceDefinition, state: BufferState<unknown>
 }
 
 function workgroups(
-  invocations: number | readonly [x: number, y?: number, z?: number],
+  invocations: DispatchSize,
   workgroupSize: readonly [number, number, number],
 ): readonly [number, number, number] {
   const size = typeof invocations === "number" ? [invocations, 1, 1] : invocations;
@@ -364,6 +408,21 @@ function workgroups(
     Math.ceil(dimensions[1] / workgroupSize[1]),
     Math.ceil(dimensions[2] / workgroupSize[2]),
   ];
+}
+
+function dispatchOptions(value: DispatchOptions | undefined): {
+  readonly size: DispatchSize | undefined;
+  readonly dispatches: number;
+} {
+  if (value === undefined) return { size: undefined, dispatches: 1 };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("dispatch options must be an object");
+  }
+  const dispatches = value.dispatches ?? 1;
+  if (!Number.isSafeInteger(dispatches) || dispatches <= 0) {
+    throw new RangeError("dispatches must be a positive integer");
+  }
+  return { size: value.size, dispatches };
 }
 
 async function compileKernel(
@@ -448,7 +507,7 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
   async function run(
     kernelIndex: number,
     values: readonly unknown[],
-    size?: number | readonly [x: number, y?: number, z?: number],
+    options?: DispatchOptions,
   ): Promise<void> {
     const info = definition.kernels[kernelIndex];
     if (!info) {
@@ -531,8 +590,11 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
             entries,
           }));
         }
-        const groups = workgroups(size ?? inferredSize ?? info.workgroupSize, info.workgroupSize);
-        pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
+        const dispatch = dispatchOptions(options);
+        const groups = workgroups(dispatch.size ?? inferredSize ?? info.workgroupSize, info.workgroupSize);
+        for (let index = 0; index < dispatch.dispatches; index++) {
+          pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
+        }
         pass.end();
         owner.device.queue.submit([encoder.finish()]);
         return {

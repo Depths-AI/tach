@@ -13,8 +13,10 @@
     "check": "npm run kernel && tsc --noEmit",
     "build": "npm run check && vite build",
     "dev": "npm run kernel && vite",
+    "install:browser": "playwright install chromium",
     "preview": "vite preview",
-    "test": "npm run build && playwright test"
+    "test": "npm run build && playwright test",
+    "benchmark": "npm run build && playwright test --config=playwright.full.config.mjs"
   },
   "dependencies": {
     "@depths/tach": "0.0.0"

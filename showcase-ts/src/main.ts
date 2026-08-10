@@ -1,5 +1,5 @@
-import { tach } from "@depths/tach";
-import { integrate, type Particle } from "../build/particles.js";
+import { openTach } from "@depths/tach";
+import { runBenchmarks, type BenchmarkResult, type RenderedFrame } from "./benchmarks.js";
 import "./style.css";
 
 function required<T extends Element>(selector: string): T {
@@ -9,39 +9,97 @@ function required<T extends Element>(selector: string): T {
 }
 
 const status = required<HTMLParagraphElement>("#status");
+const adapter = required<HTMLSpanElement>("#adapter");
+const grid = required<HTMLElement>("#benchmarks");
+const summary = required<HTMLElement>("#summary");
 const output = required<HTMLPreElement>("#output");
+const canvas = required<HTMLCanvasElement>("#render-preview");
 
-async function main(): Promise<void> {
-  const initial: readonly Particle[] = [
-    {
-      position: [1, 2, 3, 1],
-      velocity: [2, 4, 6, 0],
-    },
-    {
-      position: [-1, -2, -3, 1],
-      velocity: [1, 2, 3, 0],
-    },
-  ];
-  const result = await tach(async (gpu) => {
-    const particles = gpu.buffer(initial);
-    await integrate(particles, {
-      dt: 0.5,
-      count: initial.length,
-    });
-    return particles.read();
-  });
-
-  if (!result.ok) {
-    status.textContent = "The showcase could not run.";
-    output.textContent = `[${result.error.code}] ${result.error.message}`;
-    return;
-  }
-
-  status.textContent = `Integrated ${result.value.length} particles on WebGPU.`;
-  output.textContent = JSON.stringify(result.value, null, 2);
+function milliseconds(value: number): string {
+  return value < 1 ? `${(value * 1000).toFixed(0)} μs` : `${value.toFixed(value < 10 ? 2 : 1)} ms`;
 }
 
-void main().catch((error: unknown) => {
-  status.textContent = "The showcase could not run.";
+function rate(value: number): string {
+  if (value >= 100) return value.toFixed(0);
+  if (value >= 10) return value.toFixed(1);
+  return value.toFixed(2);
+}
+
+function card(result: BenchmarkResult): HTMLElement {
+  const element = document.createElement("article");
+  element.className = "benchmark";
+  element.dataset.benchmark = result.id;
+  element.innerHTML = `
+    <div class="card-heading">
+      <div><p class="kind">${result.dispatches} dispatches per timed batch</p><h2>${result.name}</h2></div>
+      <span class="check ${result.correct ? "pass" : "fail"}">${result.correct ? "verified" : "mismatch"}</span>
+    </div>
+    <p class="description">${result.description}</p>
+    <p class="problem">${result.problem}; median of ${result.samples} samples</p>
+    <div class="metrics">
+      <div><span>WebGPU batch</span><strong>${milliseconds(result.gpuMs)}</strong></div>
+      <div><span>Pure TypeScript</span><strong>${milliseconds(result.cpuMs)}</strong></div>
+      <div class="speedup"><span>Acceleration</span><strong>${result.speedup.toFixed(2)}×</strong></div>
+    </div>
+    <div class="throughput">
+      <span>WebGPU ${rate(result.gpuRate)}</span>
+      <i style="--ratio:${Math.min(1, result.gpuRate / Math.max(result.gpuRate, result.cpuRate))}"></i>
+      <span>TypeScript ${rate(result.cpuRate)} ${result.rateUnit}</span>
+    </div>
+    <p class="verification">${result.check}</p>`;
+  return element;
+}
+
+function paint(frame: RenderedFrame): void {
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("the browser did not provide a 2D canvas context");
+  const rgba = new Uint8ClampedArray(frame.pixels.length * 4);
+  for (let index = 0; index < frame.pixels.length; index++) {
+    const packed = frame.pixels[index]!;
+    const offset = index * 4;
+    rgba[offset] = packed & 255;
+    rgba[offset + 1] = (packed >>> 8) & 255;
+    rgba[offset + 2] = (packed >>> 16) & 255;
+    rgba[offset + 3] = packed >>> 24;
+  }
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  context.putImageData(new ImageData(rgba, frame.width, frame.height), 0, 0);
+}
+
+async function main(): Promise<readonly BenchmarkResult[]> {
+  const opened = await openTach({ adapter: { powerPreference: "high-performance" } });
+  if (!opened.ok) {
+    throw new Error(`[${opened.error.code}] ${opened.error.message}`);
+  }
+  const gpu = opened.value;
+  const info = gpu.adapter.info;
+  adapter.textContent = [info.description, info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter";
+  const fast = new URLSearchParams(location.search).has("quick");
+
+  try {
+    const run = await runBenchmarks(gpu, fast, (name, index, total) => {
+      status.textContent = `Running ${index + 1} of ${total}: ${name}…`;
+    });
+    const results = run.results;
+    paint(run.frame);
+    grid.replaceChildren(...results.map(card));
+    const geometricMean = Math.exp(results.reduce((sum, item) => sum + Math.log(item.speedup), 0) / results.length);
+    const verified = results.every((item) => item.correct);
+    summary.innerHTML = `<strong>${geometricMean.toFixed(2)}×</strong><span>geometric-mean acceleration across five workloads</span>`;
+    summary.classList.toggle("failed", !verified);
+    status.textContent = `${verified ? "Verified" : "Completed"} 5 benchmarks on ${adapter.textContent}.`;
+    output.textContent = JSON.stringify(results, null, 2);
+    return results;
+  } finally {
+    gpu.close();
+  }
+}
+
+const ready = main().catch((error: unknown) => {
+  status.textContent = "The benchmark suite could not run.";
   output.textContent = error instanceof Error ? error.stack ?? error.message : String(error);
+  throw error;
 });
+
+globalThis.__tachShowcaseReady = ready;

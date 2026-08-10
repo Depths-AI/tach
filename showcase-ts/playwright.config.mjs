@@ -4,9 +4,13 @@ import { webGPU } from "../webgpu-playwright.mjs";
 export default defineConfig({
   testDir: "tests",
   workers: 1,
-  timeout: 60_000,
+  timeout: 120_000,
   expect: { timeout: 15_000 },
-  reporter: "list",
+  metadata: { showcaseProfile: "quick" },
+  reporter: [
+    ["list"],
+    ["./markdown-reporter.mjs"],
+  ],
   use: {
     ...webGPU,
     baseURL: "http://127.0.0.1:4174",

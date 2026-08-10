@@ -107,10 +107,11 @@ export compute scale(data: storage<f32[], read_write>, factor: uniform<f32>) {
 	for _, want := range []string{
 		"import { defineModule as $defineModule } from \"@depths/tach/internal\"",
 		"const $tach = $defineModule({",
-		"export function scale(data, factor, $size)",
-		"import type { ComputeBuffer } from \"@depths/tach\"",
-		"data: ComputeBuffer<readonly number[]>",
+		"export function scale(data, factor, $dispatch)",
+		"import type { ComputeBuffer, DispatchOptions } from \"@depths/tach\"",
+		"data: ComputeBuffer<Float32Array | readonly number[]>",
 		"factor: number",
+		"$dispatch?: DispatchOptions",
 	} {
 		if !strings.Contains(out.JavaScript+out.Declarations, want) {
 			t.Fatalf("generated bindings missing %q", want)
@@ -125,9 +126,29 @@ export compute buffer(data: storage<u32[], read_write>) {
   const i = globalId.x;
   if (i < data.length) { data[i] = 0u; }
 }`)
-	if !strings.Contains(out.JavaScript, "export function buffer(data, $size)") ||
+	if !strings.Contains(out.JavaScript, "export function buffer(data, $dispatch)") ||
 		!strings.Contains(out.Declarations, "export function buffer(") {
 		t.Fatal("source kernel named buffer was not preserved")
+	}
+}
+
+func TestScalarRuntimeArraysExposeTypedHostRepresentations(t *testing.T) {
+	out, _ := compileBindings(t, `
+@workgroupSize(1)
+export compute arrays(
+  signed: storage<i32[], read_write>,
+  unsigned: storage<u32[], read_write>,
+  floats: storage<f32[], read_write>,
+) { }
+`)
+	for _, want := range []string{
+		"signed: ComputeBuffer<Int32Array | readonly number[]>",
+		"unsigned: ComputeBuffer<Uint32Array | readonly number[]>",
+		"floats: ComputeBuffer<Float32Array | readonly number[]>",
+	} {
+		if !strings.Contains(out.Declarations, want) {
+			t.Fatalf("generated declarations missing %q", want)
+		}
 	}
 }
 

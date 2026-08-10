@@ -158,7 +158,10 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
 
         const lazyBufferCount = calls.buffers;
         await generated[kernel.name](...args);
-        await generated[kernel.name](...args, kernel.workgroupSize[0] + 1);
+        await generated[kernel.name](...args, {
+          size: kernel.workgroupSize[0] + 1,
+          dispatches: 2,
+        });
         computeBuffers[0].write(inputs[entry.name][kernel.resources[0].name]);
         return {
           name: entry.name,
@@ -187,7 +190,7 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
     expect(summary.calls.pipelines).toBe(1);
     expect(summary.calls.buffers).toBe(summary.storageCount + summary.uniformCount * 2);
     expect(summary.calls.bindGroups).toBe(2);
-    expect(summary.calls.dispatches).toEqual([[1, 1, 1], [2, 1, 1]]);
+    expect(summary.calls.dispatches).toEqual([[1, 1, 1], [2, 1, 1], [2, 1, 1]]);
     expect(summary.calls.submits).toBe(2);
     expect(summary.calls.workDone).toBe(3);
     expect(summary.calls.writes).toBe(1);

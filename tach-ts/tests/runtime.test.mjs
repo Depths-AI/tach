@@ -14,6 +14,7 @@ function fakeWebGPU({
   const calls = {
     buffersDestroyed: 0,
     deviceDestroyed: 0,
+    dispatches: 0,
     scopesPopped: 0,
     scopesPushed: 0,
     submitted: 0,
@@ -23,7 +24,14 @@ function fakeWebGPU({
     lost: new Promise(() => {}),
     queue: {
       submit() { calls.submitted++; },
-      writeBuffer() {},
+      writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size) {
+        calls.writes++;
+        const source = ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(data);
+        const length = size ?? source.byteLength - dataOffset;
+        buffer.storage.set(source.subarray(dataOffset, dataOffset + length), bufferOffset);
+      },
       async onSubmittedWorkDone() {
         calls.workDone++;
         if (failWork) throw undefined;
@@ -46,10 +54,12 @@ function fakeWebGPU({
     async createComputePipelineAsync(descriptor) { return { descriptor }; },
     createBindGroup(descriptor) { return { descriptor }; },
     createBuffer(descriptor) {
-      const bytes = new ArrayBuffer(descriptor.size);
+      const storage = new Uint8Array(descriptor.size);
       return {
+        storage,
         destroy() { calls.buffersDestroyed++; },
-        getMappedRange() { return bytes; },
+        getMappedRange() { return storage.buffer; },
+        async mapAsync() {},
         unmap() {},
       };
     },
@@ -57,14 +67,18 @@ function fakeWebGPU({
       const pass = {
         setPipeline() {},
         setBindGroup() {},
-        dispatchWorkgroups() {},
+        dispatchWorkgroups() { calls.dispatches++; },
         end() {},
       };
       return {
         beginComputePass() { return pass; },
-        copyBufferToBuffer() {
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
           if (failCopyUndefined) throw undefined;
           if (failCopy) throw new Error("copy failed");
+          destination.storage.set(
+            source.storage.subarray(sourceOffset, sourceOffset + size),
+            destinationOffset,
+          );
         },
         finish() { return {}; },
       };
@@ -220,6 +234,42 @@ test("storage encoding failures retain their buffer error", async () => {
   assert.match(result.error.message, /must be a number/u);
   assert.equal(result.error.operation, "data");
   assert.equal(fake.calls.deviceDestroyed, 1);
+});
+
+test("one run batches dispatches and preserves scalar typed arrays", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const data = opened.value.buffer(new Uint32Array([1, 2, 3]));
+    await clear.run(0, [data], { size: 3, dispatches: 4 });
+    const result = await data.read();
+    assert.equal(result instanceof Uint32Array, true);
+    assert.deepEqual(result, new Uint32Array([1, 2, 3]));
+    assert.equal(fake.calls.dispatches, 4);
+    assert.equal(fake.calls.submitted, 2);
+    assert.equal(fake.calls.workDone, 1);
+  } finally {
+    opened.value.close();
+  }
+});
+
+test("dispatch count must be a positive integer", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    await assert.rejects(
+      clear.run(0, [opened.value.buffer(new Uint32Array([1]))], { dispatches: 0 }),
+      (failure) => {
+        assert.equal(failure.data.code, "kernel");
+        assert.match(failure.data.message, /positive integer/u);
+        return true;
+      },
+    );
+  } finally {
+    opened.value.close();
+  }
 });
 
 test("readback setup failures destroy temporary buffers", async () => {

@@ -31,7 +31,7 @@ export compute scale(data: storage<f32[], read_write>, factor: uniform<f32>) {
     assert.equal(result.ok, true);
     const generated = await readFile(join(directory, "build", "scale.js"), "utf8");
     assert.match(generated, /from "@depths\/tach\/internal"/u);
-    assert.match(generated, /export function scale\(data, factor, \$size\)/u);
+    assert.match(generated, /export function scale\(data, factor, \$dispatch\)/u);
     assert.doesNotMatch(generated, /export const buffer/u);
   } finally {
     await rm(directory, { recursive: true, force: true });

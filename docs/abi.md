@@ -164,15 +164,20 @@ Buffers are lazy: their first kernel use supplies the exact compiler layout,
 at which point `@depths/tach` packs the value and creates the physical WebGPU
 buffer. Pipelines and bind-group layouts are also created lazily and cached per
 device. Calls infer their logical invocation count from the first runtime-sized
-storage buffer and accept an optional final size only when an explicit count or
-`[x, y, z]` is required.
+storage buffer. An optional final `DispatchOptions` object provides an explicit
+logical `size` and a positive `dispatches` count. Repeated dispatches are
+encoded into one compute pass and command buffer, submitted once, and awaited
+once.
 
 Packing and unpacking remain private implementation details. They use
 `DataView`, compiler-computed byte offsets, and compiler-recorded runtime
-strides. Generated JavaScript imports only `@depths/tach/internal` and exports
-only the source kernels; its declarations import `ComputeBuffer` from
-`@depths/tach`. The generated binding contract is validated before `Compile`
-succeeds.
+strides. Scalar runtime arrays additionally expose their matching
+`Float32Array`, `Uint32Array`, or `Int32Array` host representation, whose bytes
+can cross the JavaScript/WebGPU boundary without element-wise packing and whose
+representation is retained on readback. Generated JavaScript imports only
+`@depths/tach/internal` and exports only the source kernels; its declarations
+import `ComputeBuffer` and `DispatchOptions` from `@depths/tach`. The generated
+binding contract is validated before `Compile` succeeds.
 
 ## 9. SPIR-V physical representation
 

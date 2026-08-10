@@ -35,6 +35,21 @@ the Tach source. Applications never import the internal entry point directly.
 Use `openTach()` when an application needs a manually managed long-lived
 session. Call `close()` when it is no longer needed.
 
+Generated kernels infer their logical invocation count from the first
+runtime-sized storage buffer. The optional final `DispatchOptions` object can
+override that size and batch repeated dispatches:
+
+```ts
+await integrate(particles, params, { size: particleCount, dispatches: 128 });
+```
+
+All repetitions are encoded in one compute pass, submitted once, and awaited
+once. This keeps one public invocation model while allowing sustained workloads
+to amortize command submission. Scalar runtime storage arrays accept
+`Float32Array`, `Uint32Array`, or `Int32Array` as appropriate; their bytes are
+uploaded directly and the same typed-array representation is preserved by
+`read()`.
+
 Installing the package also installs the matching native `tach` compiler for
 Linux, macOS, or Windows on x64 or arm64. npm exposes it to package scripts:
 

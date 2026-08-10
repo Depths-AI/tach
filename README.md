@@ -197,8 +197,9 @@ same-named positional functions. Storage parameters use the single persistent
 `ComputeBuffer<T>` abstraction created by the scope; uniform parameters are
 plain values. `tach(...)` owns adapter, device, buffers, queued work, and cleanup
 and returns failures as a discriminated result. Invocation count is inferred
-from the first runtime-sized storage buffer, with an optional final number or
-`[x, y, z]` available for kernels that need an explicit size.
+from the first runtime-sized storage buffer. An optional final
+`{ size, dispatches }` object can set explicit one-, two-, or three-dimensional
+invocation dimensions and batch repeated dispatches into one submission.
 See [`showcase-ts/`](showcase-ts/) for a standalone strict-TypeScript app using
 this interface end to end.
 

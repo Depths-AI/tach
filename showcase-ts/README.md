@@ -1,45 +1,85 @@
-# Tach TypeScript showcase
+# Tach TypeScript performance showcase
 
-This private Vite workspace consumes `@depths/tach` and a generated Tach module
-from strict, ordinary TypeScript. The public binding surface is deliberately
-direct:
+This private Vite workspace compares Tach-generated WebGPU kernels with the
+same algorithms written in single-threaded TypeScript over typed arrays. It is
+both an executable performance demonstration and a stress consumer of the
+public `@depths/tach` binding contract.
+
+The suite covers five different compute shapes:
+
+- particle integration repeatedly updates a persistent read/write buffer;
+- Mandelbrot escape uses a two-dimensional dispatch and divergent loops;
+- matrix multiplication tiles through workgroup memory and barriers;
+- Black-Scholes pricing exercises a generated helper plus `log`, `exp`,
+  `sqrt`, and branching; and
+- procedural composition calculates and packs every RGBA pixel of a full-HD
+  scene from gradients, signed-distance shapes, stars, terrain, and a
+  perspective grid.
+
+Each generated kernel accepts one optional `DispatchOptions` object. `size`
+sets the logical invocation dimensions; `dispatches` records repeated calls to
+the same kernel in one compute pass, command buffer, submission, and queue
+wait:
 
 ```ts
-import { tach } from "@depths/tach";
-import { integrate, type Particle } from "../build/particles.js";
+const count = 1 << 20;
+const positions = gpu.buffer(new Float32Array(count));
+const velocities = gpu.buffer(new Float32Array(count));
 
-const result = await tach(async (gpu) => {
-  const particles = gpu.buffer(initialParticles);
-  await integrate(particles, { dt: 0.5, count: initialParticles.length });
-  return particles.read();
+await integrateParticles(positions, velocities, { dt: 0.001, count }, {
+  size: count,
+  dispatches: 128,
 });
 ```
 
-`Particle` and `Params` are generated TypeScript interfaces matching the Tach
-structs. `integrate` is the exported Tach kernel as a TypeScript function.
-Storage arguments use the single persistent `ComputeBuffer<T>` abstraction;
-uniform arguments remain plain TypeScript values. The `tach(...)` scope owns
-adapter, device, buffers, queued work, and cleanup, then resolves to a
-discriminated success or error value.
+Scalar runtime arrays accept `Float32Array`, `Uint32Array`, and `Int32Array`
+directly. The runtime preserves that representation on readback and transfers
+their backing bytes without an element-by-element JavaScript packing pass.
 
-The invocation count is inferred from the first runtime-sized storage buffer.
-Pass an optional final number or `[x, y, z]` only when a kernel needs a
-different logical invocation size.
+## Measurement contract
 
-## Run
+Before timing, the harness completes native compilation, WGSL module and
+pipeline creation, the initial storage upload, and a warmup invocation. Each
+GPU sample then measures one application-visible batched kernel call, including
+command encoding, submission, and `queue.onSubmittedWorkDone()`. Buffer
+readback and correctness comparison happen after timing.
 
-Install the root workspace, build the native development compiler, then run the
-showcase:
+The TypeScript baseline performs the same full repeated workload on the main
+thread. Both sides run five samples in the full profile and report medians. The
+comparison is intentionally against ordinary TypeScript, not native SIMD,
+WebAssembly, a worker pool, or a vendor math library.
+
+The full profile runs:
+
+| Workload | Timed batch |
+| --- | --- |
+| Particle integration | 1,048,576 scalar components, 128 dispatches |
+| Mandelbrot escape | 768 x 768 pixels, limit 192, 4 dispatches |
+| Tiled matrix multiply | 256 x 256 matrices, 4 dispatches |
+| Black-Scholes pricing | 1,048,576 options, 8 dispatches |
+| Procedural RGBA composition | 1920 x 1080 pixels, 3 dispatches |
+
+## Commands and reports
+
+From the repository root:
 
 ```sh
 npm ci
 npm run compiler
-npm run check --workspace=@tach/showcase-ts
-npm run dev --workspace=@tach/showcase-ts
+npm run install:browser --workspace=@tach/showcase-ts
+npm run benchmark --workspace=@tach/showcase-ts
 ```
 
-`npm run build` performs the same kernel generation and strict type-check before
-creating a production bundle. `npm test --workspace=@tach/showcase-ts` launches
-the page under headless Chromium and verifies its computed particle data. Set
-`npm test` serves and exercises the production bundle. Set `TACH_BIN` to use
-an explicit Tach executable instead of `dist/tach`.
+`benchmark` builds the generated module and production site, runs the full
+hardware benchmark in headless Chromium, verifies every GPU result against its
+TypeScript counterpart, and writes `showcase-ts/benchmark-report.md`. The
+Markdown report records the adapter, workload sizes, dispatch counts, medians,
+speedups, throughput, and correctness results. The full report is tracked as a
+hardware baseline so later optimization work can be compared directly.
+
+`npm test --workspace=@tach/showcase-ts` runs a smaller three-sample profile for
+regression testing and writes the same report shape to the ignored
+`showcase-ts/test-report.md`, leaving the tracked full benchmark untouched.
+`npm run dev --workspace=@tach/showcase-ts` opens the full interactive
+showcase. Results are hardware-, driver-, browser-, power-, and thermal-state
+dependent.

@@ -310,9 +310,11 @@ runtime owns:
 
 - adapter and device acquisition, loss tracking, error scopes, and cleanup
 - one lazy `ComputeBuffer<T>` abstraction for storage parameters
-- layout-driven packing/unpacking and temporary uniform staging
+- layout-driven packing/unpacking, direct scalar typed-array transfers, and
+  temporary uniform staging
 - lazy per-device bind-group layout and compute-pipeline construction
-- inferred or explicitly sized dispatch
+- inferred or explicitly sized dispatch, with repeated dispatches batched into
+  one compute pass and submission
 - scope-level failures as discriminated `Result<T, TachError>` data
 
 There is no generated module factory, kernel object graph, public packer, or
