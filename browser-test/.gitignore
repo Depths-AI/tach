@@ -1,0 +1,5 @@
+/build/
+/node_modules/
+/playwright-report/
+/test-results/
+/test-report.md

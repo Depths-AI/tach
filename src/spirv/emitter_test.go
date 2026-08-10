@@ -34,7 +34,7 @@ func TestParticlesSPIRV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(s, "entries [__tach_k_integrate]") {
+	if !strings.Contains(s, "entries [_tach_k_integrate]") {
 		t.Fatalf("unexpected summary: %s", s)
 	}
 }

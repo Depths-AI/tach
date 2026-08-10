@@ -210,7 +210,7 @@ That one result drives:
 
 Host bindings never reverse-engineer generated WGSL.
 
-Kernel entry-point names are also ABI-owned and shared by both backends (`__tach_k_<mangled-name>`).
+Kernel entry-point names are also ABI-owned and shared by both backends (`_tach_k_<mangled-name>`).
 
 ## 10. Portable semantics belong to Core IR
 

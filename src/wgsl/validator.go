@@ -2,6 +2,7 @@ package wgsl
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 )
 
@@ -58,7 +59,11 @@ func lexWGSL(src string) ([]vt, error) {
 			for i < len(src) && (unicode.IsLetter(rune(src[i])) || unicode.IsDigit(rune(src[i])) || src[i] == '_') {
 				i++
 			}
-			out = append(out, vt{vIdent, src[start:i], start})
+			ident := src[start:i]
+			if ident == "_" || strings.HasPrefix(ident, "__") {
+				return nil, fmt.Errorf("WGSL byte %d: reserved identifier %q", start, ident)
+			}
+			out = append(out, vt{vIdent, ident, start})
 			continue
 		}
 		if unicode.IsDigit(rune(c)) {

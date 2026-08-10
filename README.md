@@ -69,6 +69,26 @@ Releases:
 Publishing requires an authenticated GitHub CLI and a clean, committed worktree.
 GitHub stores the finished archives; it does not compile or test them.
 
+## Browser testing
+
+`browser-test/` is a standalone npm project that compiles every example through
+the external Tach CLI, loads the generated modules in headless Chromium, checks
+their browser/ABI interfaces, and executes every kernel when WebGPU is available.
+
+```sh
+cd browser-test
+npm ci
+npm run install:browser
+npm test
+```
+
+The same `npm test` command runs the full suite on every machine. Chromium
+prefers a physical adapter and falls back to CPU-backed SwiftShader when needed;
+the harness reports `hardware-accelerated` or `software-emulated` with the
+adapter identity. See [`browser-test/README.md`](browser-test/README.md) for the
+complete workflow. Every run also writes `browser-test/test-report.md` for
+direct inspection on headless hosts.
+
 ## First kernel
 
 ```tach
@@ -209,6 +229,7 @@ src/spirv/          SPIR-V emitter + decoder + validator + disassembler
 src/bindings/       WebGPU JS/TS + metadata generation/validation
 src/compiler/       end-to-end compilation pipeline
 examples/           executable Tach examples
+browser-test/       standalone headless-browser and WebGPU test project
 ```
 
 ## Design invariants

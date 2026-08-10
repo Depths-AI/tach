@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tach Browser Harness</title>
+    <style>
+      :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+      body { max-width: 72rem; margin: 0 auto; padding: 2rem; }
+      h1 { margin-bottom: .25rem; }
+      code { color: #7ee787; }
+      button { padding: .55rem .8rem; border: 1px solid #30363d; border-radius: .4rem; background: #21262d; color: inherit; cursor: pointer; }
+      .status { display: flex; gap: .75rem; align-items: center; margin: 1.25rem 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: .65rem; border-bottom: 1px solid #30363d; text-align: left; vertical-align: top; }
+      th { color: #8b949e; }
+      .ok { color: #7ee787; }
+      .warn { color: #d29922; }
+    </style>
+  </head>
+  <body>
+    <h1>Tach Browser Harness</h1>
+    <p>Generated binding inspection and headless WebGPU diagnostics.</p>
+    <div class="status">
+      <strong>WebGPU:</strong>
+      <span id="gpu-status">probing…</span>
+      <button id="probe" type="button">Probe again</button>
+    </div>
+    <p id="build-status">Loading compiled examples…</p>
+    <table>
+      <thead><tr><th>Example</th><th>Kernel</th><th>Resources</th><th>WGSL</th></tr></thead>
+      <tbody id="examples"></tbody>
+    </table>
+    <script type="module" src="/app.mjs"></script>
+  </body>
+</html>

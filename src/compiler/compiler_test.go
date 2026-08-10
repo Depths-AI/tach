@@ -313,7 +313,7 @@ export compute step(data: storage<u32[], read_write>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const entry = "__tach_k_step"
+	const entry = "_tach_k_step"
 	if !strings.Contains(r.WGSL, "fn "+entry+"(") {
 		t.Fatalf("WGSL does not export ABI entry %q:\n%s", entry, r.WGSL)
 	}

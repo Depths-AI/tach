@@ -10,13 +10,13 @@ import (
 )
 
 func MangleKernel(name string) string     { return abi.KernelEntry(name) }
-func mangleFunc(name string) string       { return "__tach_f_" + abi.Mangle(name) }
-func mangleType(name string) string       { return "__tach_t_" + abi.Mangle(name) }
-func resourceName(i int) string           { return fmt.Sprintf("__tach_r%d", i) }
-func wrapperName(i int) string            { return fmt.Sprintf("__tach_resource_%d", i) }
+func mangleFunc(name string) string       { return "_tach_f_" + abi.Mangle(name) }
+func mangleType(name string) string       { return "_tach_t_" + abi.Mangle(name) }
+func resourceName(i int) string           { return fmt.Sprintf("_tach_r%d", i) }
+func wrapperName(i int) string            { return fmt.Sprintf("_tach_resource_%d", i) }
 func fieldName(i int, name string) string { return fmt.Sprintf("f%d_%s", i, abi.Mangle(name)) }
 func workgroupName(f *ir.Function, i int) string {
-	return fmt.Sprintf("__tach_w_%s_%d", abi.Mangle(f.Name), i)
+	return fmt.Sprintf("_tach_w_%s_%d", abi.Mangle(f.Name), i)
 }
 
 type emitter struct {
@@ -139,7 +139,14 @@ func (e *emitter) emitResource(i int, r ir.Resource) {
 	e.line("struct %s {", w)
 	e.indent++
 	fieldType := e.typeName(r.Type)
-	e.line("@align(16) data: %s,", fieldType)
+	if hasRuntimeTail(r.Type) {
+		// Runtime array length is derived from the bound byte size. Imposing the
+		// fixed-resource 16-byte wrapper alignment here would raise the shader's
+		// minimum binding size and turn padding bytes into phantom elements.
+		e.line("data: %s,", fieldType)
+	} else {
+		e.line("@align(16) data: %s,", fieldType)
+	}
 	e.indent--
 	e.line("}")
 	if r.Kind == ir.Uniform {
@@ -151,6 +158,16 @@ func (e *emitter) emitResource(i int, r ir.Resource) {
 		}
 		e.line("@group(%d) @binding(%d) var<storage, %s> %s: %s;", r.Group, r.Binding, access, resourceName(i), w)
 	}
+}
+
+func hasRuntimeTail(t *types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Kind == types.RuntimeArray {
+		return true
+	}
+	return t.Kind == types.Struct && len(t.Fields) > 0 && hasRuntimeTail(t.Fields[len(t.Fields)-1].Type)
 }
 
 func scanBuiltins(b *ir.Block, out map[ir.BuiltinKind]bool) {
@@ -170,15 +187,15 @@ func scanBuiltins(b *ir.Block, out map[ir.BuiltinKind]bool) {
 func builtinParam(k ir.BuiltinKind) (attr, name, ty string) {
 	switch k {
 	case ir.GlobalID:
-		return "global_invocation_id", "__tach_global_id", "vec3<u32>"
+		return "global_invocation_id", "_tach_global_id", "vec3<u32>"
 	case ir.LocalID:
-		return "local_invocation_id", "__tach_local_id", "vec3<u32>"
+		return "local_invocation_id", "_tach_local_id", "vec3<u32>"
 	case ir.LocalIndex:
-		return "local_invocation_index", "__tach_local_index", "u32"
+		return "local_invocation_index", "_tach_local_index", "u32"
 	case ir.WorkgroupID:
-		return "workgroup_id", "__tach_workgroup_id", "vec3<u32>"
+		return "workgroup_id", "_tach_workgroup_id", "vec3<u32>"
 	case ir.NumWorkgroups:
-		return "num_workgroups", "__tach_num_workgroups", "vec3<u32>"
+		return "num_workgroups", "_tach_num_workgroups", "vec3<u32>"
 	}
 	return "", "", ""
 }

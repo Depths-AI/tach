@@ -43,7 +43,7 @@ integrate
 is exported to both shader backends as:
 
 ```text
-__tach_k_integrate
+_tach_k_integrate
 ```
 
 Generated reflection records that exact ABI name.

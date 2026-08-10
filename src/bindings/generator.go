@@ -404,6 +404,12 @@ func emitWriter(b *strings.Builder, t *types.Type) error {
 // writerEmitted is intentionally encoded into the generated text marker search
 // rather than global Go state, keeping Generate reentrant.
 func emitWriterSet(b *strings.Builder, t *types.Type, seen map[string]bool) error {
+	// Atomics have the same host representation as their scalar element. Resolve
+	// that alias before deduplication so the shared scalar writer is actually
+	// emitted instead of marking its own name as already in progress.
+	if t.Kind == types.Atomic {
+		t = t.Elem
+	}
 	key := writerName(t)
 	if strings.Contains(b.String(), "function "+key+"(") {
 		return nil
@@ -419,8 +425,6 @@ func emitWriterSet(b *strings.Builder, t *types.Type, seen map[string]bool) erro
 		fmt.Fprintf(b, "function %s(v, o, x) { v.setUint32(o, x, true); }\n", key)
 	case types.F32:
 		fmt.Fprintf(b, "function %s(v, o, x) { v.setFloat32(o, x, true); }\n", key)
-	case types.Atomic:
-		return emitWriterSet(b, t.Elem, seen)
 	case types.Vector:
 		if err := emitWriterSet(b, t.Elem, seen); err != nil {
 			return err

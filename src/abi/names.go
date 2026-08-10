@@ -11,7 +11,7 @@ import (
 // KernelEntry is the exact externally-visible entry-point name emitted into
 // both WGSL and SPIR-V. Keeping this in the ABI package makes reflection
 // backend-neutral.
-func KernelEntry(name string) string { return "__tach_k_" + Mangle(name) }
+func KernelEntry(name string) string { return "_tach_k_" + Mangle(name) }
 
 // Mangle maps a Tach identifier to a conservative ASCII identifier. Tach source
 // identifiers may be Unicode; target formats and generated host code receive a

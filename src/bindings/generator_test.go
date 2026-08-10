@@ -66,6 +66,18 @@ export compute clear(data: storage<u32[], read_write>) {
 	}
 }
 
+func TestAtomicResourceEmitsUnderlyingWriter(t *testing.T) {
+	out, _ := compileBindings(t, `
+type Counters = { total: atomic<u32> };
+@workgroupSize(1)
+export compute increment(counters: storage<Counters, read_write>) {
+  atomicAdd(counters.total, 1u);
+}`)
+	if !strings.Contains(out.JavaScript, "function __write_u32") {
+		t.Fatal("atomic resource scalar writer missing")
+	}
+}
+
 func TestRuntimeResourcePackerEnforcesMinimumBindingSize(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroupSize(1)
