@@ -28,7 +28,7 @@ case $version in
   *[!A-Za-z0-9._-]*) usage ;;
 esac
 
-for command in git go node npm sha256sum; do
+for command in cc git go node npm sha256sum spirv-val; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "tach release: required command not found: $command" >&2
     exit 1

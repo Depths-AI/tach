@@ -100,6 +100,23 @@ adapter identity. See [`browser-test/README.md`](browser-test/README.md) for the
 complete workflow. Every run also writes `browser-test/test-report.md` for
 direct inspection on headless hosts.
 
+## Native SPIR-V testing
+
+`spirv-test/` mirrors the browser suite's seven example cases through the
+other backend: it validates each emitted module with Khronos `spirv-val`,
+creates a native Vulkan compute pipeline, dispatches the kernel, and checks the
+readback values. The harness prefers a hardware compute device and falls back
+to a CPU Vulkan implementation such as Mesa Lavapipe.
+
+```sh
+npm run test:spirv
+```
+
+The run is labeled `hardware-accelerated` or `software-emulated`, includes
+Khronos API validation when the layer is installed, and writes the ignored
+headless report `spirv-test/test-report.md`. See
+[`spirv-test/README.md`](spirv-test/README.md) for system requirements.
+
 ## First kernel
 
 ```tach

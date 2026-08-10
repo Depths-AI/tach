@@ -13,6 +13,7 @@
     "compiler": "go build -o dist/ .",
     "build": "npm run compiler && npm run build --workspaces --if-present",
     "check": "npm run compiler && npm run check --workspaces --if-present",
+    "test:spirv": "go test -count=1 -v ./spirv-test",
     "test": "npm run compiler && npm test --workspaces --if-present"
   },
   "engines": {

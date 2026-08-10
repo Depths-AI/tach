@@ -2,3 +2,4 @@
 /dist/
 /node_modules/
 *.test
+/spirv-test/test-report.md
