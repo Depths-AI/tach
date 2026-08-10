@@ -67,7 +67,7 @@ export default class MarkdownReporter {
       "",
       "## Measurement contract",
       "",
-      "- The native compiler, generated WGSL, shader module, compute pipeline, initial buffer upload, and JavaScript JIT warmup are completed before timing.",
+      "- The native compiler, generated WGSL, shader module, compute pipeline, initial buffer upload, uniform arena, bind group, and JavaScript JIT warmup are completed before timing.",
       "- Every sample records multiple dispatches into one compute pass, submits once, and waits once for queue completion.",
       "- Reported times are medians of separate timed batches. GPU readback and correctness comparison happen after timing.",
       "- GPU values are application-visible batch wall times, so command encoding and submission are included; one-time setup and readback are not.",

@@ -12,7 +12,7 @@ import { integrate, type Particle } from "./build/particles.js";
 
 const result = await tach(async (gpu) => {
   const particles = gpu.buffer(initial);
-  await integrate(particles, { dt: 0.5, count: initial.length });
+  await gpu.submit(integrate(particles, { dt: 0.5, count: initial.length }));
   return particles.read();
 });
 
@@ -32,20 +32,68 @@ Generated modules import their private executor from `@depths/tach/internal`
 and expose only the TypeScript interfaces and same-named functions declared by
 the Tach source. Applications never import the internal entry point directly.
 
-Use `openTach()` when an application needs a manually managed long-lived
-session. Call `close()` when it is no longer needed.
+Generated kernel functions construct `ComputeDispatch` commands. They do not
+silently submit or wait. `gpu.submit(command, ...)` is the single execution
+boundary: every supplied command is encoded in source order into one compute
+pass and one queue submission. Awaiting `submit()` waits for pipeline
+preparation and host-side submission, not for the GPU queue to become idle.
+Awaiting a generated command directly fails with an instruction to submit it,
+so a missing dispatch cannot silently become a no-op.
+Call `gpu.idle()` only when the CPU actually needs a completion boundary.
+`ComputeBuffer.read()` orders its copy after pending submissions and waits for
+that readback; the enclosing `tach(...)` scope also waits before cleanup.
+Asynchronous WebGPU validation failures are retained by the session and surface
+from the next submission, readback, or `idle()` boundary.
+
+Use `openTach()` for a manually managed long-lived session:
+
+```ts
+import { openTach } from "@depths/tach";
+
+const opened = await openTach({ adapter: { powerPreference: "high-performance" } });
+if (!opened.ok) throw new Error(opened.error.message);
+
+const gpu = opened.value;
+const particles = gpu.buffer(initial);
+
+async function frame(dt: number): Promise<void> {
+  // Both simulation steps share one compute pass and queue submission.
+  await gpu.submit(
+    integrate(particles, { dt, count: initial.length }),
+    integrate(particles, { dt, count: initial.length }),
+  );
+}
+
+await frame(1 / 60);
+// Continue calling frame() from requestAnimationFrame without gpu.idle().
+
+await gpu.idle();
+gpu.close();
+```
+
+The adapter, device, storage buffers, shader modules, pipelines, bind-group
+layouts, stable bind groups, and uniform upload arena survive across calls.
+Queue ordering makes consecutive awaited submissions safe without a per-frame
+queue stall. Await `idle()` before graceful shutdown; `close()` immediately
+destroys the owned device and buffers. A lost device invalidates its resident
+resources, so recovery opens a new session and recreates application state.
 
 Generated kernels infer their logical invocation count from the first
 runtime-sized storage buffer. The optional final `DispatchOptions` object can
 override that size and batch repeated dispatches:
 
 ```ts
-await integrate(particles, params, { size: particleCount, dispatches: 128 });
+await gpu.submit(integrate(
+  particles,
+  params,
+  { size: particleCount, dispatches: 128 },
+));
+await gpu.idle();
 ```
 
-All repetitions are encoded in one compute pass, submitted once, and awaited
-once. This keeps one public invocation model while allowing sustained workloads
-to amortize command submission. Scalar runtime storage arrays accept
+All repetitions are encoded in one compute pass and submitted once; the
+explicit `idle()` above is needed only because this example wants completed
+timing/results immediately. Scalar runtime storage arrays accept
 `Float32Array`, `Uint32Array`, or `Int32Array` as appropriate; their bytes are
 uploaded directly and the same typed-array representation is preserved by
 `read()`.

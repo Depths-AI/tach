@@ -16,21 +16,29 @@ The suite covers five different compute shapes:
   scene from gradients, signed-distance shapes, stars, terrain, and a
   perspective grid.
 
-Each generated kernel accepts one optional `DispatchOptions` object. `size`
-sets the logical invocation dimensions; `dispatches` records repeated calls to
-the same kernel in one compute pass, command buffer, submission, and queue
-wait:
+Each generated kernel constructs a `ComputeDispatch` command and accepts one
+optional `DispatchOptions` object. `size` sets the logical invocation
+dimensions; `dispatches` records repeated executions of that command inside
+one compute pass and queue submission:
 
 ```ts
 const count = 1 << 20;
 const positions = gpu.buffer(new Float32Array(count));
 const velocities = gpu.buffer(new Float32Array(count));
 
-await integrateParticles(positions, velocities, { dt: 0.001, count }, {
-  size: count,
-  dispatches: 128,
-});
+await gpu.submit(integrateParticles(
+  positions,
+  velocities,
+  { dt: 0.001, count },
+  { size: count, dispatches: 128 },
+));
+await gpu.idle();
 ```
+
+`submit()` itself stops at queue submission. The explicit `idle()` is part of
+this benchmark because a wall-clock sample needs completed GPU work; a frame
+loop deliberately omits it and submits the next frame through the same
+long-lived session.
 
 Scalar runtime arrays accept `Float32Array`, `Uint32Array`, and `Int32Array`
 directly. The runtime preserves that representation on readback and transfers
@@ -39,10 +47,11 @@ their backing bytes without an element-by-element JavaScript packing pass.
 ## Measurement contract
 
 Before timing, the harness completes native compilation, WGSL module and
-pipeline creation, the initial storage upload, and a warmup invocation. Each
-GPU sample then measures one application-visible batched kernel call, including
-command encoding, submission, and `queue.onSubmittedWorkDone()`. Buffer
-readback and correctness comparison happen after timing.
+pipeline creation, the initial storage upload, uniform-arena creation,
+bind-group creation, and a warmup invocation. Each GPU sample then measures one
+application-visible `submit()` plus `idle()` pair, including command encoding,
+submission, and `queue.onSubmittedWorkDone()`. Buffer readback and correctness
+comparison happen after timing.
 
 The TypeScript baseline performs the same full repeated workload on the main
 thread. Both sides run five samples in the full profile and report medians. The

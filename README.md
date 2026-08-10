@@ -181,7 +181,7 @@ const initial: readonly Particle[] = [
 
 const result = await tach(async (gpu) => {
   const particles = gpu.buffer(initial);
-  await integrate(particles, { dt: 0.5, count: initial.length });
+  await gpu.submit(integrate(particles, { dt: 0.5, count: initial.length }));
   return particles.read();
 });
 
@@ -193,13 +193,21 @@ if (result.ok) {
 ```
 
 Tach structs become ordinary TypeScript interfaces and exported kernels become
-same-named positional functions. Storage parameters use the single persistent
-`ComputeBuffer<T>` abstraction created by the scope; uniform parameters are
-plain values. `tach(...)` owns adapter, device, buffers, queued work, and cleanup
-and returns failures as a discriminated result. Invocation count is inferred
-from the first runtime-sized storage buffer. An optional final
+same-named positional functions that return typed compute commands. Storage
+parameters use the persistent `ComputeBuffer<T>` abstraction; uniform
+parameters are plain values. `gpu.submit(command, ...)` records all supplied
+commands into one compute pass and queue submission. It resolves when that work
+has been queued, while `gpu.idle()`, buffer readback, and the end of `tach(...)`
+are explicit completion boundaries.
+
+`tach(...)` owns the adapter, device, buffers, queued work, and cleanup and
+returns failures as a discriminated result. `openTach()` exposes the same
+runtime as a manually managed long-lived session for frame loops: storage
+buffers remain resident, pipelines/layouts and stable bind groups are cached,
+and per-frame uniforms reuse a session-owned upload arena. Invocation count is
+inferred from the first runtime-sized storage buffer. An optional final
 `{ size, dispatches }` object can set explicit one-, two-, or three-dimensional
-invocation dimensions and batch repeated dispatches into one submission.
+invocation dimensions and repeat one command inside the same submission.
 See [`showcase-ts/`](showcase-ts/) for a standalone strict-TypeScript app using
 this interface end to end.
 

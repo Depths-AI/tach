@@ -1,10 +1,14 @@
 import {
+  createComputeDispatch,
   getBufferState,
+  type BufferBindGroupEntry,
   type BufferCodec,
   type BufferState,
   type ComputeBuffer,
+  type ComputeDispatch,
   type DispatchOptions,
   type DispatchSize,
+  type PreparedDispatch,
   type RuntimeOwner,
 } from "./runtime.js";
 import { normalizeError, TachFailure, tachError } from "./result.js";
@@ -12,7 +16,6 @@ import { normalizeError, TachFailure, tachError } from "./result.js";
 const bufferUsage = {
   copySrc: 0x0004,
   copyDst: 0x0008,
-  uniform: 0x0040,
   storage: 0x0080,
 } as const;
 
@@ -77,11 +80,11 @@ interface DeviceCache {
 }
 
 export interface DefinedModule {
-  run(
+  dispatch(
     kernel: number,
     values: readonly unknown[],
     options?: DispatchOptions,
-  ): Promise<void>;
+  ): ComputeDispatch;
 }
 
 function sequence(value: unknown, path: string): ArrayLike<unknown> {
@@ -350,6 +353,14 @@ function layoutKey(resource: ResourceDefinition): string {
 
 function materialize<T>(state: BufferState<T>, resource: ResourceDefinition): GPUBuffer {
   try {
+    state.owner.assertHealthy(resource.name);
+    if (state.destroyed) {
+      throw new TachFailure(tachError(
+        "lifecycle",
+        "compute buffer has been destroyed",
+        { operation: resource.name },
+      ));
+    }
     const key = layoutKey(resource);
     if (state.gpu) {
       if (state.codec?.key !== key) {
@@ -504,11 +515,11 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
     }
   }
 
-  async function run(
+  function dispatch(
     kernelIndex: number,
     values: readonly unknown[],
     options?: DispatchOptions,
-  ): Promise<void> {
+  ): ComputeDispatch {
     const info = definition.kernels[kernelIndex];
     if (!info) {
       throw new TachFailure(tachError("kernel", `unknown Tach kernel ${kernelIndex}`, {
@@ -551,64 +562,73 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
       ));
     }
     owner.assertHealthy(info.name);
-    const kernel = await compiled(owner, kernelIndex, info);
-    const temporaryUniforms: GPUBuffer[] = [];
-
+    let configured: ReturnType<typeof dispatchOptions>;
+    const uniforms: Uint8Array[] = [];
     try {
-      await owner.capture(info.name, "kernel", () => {
-        const entriesByGroup = new Map<number, GPUBindGroupEntry[]>();
-        let inferredSize: number | undefined;
-        for (let index = 0; index < info.resources.length; index++) {
-          const parameter = required(info.resources[index], `${info.name} parameter ${index}`);
-          const resource = required(definition.resources[parameter.resource], parameter.name);
-          let gpu: GPUBuffer;
-          if (resource.kind === "storage") {
-            const state = required(storage.get(index), parameter.name);
-            gpu = materialize(state, resource);
-            inferredSize ??= runtimeLength(resource, state);
-          } else {
-            const bytes = pack(resource, values[index]);
-            gpu = upload(owner.device, `Tach ${parameter.name}`, bufferUsage.uniform, bytes);
-            temporaryUniforms.push(gpu);
-          }
-          let entries = entriesByGroup.get(resource.group);
-          if (!entries) entriesByGroup.set(resource.group, entries = []);
-          entries.push({ binding: resource.binding, resource: { buffer: gpu } });
-        }
+      configured = dispatchOptions(options);
+      for (let index = 0; index < info.resources.length; index++) {
+        const parameter = required(info.resources[index], `${info.name} parameter ${index}`);
+        const resource = required(definition.resources[parameter.resource], parameter.name);
+        if (resource.kind === "uniform") uniforms.push(pack(resource, values[index]));
+      }
+    } catch (cause) {
+      throw new TachFailure(normalizeError(cause, "kernel", info.name));
+    }
 
-        const encoder = owner.device.createCommandEncoder({
-          label: `Tach ${info.name} commands`,
-        });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(kernel.pipeline);
-        for (let group = 0; group < kernel.bindGroupLayouts.length; group++) {
-          const entries = entriesByGroup.get(group) ?? [];
-          entries.sort((left, right) => left.binding - right.binding);
-          pass.setBindGroup(group, owner.device.createBindGroup({
-            label: `Tach ${info.name} group ${group}`,
-            layout: required(kernel.bindGroupLayouts[group], `${info.name} group ${group}`),
-            entries,
-          }));
-        }
-        const dispatch = dispatchOptions(options);
-        const groups = workgroups(dispatch.size ?? inferredSize ?? info.workgroupSize, info.workgroupSize);
-        for (let index = 0; index < dispatch.dispatches; index++) {
-          pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
-        }
-        pass.end();
-        owner.device.queue.submit([encoder.finish()]);
+    return createComputeDispatch({
+      owner,
+      async prepare(): Promise<PreparedDispatch> {
+        const kernel = await compiled(owner, kernelIndex, info);
         return {
-          async finish() {
-            await owner.device.queue.onSubmittedWorkDone();
+          uniforms,
+          encode(pass, uniformBindings) {
+            owner.assertHealthy(info.name);
+            const entriesByGroup = new Map<number, BufferBindGroupEntry[]>();
+            let inferredSize: number | undefined;
+            let uniformIndex = 0;
+            for (let index = 0; index < info.resources.length; index++) {
+              const parameter = required(
+                info.resources[index],
+                `${info.name} parameter ${index}`,
+              );
+              const resource = required(definition.resources[parameter.resource], parameter.name);
+              let binding: GPUBufferBinding;
+              if (resource.kind === "storage") {
+                const state = required(storage.get(index), parameter.name);
+                binding = { buffer: materialize(state, resource) };
+                inferredSize ??= runtimeLength(resource, state);
+              } else {
+                binding = required(uniformBindings[uniformIndex++], parameter.name);
+              }
+              let entries = entriesByGroup.get(resource.group);
+              if (!entries) entriesByGroup.set(resource.group, entries = []);
+              entries.push({ binding: resource.binding, resource: binding });
+            }
+
+            pass.setPipeline(kernel.pipeline);
+            for (let group = 0; group < kernel.bindGroupLayouts.length; group++) {
+              const entries = entriesByGroup.get(group) ?? [];
+              entries.sort((left, right) => left.binding - right.binding);
+              pass.setBindGroup(group, owner.bindGroup(
+                `Tach ${info.name} group ${group}`,
+                required(kernel.bindGroupLayouts[group], `${info.name} group ${group}`),
+                entries,
+              ));
+            }
+            const groups = workgroups(
+              configured.size ?? inferredSize ?? info.workgroupSize,
+              info.workgroupSize,
+            );
+            for (let index = 0; index < configured.dispatches; index++) {
+              pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
+            }
           },
         };
-      });
-    } finally {
-      for (const uniform of temporaryUniforms) uniform.destroy();
-    }
+      },
+    });
   }
 
-  return Object.freeze({ run });
+  return Object.freeze({ dispatch });
 }
 
 function align4(value: number): number {

@@ -3,6 +3,7 @@ export {
   openTach,
   tach,
   type ComputeBuffer,
+  type ComputeDispatch,
   type DispatchOptions,
   type DispatchSize,
   type Tach,

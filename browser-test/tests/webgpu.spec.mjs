@@ -145,7 +145,7 @@ async function executeCase(testCase) {
 
       const output = computeBuffers.get(testCase.readParam);
       if (!output) throw new Error(`readback resource ${testCase.readParam} is missing`);
-      await generated[testCase.kernel](...args);
+      await gpu.submit(generated[testCase.kernel](...args));
       const value = await output.read();
 
       const info = gpu.adapter.info ?? {};
@@ -209,3 +209,20 @@ for (const testCase of cases) {
     testCase.assert(result.value);
   });
 }
+
+test("uniform commands remain distinct within a submission and across frames", async ({ page }) => {
+  await page.goto("/");
+  const result = await page.evaluate(async () => {
+    const { tach } = await import("@depths/tach");
+    const { scale } = await import("/build/scalars.js");
+    return tach(async (gpu) => {
+      const data = gpu.buffer(new Float32Array([1, 2, 3, 4]));
+      await gpu.submit(scale(data, 2), scale(data, 3));
+      await gpu.submit(scale(data, 4));
+      return data.read();
+    });
+  });
+
+  expect(result.ok).toBe(true);
+  expect(Array.from(result.value)).toEqual([24, 48, 72, 96]);
+});

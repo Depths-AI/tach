@@ -12,15 +12,22 @@ function fakeWebGPU({
   shaderError,
 } = {}) {
   const calls = {
+    bindGroups: 0,
+    buffers: 0,
     buffersDestroyed: 0,
     deviceDestroyed: 0,
     dispatches: 0,
+    passes: 0,
+    pipelines: 0,
     scopesPopped: 0,
     scopesPushed: 0,
+    shaders: 0,
     submitted: 0,
     workDone: 0,
+    writes: 0,
   };
   const device = {
+    limits: { minUniformBufferOffsetAlignment: 256 },
     lost: new Promise(() => {}),
     queue: {
       submit() { calls.submitted++; },
@@ -47,15 +54,24 @@ function fakeWebGPU({
     destroy() { calls.deviceDestroyed++; },
     createShaderModule(descriptor) {
       if (shaderError) throw shaderError;
+      calls.shaders++;
       return { descriptor };
     },
     createBindGroupLayout(descriptor) { return { descriptor }; },
     createPipelineLayout(descriptor) { return { descriptor }; },
-    async createComputePipelineAsync(descriptor) { return { descriptor }; },
-    createBindGroup(descriptor) { return { descriptor }; },
+    async createComputePipelineAsync(descriptor) {
+      calls.pipelines++;
+      return { descriptor };
+    },
+    createBindGroup(descriptor) {
+      calls.bindGroups++;
+      return { descriptor };
+    },
     createBuffer(descriptor) {
+      calls.buffers++;
       const storage = new Uint8Array(descriptor.size);
       return {
+        size: descriptor.size,
         storage,
         destroy() { calls.buffersDestroyed++; },
         getMappedRange() { return storage.buffer; },
@@ -71,7 +87,7 @@ function fakeWebGPU({
         end() {},
       };
       return {
-        beginComputePass() { return pass; },
+        beginComputePass() { calls.passes++; return pass; },
         copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
           if (failCopyUndefined) throw undefined;
           if (failCopy) throw new Error("copy failed");
@@ -116,6 +132,41 @@ const clear = defineModule({
     entryPoint: "clear",
     workgroupSize: [1, 1, 1],
     resources: [{ name: "data", resource: 0 }],
+  }],
+});
+
+const fill = defineModule({
+  source: "",
+  resources: [{
+    name: "data",
+    group: 0,
+    binding: 0,
+    kind: "storage",
+    access: "read_write",
+    minimumByteSize: 4,
+    runtime: true,
+    layout: {
+      kind: "runtime",
+      stride: 4,
+      runtime: true,
+      elem: { kind: "u32", size: 4 },
+    },
+  }, {
+    name: "value",
+    group: 0,
+    binding: 1,
+    kind: "uniform",
+    access: "read",
+    byteSize: 16,
+    minimumByteSize: 16,
+    runtime: false,
+    layout: { kind: "u32", size: 4 },
+  }],
+  kernels: [{
+    name: "fill",
+    entryPoint: "fill",
+    workgroupSize: [1, 1, 1],
+    resources: [{ name: "data", resource: 0 }, { name: "value", resource: 1 }],
   }],
 });
 
@@ -182,13 +233,13 @@ test("kernel validation failures retain their typed GPU code", async () => {
   });
 
   const result = await tach(async (gpu) => {
-    await clear.run(0, [gpu.buffer([1])]);
+    await gpu.submit(clear.dispatch(0, [gpu.buffer([1])]));
   }, { gpu: fake.gpu });
 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "gpu-validation");
   assert.equal(result.error.message, "invalid binding");
-  assert.equal(result.error.operation, "clear");
+  assert.equal(result.error.operation, "submit");
   assert.equal(fake.calls.scopesPushed, 6);
   assert.equal(fake.calls.scopesPopped, 6);
   assert.equal(fake.calls.buffersDestroyed, 1);
@@ -198,7 +249,7 @@ test("kernel validation failures retain their typed GPU code", async () => {
 test("synchronous shader failures retain their kernel error", async () => {
   const fake = fakeWebGPU({ shaderError: new Error("shader failed") });
   const result = await tach(async (gpu) => {
-    await clear.run(0, [gpu.buffer([1])]);
+    await gpu.submit(clear.dispatch(0, [gpu.buffer([1])]));
   }, { gpu: fake.gpu });
 
   assert.equal(result.ok, false);
@@ -213,8 +264,9 @@ test("undefined GPU work failures cannot be mistaken for success", async () => {
   const opened = await openTach({ gpu: fake.gpu });
   assert.equal(opened.ok, true);
   try {
-    await assert.rejects(clear.run(0, [opened.value.buffer([1])]), (failure) => {
-      assert.equal(failure.data.code, "kernel");
+    await opened.value.submit(clear.dispatch(0, [opened.value.buffer([1])]));
+    await assert.rejects(opened.value.idle(), (failure) => {
+      assert.equal(failure.data.code, "device-lost");
       assert.equal(failure.data.message, "undefined");
       return true;
     });
@@ -226,7 +278,7 @@ test("undefined GPU work failures cannot be mistaken for success", async () => {
 test("storage encoding failures retain their buffer error", async () => {
   const fake = fakeWebGPU();
   const result = await tach(async (gpu) => {
-    await clear.run(0, [gpu.buffer(["bad"])]);
+    await gpu.submit(clear.dispatch(0, [gpu.buffer(["bad"])]));
   }, { gpu: fake.gpu });
 
   assert.equal(result.ok, false);
@@ -236,13 +288,16 @@ test("storage encoding failures retain their buffer error", async () => {
   assert.equal(fake.calls.deviceDestroyed, 1);
 });
 
-test("one run batches dispatches and preserves scalar typed arrays", async () => {
+test("one submission batches dispatches without waiting for the queue", async () => {
   const fake = fakeWebGPU();
   const opened = await openTach({ gpu: fake.gpu });
   assert.equal(opened.ok, true);
   try {
     const data = opened.value.buffer(new Uint32Array([1, 2, 3]));
-    await clear.run(0, [data], { size: 3, dispatches: 4 });
+    await opened.value.submit(clear.dispatch(0, [data], { size: 3, dispatches: 4 }));
+    assert.equal(fake.calls.submitted, 1);
+    assert.equal(fake.calls.workDone, 0);
+    await opened.value.idle();
     const result = await data.read();
     assert.equal(result instanceof Uint32Array, true);
     assert.deepEqual(result, new Uint32Array([1, 2, 3]));
@@ -254,13 +309,47 @@ test("one run batches dispatches and preserves scalar typed arrays", async () =>
   }
 });
 
+test("one pass carries multiple kernels and reuses resident uniforms and bind groups", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const data = opened.value.buffer(new Uint32Array([0]));
+    await opened.value.submit(
+      fill.dispatch(0, [data, 1]),
+      fill.dispatch(0, [data, 2]),
+    );
+    assert.equal(fake.calls.submitted, 1);
+    assert.equal(fake.calls.passes, 1);
+    assert.equal(fake.calls.dispatches, 2);
+    assert.equal(fake.calls.buffers, 2);
+    assert.equal(fake.calls.writes, 1);
+    assert.equal(fake.calls.bindGroups, 2);
+
+    await opened.value.submit(fill.dispatch(0, [data, 3]));
+    assert.equal(fake.calls.submitted, 2);
+    assert.equal(fake.calls.passes, 2);
+    assert.equal(fake.calls.dispatches, 3);
+    assert.equal(fake.calls.buffers, 2);
+    assert.equal(fake.calls.writes, 2);
+    assert.equal(fake.calls.bindGroups, 2);
+    assert.equal(fake.calls.shaders, 1);
+    assert.equal(fake.calls.pipelines, 1);
+    assert.equal(fake.calls.workDone, 0);
+    await opened.value.idle();
+    assert.equal(fake.calls.workDone, 1);
+  } finally {
+    opened.value.close();
+  }
+});
+
 test("dispatch count must be a positive integer", async () => {
   const fake = fakeWebGPU();
   const opened = await openTach({ gpu: fake.gpu });
   assert.equal(opened.ok, true);
   try {
-    await assert.rejects(
-      clear.run(0, [opened.value.buffer(new Uint32Array([1]))], { dispatches: 0 }),
+    assert.throws(
+      () => clear.dispatch(0, [opened.value.buffer(new Uint32Array([1]))], { dispatches: 0 }),
       (failure) => {
         assert.equal(failure.data.code, "kernel");
         assert.match(failure.data.message, /positive integer/u);
@@ -272,12 +361,51 @@ test("dispatch count must be a positive integer", async () => {
   }
 });
 
+test("awaiting a dispatch without submitting it fails loudly", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const dispatch = clear.dispatch(0, [opened.value.buffer([1])]);
+    await assert.rejects(async () => await dispatch, (failure) => {
+      assert.equal(failure.data.code, "kernel");
+      assert.match(failure.data.message, /Tach\.submit/u);
+      return true;
+    });
+    assert.equal(fake.calls.submitted, 0);
+  } finally {
+    opened.value.close();
+  }
+});
+
+test("dispatch ownership and resident-buffer lifetime are enforced", async () => {
+  const first = await openTach({ gpu: fakeWebGPU().gpu });
+  const second = await openTach({ gpu: fakeWebGPU().gpu });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  try {
+    const data = first.value.buffer([1]);
+    const dispatch = clear.dispatch(0, [data]);
+    assert.throws(() => second.value.submit(dispatch), /different Tach session/u);
+
+    data.destroy();
+    await assert.rejects(first.value.submit(dispatch), (failure) => {
+      assert.equal(failure.data.code, "lifecycle");
+      assert.match(failure.data.message, /destroyed/u);
+      return true;
+    });
+  } finally {
+    first.value.close();
+    second.value.close();
+  }
+});
+
 test("readback setup failures destroy temporary buffers", async () => {
   const fake = fakeWebGPU({ failCopy: true });
 
   const result = await tach(async (gpu) => {
     const data = gpu.buffer([1]);
-    await clear.run(0, [data]);
+    await gpu.submit(clear.dispatch(0, [data]));
     return data.read();
   }, { gpu: fake.gpu });
 
@@ -293,7 +421,7 @@ test("undefined readback setup failures cannot be mistaken for success", async (
   assert.equal(opened.ok, true);
   try {
     const data = opened.value.buffer([1]);
-    await clear.run(0, [data]);
+    await opened.value.submit(clear.dispatch(0, [data]));
     await assert.rejects(data.read(), (failure) => {
       assert.equal(failure.data.code, "buffer");
       assert.equal(failure.data.message, "undefined");

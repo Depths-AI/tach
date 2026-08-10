@@ -5,12 +5,14 @@ import {
   TachFailure,
   tachError,
   type Result,
+  type TachError,
   type TachErrorCode,
 } from "./result.js";
 
 const bufferUsage = {
   mapRead: 0x0001,
   copyDst: 0x0008,
+  uniform: 0x0040,
 } as const;
 
 const mapMode = {
@@ -23,6 +25,12 @@ export interface ComputeBuffer<T> {
   write(value: T): void;
   read(): Promise<T>;
   destroy(): void;
+}
+
+declare const computeDispatchBrand: unique symbol;
+
+export interface ComputeDispatch {
+  readonly [computeDispatchBrand]: never;
 }
 
 export type DispatchSize = number | readonly [x: number, y?: number, z?: number];
@@ -42,6 +50,8 @@ export interface Tach {
   readonly adapter: GPUAdapter;
   readonly device: GPUDevice;
   buffer<T>(value: T): ComputeBuffer<T>;
+  submit(first: ComputeDispatch, ...rest: readonly ComputeDispatch[]): Promise<void>;
+  idle(): Promise<void>;
   close(): void;
 }
 
@@ -56,11 +66,35 @@ export interface Submission<T> {
   cleanup?(): void;
 }
 
+export interface BufferBindGroupEntry {
+  readonly binding: number;
+  readonly resource: GPUBufferBinding;
+}
+
+export interface PreparedDispatch {
+  readonly uniforms: readonly Uint8Array[];
+  encode(
+    pass: GPUComputePassEncoder,
+    uniforms: readonly GPUBufferBinding[],
+  ): void;
+}
+
+export interface DispatchState {
+  readonly owner: RuntimeOwner;
+  prepare(): Promise<PreparedDispatch>;
+}
+
 export interface RuntimeOwner {
   readonly device: GPUDevice;
   register(state: BufferState<unknown>): void;
   unregister(state: BufferState<unknown>): void;
   assertHealthy(operation: string): void;
+  waitForSubmissions(operation: string): Promise<void>;
+  bindGroup(
+    label: string,
+    layout: GPUBindGroupLayout,
+    entries: readonly BufferBindGroupEntry[],
+  ): GPUBindGroup;
   capture<T>(
     operation: string,
     fallbackCode: TachErrorCode,
@@ -78,6 +112,7 @@ export interface BufferState<T> {
 }
 
 const bufferStates = new WeakMap<object, BufferState<unknown>>();
+const dispatchStates = new WeakMap<object, DispatchState>();
 
 function clone<T>(value: T, operation: string): T {
   try {
@@ -95,7 +130,16 @@ class Session implements Tach, RuntimeOwner {
   readonly device: GPUDevice;
 
   readonly #buffers = new Set<BufferState<unknown>>();
+  // DECISION: Cache live binding sets; use a bounded LRU if high-churn sessions make combinations unbounded.
+  readonly #bindGroups = new Map<string, GPUBindGroup>();
+  readonly #objectIDs = new WeakMap<object, number>();
+  readonly #checks = new Set<Promise<void>>();
   readonly #uncaptured: GPUError[] = [];
+  #nextObjectID = 1;
+  #submissionTail: Promise<void> = Promise.resolve();
+  #deferredFailure?: TachError;
+  #uniform: GPUBuffer | undefined;
+  #uniformCapacity = 0;
   #closed = false;
   #lost?: GPUDeviceLostInfo;
 
@@ -118,6 +162,46 @@ class Session implements Tach, RuntimeOwner {
     return createComputeBuffer(this, value);
   }
 
+  submit(first: ComputeDispatch, ...rest: readonly ComputeDispatch[]): Promise<void> {
+    this.assertHealthy("submit");
+    const values = [first, ...rest];
+    const states = values.map((value, index) => getDispatchState(value, `submit[${index}]`));
+    for (const state of states) {
+      if (state.owner !== this) {
+        throw new TachFailure(tachError(
+          "lifecycle",
+          "compute dispatch belongs to a different Tach session",
+          { operation: "submit" },
+        ));
+      }
+    }
+
+    const pending = this.#submissionTail.then(async () => {
+      this.assertHealthy("submit");
+      const prepared = await Promise.all(states.map((state) => state.prepare()));
+      this.assertHealthy("submit");
+      this.#record(prepared);
+    });
+    this.#submissionTail = pending.then(
+      () => undefined,
+      (cause) => {
+        this.#deferredFailure ??= normalizeError(cause, "kernel", "submit");
+      },
+    );
+    return pending;
+  }
+
+  async idle(): Promise<void> {
+    await this.waitForSubmissions("idle");
+    try {
+      await this.device.queue.onSubmittedWorkDone();
+      await Promise.all([...this.#checks]);
+    } catch (cause) {
+      throw new TachFailure(normalizeError(cause, "device-lost", "idle"));
+    }
+    this.assertHealthy("idle");
+  }
+
   register(state: BufferState<unknown>): void {
     this.assertHealthy("buffer");
     this.#buffers.add(state);
@@ -125,6 +209,7 @@ class Session implements Tach, RuntimeOwner {
 
   unregister(state: BufferState<unknown>): void {
     this.#buffers.delete(state);
+    this.#bindGroups.clear();
   }
 
   assertHealthy(operation: string): void {
@@ -138,9 +223,145 @@ class Session implements Tach, RuntimeOwner {
         { operation, cause: this.#lost },
       ));
     }
+    if (this.#deferredFailure) {
+      throw new TachFailure(this.#deferredFailure);
+    }
     const uncaptured = this.#uncaptured.shift();
     if (uncaptured) {
       throw new TachFailure(normalizeError(uncaptured, "gpu-internal", operation));
+    }
+  }
+
+  async waitForSubmissions(operation: string): Promise<void> {
+    this.assertHealthy(operation);
+    await this.#submissionTail;
+    this.assertHealthy(operation);
+  }
+
+  bindGroup(
+    label: string,
+    layout: GPUBindGroupLayout,
+    entries: readonly BufferBindGroupEntry[],
+  ): GPUBindGroup {
+    const key = [
+      this.#objectID(layout),
+      ...entries.map((entry) => [
+        entry.binding,
+        this.#objectID(entry.resource.buffer),
+        entry.resource.offset ?? 0,
+        entry.resource.size ?? entry.resource.buffer.size,
+      ].join(":")),
+    ].join("|");
+    let group = this.#bindGroups.get(key);
+    if (!group) {
+      group = this.device.createBindGroup({ label, layout, entries: [...entries] });
+      this.#bindGroups.set(key, group);
+    }
+    return group;
+  }
+
+  #objectID(value: object): number {
+    let id = this.#objectIDs.get(value);
+    if (id === undefined) {
+      id = this.#nextObjectID++;
+      this.#objectIDs.set(value, id);
+    }
+    return id;
+  }
+
+  #record(dispatches: readonly PreparedDispatch[]): void {
+    this.#captureDeferred("submit", "kernel", () => {
+      const uniformBindings = this.#writeUniforms(dispatches);
+      const encoder = this.device.createCommandEncoder({ label: "Tach submission" });
+      const pass = encoder.beginComputePass({ label: "Tach compute pass" });
+      let uniformIndex = 0;
+      for (const dispatch of dispatches) {
+        const next = uniformIndex + dispatch.uniforms.length;
+        dispatch.encode(pass, uniformBindings.slice(uniformIndex, next));
+        uniformIndex = next;
+      }
+      pass.end();
+      this.device.queue.submit([encoder.finish()]);
+    });
+  }
+
+  #writeUniforms(dispatches: readonly PreparedDispatch[]): readonly GPUBufferBinding[] {
+    const alignment = this.device.limits?.minUniformBufferOffsetAlignment ?? 256;
+    const chunks = dispatches.flatMap((dispatch) => dispatch.uniforms);
+    let byteLength = 0;
+    const offsets = chunks.map((bytes) => {
+      byteLength = align(byteLength, alignment);
+      const offset = byteLength;
+      byteLength += bytes.byteLength;
+      return offset;
+    });
+    if (byteLength === 0) return [];
+
+    const buffer = this.#uniformBuffer(byteLength);
+    const upload = new Uint8Array(byteLength);
+    for (let index = 0; index < chunks.length; index++) {
+      upload.set(chunks[index] as Uint8Array, offsets[index]);
+    }
+    this.device.queue.writeBuffer(buffer, 0, upload.buffer, upload.byteOffset, upload.byteLength);
+    return chunks.map((bytes, index) => ({
+      buffer,
+      offset: offsets[index]!,
+      size: bytes.byteLength,
+    }));
+  }
+
+  #uniformBuffer(byteLength: number): GPUBuffer {
+    if (this.#uniform && this.#uniformCapacity >= byteLength) return this.#uniform;
+    let capacity = Math.max(4096, this.#uniformCapacity);
+    while (capacity < byteLength) capacity *= 2;
+    if (!Number.isSafeInteger(capacity)) {
+      throw new RangeError("uniform data exceeds JavaScript's safe integer range");
+    }
+    const next = this.device.createBuffer({
+      label: "Tach uniform arena",
+      size: align(capacity, 4),
+      usage: bufferUsage.copyDst | bufferUsage.uniform,
+    });
+    this.#uniform?.destroy();
+    this.#uniform = next;
+    this.#uniformCapacity = capacity;
+    this.#bindGroups.clear();
+    return next;
+  }
+
+  #captureDeferred(
+    operation: string,
+    fallbackCode: TachErrorCode,
+    issue: () => void,
+  ): void {
+    this.assertHealthy(operation);
+    this.device.pushErrorScope("internal");
+    this.device.pushErrorScope("out-of-memory");
+    this.device.pushErrorScope("validation");
+
+    let issueError: unknown = noFailure;
+    try {
+      issue();
+    } catch (cause) {
+      issueError = cause;
+    }
+
+    const validation = this.device.popErrorScope();
+    const outOfMemory = this.device.popErrorScope();
+    const internal = this.device.popErrorScope();
+    let check!: Promise<void>;
+    check = Promise.all([validation, outOfMemory, internal])
+      .then((errors) => {
+        const scoped = errors.find((error): error is GPUError => error !== null);
+        if (scoped) this.#deferredFailure ??= normalizeError(scoped, fallbackCode, operation);
+      }, (cause) => {
+        this.#deferredFailure ??= normalizeError(cause, "gpu-internal", operation);
+      })
+      .finally(() => this.#checks.delete(check));
+    this.#checks.add(check);
+
+    if (issueError !== noFailure) {
+      throw new TachFailure(normalizeError(issueError, fallbackCode, operation));
     }
   }
 
@@ -209,19 +430,12 @@ class Session implements Tach, RuntimeOwner {
     return value as T;
   }
 
-  async settle(operation: string): Promise<void> {
-    this.assertHealthy(operation);
-    try {
-      await this.device.queue.onSubmittedWorkDone();
-    } catch (cause) {
-      throw new TachFailure(normalizeError(cause, "device-lost", operation));
-    }
-    this.assertHealthy(operation);
-  }
-
   close(): void {
     if (this.#closed) return;
     for (const state of [...this.#buffers]) destroyBufferState(state);
+    this.#uniform?.destroy();
+    this.#uniform = undefined;
+    this.#bindGroups.clear();
     this.device.removeEventListener("uncapturederror", this.#onUncaptured);
     this.#closed = true;
     this.device.destroy();
@@ -262,12 +476,14 @@ function createComputeBuffer<T>(owner: Session, initial: T): ComputeBuffer<T> {
     },
     async read() {
       live(state, "buffer.read");
+      await state.owner.waitForSubmissions("buffer.read");
+      live(state, "buffer.read");
       if (!state.gpu || !state.codec) return clone(state.value, "buffer.read");
 
       return state.owner.capture("buffer.read", "buffer", () => {
         const readback = state.owner.device.createBuffer({
           label: "Tach readback",
-          size: Math.max(4, align4(state.byteLength)),
+          size: Math.max(4, align(state.byteLength, 4)),
           usage: bufferUsage.copyDst | bufferUsage.mapRead,
         });
         let mapped = false;
@@ -322,8 +538,8 @@ function destroyBufferState(state: BufferState<unknown>): void {
   state.owner.unregister(state);
 }
 
-function align4(value: number): number {
-  return Math.ceil(value / 4) * 4;
+function align(value: number, alignment: number): number {
+  return Math.ceil(value / alignment) * alignment;
 }
 
 export function getBufferState<T>(
@@ -339,6 +555,32 @@ export function getBufferState<T>(
     ));
   }
   live(state, name);
+  return state;
+}
+
+export function createComputeDispatch(state: DispatchState): ComputeDispatch {
+  const handle = Object.freeze({
+    then(): never {
+      throw new TachFailure(tachError(
+        "kernel",
+        "compute dispatches must be passed to Tach.submit()",
+        { operation: "dispatch" },
+      ));
+    },
+  }) as unknown as ComputeDispatch;
+  dispatchStates.set(handle, state);
+  return handle;
+}
+
+function getDispatchState(value: ComputeDispatch, operation: string): DispatchState {
+  const state = value && typeof value === "object" ? dispatchStates.get(value) : undefined;
+  if (!state) {
+    throw new TachFailure(tachError(
+      "kernel",
+      `${operation} must be a generated Tach compute dispatch`,
+      { operation: "submit" },
+    ));
+  }
   return state;
 }
 
@@ -385,7 +627,7 @@ export async function tach<T>(
   let result: Result<T>;
   try {
     const value = await work(session);
-    await session.settle("tach");
+    await session.idle();
     result = ok(value);
   } catch (cause) {
     result = err(normalizeError(cause, "user", "tach"));

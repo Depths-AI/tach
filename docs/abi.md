@@ -146,28 +146,44 @@ import { integrate, type Particle } from "./particles.js";
 
 const result = await tach(async (gpu) => {
   const particles = gpu.buffer(initialParticles);
-  await integrate(particles, { dt: 0.5, count: initialParticles.length });
+  await gpu.submit(integrate(
+    particles,
+    { dt: 0.5, count: initialParticles.length },
+  ));
   return particles.read();
 });
 ```
 
 Named Tach structs become TypeScript interfaces. Exported kernels become
-same-named positional functions. Storage parameters become the single
-`ComputeBuffer<T>` host abstraction; uniforms remain ordinary typed values.
-The enclosing `tach(...)` scope owns its adapter, device, buffers, queued work,
-and cleanup, so a kernel call needs no module/context object or synthetic device
-parameter. The scope resolves to either `{ ok: true, value }` or `{ ok: false,
-error }`; WebGPU, compiler, lifecycle, and application failures therefore have
-one explicit error-as-data boundary.
+same-named positional functions that return opaque `ComputeDispatch` command
+values. Storage parameters become the single `ComputeBuffer<T>` host
+abstraction; uniforms remain ordinary typed values. `Tach.submit(command, ...)`
+is the only execution boundary. It verifies that every command belongs to the
+session, prepares lazy pipelines, records all commands in order into one
+compute pass and command buffer, and submits once.
 
-Buffers are lazy: their first kernel use supplies the exact compiler layout,
-at which point `@depths/tach` packs the value and creates the physical WebGPU
-buffer. Pipelines and bind-group layouts are also created lazily and cached per
-device. Calls infer their logical invocation count from the first runtime-sized
-storage buffer. An optional final `DispatchOptions` object provides an explicit
-logical `size` and a positive `dispatches` count. Repeated dispatches are
-encoded into one compute pass and command buffer, submitted once, and awaited
-once.
+`submit()` resolves after the work reaches the WebGPU queue; it does not wait
+for queue completion. `Tach.idle()`, `ComputeBuffer.read()`, and the end of an
+enclosing `tach(...)` scope are explicit synchronization boundaries. The scope
+owns its adapter, device, buffers, queued work, and cleanup and resolves to
+either `{ ok: true, value }` or `{ ok: false, error }`; WebGPU, compiler,
+lifecycle, and application failures therefore have one error-as-data boundary.
+Asynchronously reported submission errors are retained by the session and
+surface at a later submission or explicit synchronization boundary.
+
+Buffers are lazy: their first submitted command supplies the exact compiler
+layout, at which point `@depths/tach` packs the value and creates the physical
+WebGPU buffer. Shader modules, pipelines, and bind-group layouts are created
+lazily and cached per device. Bind groups are cached by layout and resident
+buffer ranges. Uniform values are snapshotted when their command is built, then
+packed into an aligned session-owned upload arena before submission; WebGPU
+queue ordering permits that arena to be reused across frames without a
+queue-idle stall.
+
+Calls infer their logical invocation count from the first runtime-sized storage
+buffer. An optional final `DispatchOptions` object provides an explicit logical
+`size` and a positive `dispatches` count. That count repeats the command inside
+its containing compute pass without another command buffer or submission.
 
 Packing and unpacking remain private implementation details. They use
 `DataView`, compiler-computed byte offsets, and compiler-recorded runtime
@@ -176,8 +192,9 @@ strides. Scalar runtime arrays additionally expose their matching
 can cross the JavaScript/WebGPU boundary without element-wise packing and whose
 representation is retained on readback. Generated JavaScript imports only
 `@depths/tach/internal` and exports only the source kernels; its declarations
-import `ComputeBuffer` and `DispatchOptions` from `@depths/tach`. The generated
-binding contract is validated before `Compile` succeeds.
+import `ComputeBuffer`, `ComputeDispatch`, and `DispatchOptions` from
+`@depths/tach`. The generated binding contract is validated before `Compile`
+succeeds.
 
 ## 9. SPIR-V physical representation
 

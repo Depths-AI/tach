@@ -300,7 +300,7 @@ The binding generator consumes Core IR + ABI metadata and emits:
 - embedded WGSL
 - private resource/layout descriptors consumed by `@depths/tach`
 - plain unversioned reflection metadata
-- direct same-named JavaScript functions for exported Tach kernels
+- direct same-named JavaScript command constructors for exported Tach kernels
 - ordinary TypeScript interfaces for Tach structs
 
 Generated modules contain no WebGPU lifecycle implementation. They import the
@@ -311,19 +311,35 @@ runtime owns:
 - adapter and device acquisition, loss tracking, error scopes, and cleanup
 - one lazy `ComputeBuffer<T>` abstraction for storage parameters
 - layout-driven packing/unpacking, direct scalar typed-array transfers, and
-  temporary uniform staging
-- lazy per-device bind-group layout and compute-pipeline construction
-- inferred or explicitly sized dispatch, with repeated dispatches batched into
-  one compute pass and submission
+  a persistent aligned uniform upload arena
+- lazy per-device shader, bind-group-layout, and compute-pipeline construction,
+  plus bind-group reuse for stable resident resource sets
+- opaque generated `ComputeDispatch` commands and one explicit session
+  submission boundary that records any number of commands into one compute pass
+- inferred or explicitly sized dispatch, with repeated dispatches remaining in
+  that same pass and submission
+- non-blocking queue submission with explicit `idle()`, readback, and scoped
+  completion boundaries
 - scope-level failures as discriminated `Result<T, TachError>` data
 
 There is no generated module factory, kernel object graph, public packer, or
 resource-map call convention. Uniform parameters are ordinary JavaScript
-values and kernel arguments remain positional in source order. Application code
-creates storage values with `gpu.buffer(value)` inside one `tach(async gpu =>
-...)` scope. The generated contract validator checks reflection invariants,
-direct export/declaration correspondence, bindings, package imports, and
-generated source shape before compilation succeeds.
+values and kernel arguments remain positional in source order. A generated
+kernel call snapshots its uniforms and returns a command; it cannot submit by
+itself. `gpu.submit(command, ...)` supplies the session explicitly without
+thread-local or callback-local ambient state, which remains correct when
+browser promises interleave.
+
+`tach(async gpu => ...)` is the owned short-lived form: it opens the same
+session implementation, runs the application callback, waits for the queue,
+then releases every resource. `openTach()` is the long-lived form: the caller
+keeps the session and its storage buffers resident across submissions, avoids
+`idle()` in the frame hot path, and explicitly waits and closes at shutdown.
+Both forms therefore share one buffer, command, submission, synchronization,
+error, and cleanup model rather than separate batch and frame-loop executors.
+The generated contract validator checks reflection invariants, direct
+export/declaration correspondence, bindings, package imports, and generated
+source shape before compilation succeeds.
 
 ## 16. Durability rule
 

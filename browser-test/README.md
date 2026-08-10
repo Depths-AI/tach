@@ -1,9 +1,10 @@
 # Tach browser harness
 
-This private npm workspace exercises Tach's generated direct JavaScript
-functions, TypeScript-facing data contract, `@depths/tach` lifecycle, and
-WebGPU kernels. It consumes the exact same package surface as an application;
-it does not contain or expose a Go library.
+This private npm workspace exercises Tach's generated JavaScript compute
+commands, explicit multi-command submission boundary, TypeScript-facing data
+contract, `@depths/tach` lifecycle, and WebGPU kernels. It consumes the exact
+same package surface as an application; it does not contain or expose a Go
+library.
 
 ## Setup
 

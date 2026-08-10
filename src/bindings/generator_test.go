@@ -108,10 +108,12 @@ export compute scale(data: storage<f32[], read_write>, factor: uniform<f32>) {
 		"import { defineModule as $defineModule } from \"@depths/tach/internal\"",
 		"const $tach = $defineModule({",
 		"export function scale(data, factor, $dispatch)",
-		"import type { ComputeBuffer, DispatchOptions } from \"@depths/tach\"",
+		"return $tach.dispatch(0",
+		"import type { ComputeBuffer, ComputeDispatch, DispatchOptions } from \"@depths/tach\"",
 		"data: ComputeBuffer<Float32Array | readonly number[]>",
 		"factor: number",
 		"$dispatch?: DispatchOptions",
+		"): ComputeDispatch",
 	} {
 		if !strings.Contains(out.JavaScript+out.Declarations, want) {
 			t.Fatalf("generated bindings missing %q", want)

@@ -54,7 +54,7 @@ test("metadata is plain and uses source kernel names", async ({ page }) => {
   }
 });
 
-test("@depths/tach owns sessions and generated modules expose only direct kernels", async ({ page }) => {
+test("@depths/tach owns sessions and generated modules expose only direct commands", async ({ page }) => {
   await page.goto("/");
   const result = await page.evaluate(async (inputs) => {
     const { tach } = await import("@depths/tach");
@@ -67,6 +67,7 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
         destroyed: 0,
         dispatches: [],
         deviceDestroyed: 0,
+        passes: 0,
         pipelines: 0,
         scopesPopped: 0,
         scopesPushed: 0,
@@ -77,6 +78,7 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
       };
       const listeners = new Map();
       const device = {
+        limits: { minUniformBufferOffsetAlignment: 256 },
         lost: new Promise(() => {}),
         queue: {
           writeBuffer() { calls.writes++; },
@@ -121,7 +123,7 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
             end() {},
           };
           return {
-            beginComputePass() { return pass; },
+            beginComputePass() { calls.passes++; return pass; },
             finish() { return {}; },
           };
         },
@@ -157,11 +159,13 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
         }
 
         const lazyBufferCount = calls.buffers;
-        await generated[kernel.name](...args);
-        await generated[kernel.name](...args, {
-          size: kernel.workgroupSize[0] + 1,
-          dispatches: 2,
-        });
+        await gpu.submit(
+          generated[kernel.name](...args),
+          generated[kernel.name](...args, {
+            size: kernel.workgroupSize[0] + 1,
+            dispatches: 2,
+          }),
+        );
         computeBuffers[0].write(inputs[entry.name][kernel.resources[0].name]);
         return {
           name: entry.name,
@@ -188,15 +192,16 @@ test("@depths/tach owns sessions and generated modules expose only direct kernel
     expect(summary.initialRead).toBeDefined();
     expect(summary.calls.shaders).toBe(1);
     expect(summary.calls.pipelines).toBe(1);
-    expect(summary.calls.buffers).toBe(summary.storageCount + summary.uniformCount * 2);
-    expect(summary.calls.bindGroups).toBe(2);
+    expect(summary.calls.buffers).toBe(summary.storageCount + (summary.uniformCount > 0 ? 1 : 0));
+    expect(summary.calls.bindGroups).toBe(summary.uniformCount > 0 ? 2 : 1);
     expect(summary.calls.dispatches).toEqual([[1, 1, 1], [2, 1, 1], [2, 1, 1]]);
-    expect(summary.calls.submits).toBe(2);
-    expect(summary.calls.workDone).toBe(3);
-    expect(summary.calls.writes).toBe(1);
-    expect(summary.calls.destroyed).toBe(summary.storageCount + summary.uniformCount * 2);
-    expect(summary.calls.scopesPushed).toBe(9);
-    expect(summary.calls.scopesPopped).toBe(9);
+    expect(summary.calls.passes).toBe(1);
+    expect(summary.calls.submits).toBe(1);
+    expect(summary.calls.workDone).toBe(1);
+    expect(summary.calls.writes).toBe(1 + (summary.uniformCount > 0 ? 1 : 0));
+    expect(summary.calls.destroyed).toBe(summary.storageCount + (summary.uniformCount > 0 ? 1 : 0));
+    expect(summary.calls.scopesPushed).toBe(6);
+    expect(summary.calls.scopesPopped).toBe(6);
     expect(summary.calls.deviceDestroyed).toBe(1);
   }
 });

@@ -1,4 +1,4 @@
-import type { Tach } from "@depths/tach";
+import type { ComputeDispatch, Tach } from "@depths/tach";
 import {
   integrateParticles,
   mandelbrot,
@@ -101,6 +101,11 @@ async function measureGPU(samples: number, work: () => Promise<void>): Promise<n
   return times;
 }
 
+async function complete(gpu: Tach, dispatch: ComputeDispatch): Promise<void> {
+  await gpu.submit(dispatch);
+  await gpu.idle();
+}
+
 async function measureCPU(samples: number, work: () => void): Promise<number[]> {
   const times: number[] = [];
   for (let sample = 0; sample < samples; sample++) {
@@ -148,13 +153,13 @@ async function particles(gpu: Tach, profile: Profile): Promise<BenchmarkResult> 
   const gpuPositions = gpu.buffer(positions);
   const gpuVelocities = gpu.buffer(velocities);
   const params = { dt: 0.001, count };
-  await integrateParticles(gpuPositions, gpuVelocities, params, { size: count });
-  const gpuTimes = await measureGPU(profile.samples, () => integrateParticles(
+  await complete(gpu, integrateParticles(gpuPositions, gpuVelocities, params, { size: count }));
+  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, integrateParticles(
     gpuPositions,
     gpuVelocities,
     params,
     { size: count, dispatches: profile.particleDispatches },
-  ));
+  )));
   const actual = await gpuPositions.read();
 
   const expected = positions.slice();
@@ -216,12 +221,12 @@ async function fractal(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
     centerY: 0,
   };
   const output = gpu.buffer(new Uint32Array(pixels));
-  await mandelbrot(output, params, { size: [width, height] });
-  const gpuTimes = await measureGPU(profile.samples, () => mandelbrot(
+  await complete(gpu, mandelbrot(output, params, { size: [width, height] }));
+  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, mandelbrot(
     output,
     params,
     { size: [width, height], dispatches: profile.fractalDispatches },
-  ));
+  )));
   const actual = await output.read();
 
   const expected = new Uint32Array(pixels);
@@ -285,14 +290,20 @@ async function matrices(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
   const gpuLeft = gpu.buffer(left);
   const gpuRight = gpu.buffer(right);
   const gpuOutput = gpu.buffer(new Float32Array(cells));
-  await multiplyMatrices(gpuLeft, gpuRight, gpuOutput, { size }, { size: [size, size] });
-  const gpuTimes = await measureGPU(profile.samples, () => multiplyMatrices(
+  await complete(gpu, multiplyMatrices(
+    gpuLeft,
+    gpuRight,
+    gpuOutput,
+    { size },
+    { size: [size, size] },
+  ));
+  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, multiplyMatrices(
     gpuLeft,
     gpuRight,
     gpuOutput,
     { size },
     { size: [size, size], dispatches: profile.matrixDispatches },
-  ));
+  )));
   const actual = await gpuOutput.read();
 
   const expected = new Float32Array(cells);
@@ -348,12 +359,12 @@ function priceOptionsCPU(output: Float32Array, dispatches: number): void {
 async function options(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
   const count = profile.optionCount;
   const output = gpu.buffer(new Float32Array(count));
-  await priceOptions(output, { count }, { size: count });
-  const gpuTimes = await measureGPU(profile.samples, () => priceOptions(
+  await complete(gpu, priceOptions(output, { count }, { size: count }));
+  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, priceOptions(
     output,
     { count },
     { size: count, dispatches: profile.optionDispatches },
-  ));
+  )));
   const actual = await output.read();
 
   const expected = new Float32Array(count);
@@ -504,12 +515,12 @@ async function rendering(
   const pixels = width * height;
   const params: RenderParams = { width, height, time: 1.7 };
   const output = gpu.buffer(new Uint32Array(pixels));
-  await proceduralScene(output, params, { size: [width, height] });
-  const gpuTimes = await measureGPU(profile.samples, () => proceduralScene(
+  await complete(gpu, proceduralScene(output, params, { size: [width, height] }));
+  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, proceduralScene(
     output,
     params,
     { size: [width, height], dispatches: profile.renderDispatches },
-  ));
+  )));
   const actual = await output.read();
 
   const expected = new Uint32Array(pixels);
