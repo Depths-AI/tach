@@ -281,6 +281,14 @@ The SPIR-V emitter owns binary word encoding and ID allocation. It materializes 
 - atomic scope/memory-semantics operands
 - GLSL.std.450 extended math instructions
 
+The type lowering has one explicit representation boundary. SSA values and
+Workgroup memory use undecorated logical types. Only host-visible Uniform and
+StorageBuffer memory uses physical ABI types carrying member offsets and array
+strides; aggregate resource loads/stores are lowered structurally across that
+boundary. Workgroup variables are zero-initialized by a generated entry
+prologue and synchronized before source instructions execute, matching WGSL
+semantics without requiring a Vulkan extension.
+
 The Tach SPIR-V validator decodes the emitted bytes independently and validates module structure, IDs, types, decorations, resource layout, function structure, CFG predecessor sets, dominance/SSA use, phi edges, structured merges, memory operations, atomics, barriers, and supported extended instructions.
 
 The disassembler consumes binary bytes as well; it is not an emitter-side debug dump.

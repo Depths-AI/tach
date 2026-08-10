@@ -243,6 +243,11 @@ workgroup counters: atomic<u32>[64];
 
 They lower to module-scope workgroup storage in target shader representations while remaining lexically associated with the kernel in Tach source/IR.
 
+Every Workgroup variable has its type's zero value when kernel execution begins.
+WGSL provides this guarantee directly. The SPIR-V backend emits an explicit,
+uniform initialization prologue followed by a Workgroup barrier, so the same
+rule holds on the Vulkan 1.1 baseline without optional device features.
+
 ## 10. Control flow
 
 ### `if` / `else if` / `else`

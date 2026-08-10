@@ -140,6 +140,10 @@ A workgroup declaration records a typed memory object attached to a compute kern
 
 Accesses use the same place operations as storage resources, keeping one memory model across the IR.
 
+Zero initialization is a Tach Workgroup-memory invariant rather than an
+explicit Core IR instruction. Each backend establishes it before executing the
+entry block; native SPIR-V materializes the required stores and barrier.
+
 ## 9. Intrinsics
 
 Math intrinsics are semantic IR instructions. They are not SPIR-V extended-op numbers or WGSL function-name strings.

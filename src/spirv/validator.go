@@ -140,7 +140,7 @@ func validateArity(op Op, a []uint32) error {
 		return exact(a, 3)
 	case OpTypeFunction:
 		return atLeast(a, 2)
-	case OpConstantTrue, OpConstantFalse:
+	case OpConstantTrue, OpConstantFalse, OpConstantNull:
 		return exact(a, 2)
 	case OpConstant:
 		return exact(a, 3)
@@ -381,7 +381,7 @@ func section(op Op) int {
 	case OpDecorate, OpMemberDecorate:
 		return 8
 	case OpTypeVoid, OpTypeBool, OpTypeInt, OpTypeFloat, OpTypeVector, OpTypeArray, OpTypeRuntimeArray, OpTypeStruct,
-		OpTypePointer, OpTypeFunction, OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpVariable:
+		OpTypePointer, OpTypeFunction, OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpVariable:
 		return 9
 	default:
 		return 10
@@ -395,7 +395,7 @@ func resultID(in Instruction) uint32 {
 		return a[0]
 	case OpTypeVoid, OpTypeBool, OpTypeInt, OpTypeFloat, OpTypeVector, OpTypeArray, OpTypeRuntimeArray, OpTypeStruct, OpTypePointer, OpTypeFunction, OpLabel:
 		return a[0]
-	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpFunction, OpFunctionParameter,
+	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
 		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
@@ -414,7 +414,7 @@ func resultID(in Instruction) uint32 {
 func resultTypeID(in Instruction) uint32 {
 	a := in.Operands
 	switch in.Op {
-	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpFunction, OpFunctionParameter,
+	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
 		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
@@ -603,6 +603,8 @@ func (v *validation) validateLayoutAndDefinitions() error {
 			v.valueType[a[1]] = a[0]
 			v.constants[a[1]] = uint64(a[2])
 		case OpConstantComposite:
+			v.valueType[a[1]] = a[0]
+		case OpConstantNull:
 			v.valueType[a[1]] = a[0]
 		case OpVariable:
 			v.valueType[a[1]] = a[0]
@@ -814,6 +816,16 @@ func (v *validation) validateReferencesAndTypes() error {
 				if _, err := v.requireValue(id, ctx); err != nil {
 					return err
 				}
+			}
+		case OpConstantNull:
+			t, err := v.requireType(a[0], ctx)
+			if err != nil {
+				return err
+			}
+			switch t.kind {
+			case typeBool, typeInt, typeFloat, typeVector, typeArray, typeStruct:
+			default:
+				return fmt.Errorf("%s result type cannot have a null value", ctx)
 			}
 		case OpVariable:
 			pt, err := v.requireType(a[0], ctx)
@@ -1647,14 +1659,19 @@ func (v *validation) validateBinary(in Instruction) error {
 }
 
 func (v *validation) validateDecorationsAndABI() error {
-	// Type-level decorations and Tach's host ABI layout.
+	// Validate every explicit host-layout decoration that is present. Whether a
+	// layout is required or forbidden is a property of the global variable that
+	// reaches the type, not of arrays/structs globally.
 	memo := map[uint32]abiLayout{}
 	visiting := map[uint32]bool{}
 	for id, t := range v.types {
-		if t.kind == typeArray || t.kind == typeRuntimeArray {
-			d := v.decoration(id)
-			if d.arrayStride == nil {
-				return fmt.Errorf("array type %%%d lacks ArrayStride", id)
+		d := v.decoration(id)
+		if d.block && t.kind != typeStruct {
+			return fmt.Errorf("type %%%d has Block decoration but is not a struct", id)
+		}
+		if d.arrayStride != nil {
+			if t.kind != typeArray && t.kind != typeRuntimeArray {
+				return fmt.Errorf("type %%%d has ArrayStride but is not an array", id)
 			}
 			el, err := v.abiOf(t.elem, memo, visiting)
 			if err != nil {
@@ -1665,7 +1682,7 @@ func (v *validation) validateDecorationsAndABI() error {
 				return fmt.Errorf("array %%%d ArrayStride=%d, Tach ABI requires %d", id, *d.arrayStride, want)
 			}
 		}
-		if t.kind == typeStruct {
+		if t.kind == typeStruct && (d.block || len(d.offsets) > 0) {
 			l, err := v.abiOf(id, memo, visiting)
 			if err != nil {
 				return err
@@ -1707,6 +1724,12 @@ func (v *validation) validateDecorationsAndABI() error {
 			if st == nil || st.kind != typeStruct || !v.decoration(vt.elem).block {
 				return fmt.Errorf("descriptor variable %%%d must point to Block struct", id)
 			}
+			if err := v.requireHostABILayout(vt.elem, map[uint32]bool{}); err != nil {
+				return fmt.Errorf("descriptor variable %%%d: %w", id, err)
+			}
+			if _, err := v.abiOf(vt.elem, memo, visiting); err != nil {
+				return fmt.Errorf("descriptor variable %%%d: %w", id, err)
+			}
 			if storage == StorageUniform && containsRuntime(vt.elem, v.types, map[uint32]bool{}) {
 				return fmt.Errorf("uniform descriptor %%%d contains runtime array", id)
 			}
@@ -1714,8 +1737,75 @@ func (v *validation) validateDecorationsAndABI() error {
 			if d.builtin != nil || d.binding != nil || d.set != nil || d.nonWritable {
 				return fmt.Errorf("Workgroup variable %%%d has invalid interface/descriptor decoration", id)
 			}
+			if err := v.rejectWorkgroupExplicitLayout(vt.elem, map[uint32]bool{}); err != nil {
+				return fmt.Errorf("Workgroup variable %%%d: %w", id, err)
+			}
 		default:
 			return fmt.Errorf("global variable %%%d storage class %d outside Tach profile", id, storage)
+		}
+	}
+	return nil
+}
+
+func (v *validation) requireHostABILayout(id uint32, seen map[uint32]bool) error {
+	if seen[id] {
+		return nil
+	}
+	seen[id] = true
+	t := v.types[id]
+	if t == nil {
+		return fmt.Errorf("host ABI references unknown type %%%d", id)
+	}
+	d := v.decoration(id)
+	switch t.kind {
+	case typeArray, typeRuntimeArray:
+		if d.arrayStride == nil {
+			return fmt.Errorf("host array type %%%d lacks ArrayStride", id)
+		}
+		return v.requireHostABILayout(t.elem, seen)
+	case typeStruct:
+		if len(d.offsets) != len(t.members) {
+			return fmt.Errorf("host struct %%%d has %d Offset decorations for %d members", id, len(d.offsets), len(t.members))
+		}
+		for i, member := range t.members {
+			if _, ok := d.offsets[uint32(i)]; !ok {
+				return fmt.Errorf("host struct %%%d member %d lacks Offset", id, i)
+			}
+			if err := v.requireHostABILayout(member, seen); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (v *validation) rejectWorkgroupExplicitLayout(id uint32, seen map[uint32]bool) error {
+	if seen[id] {
+		return nil
+	}
+	seen[id] = true
+	t := v.types[id]
+	if t == nil {
+		return fmt.Errorf("references unknown type %%%d", id)
+	}
+	d := v.decoration(id)
+	if d.block {
+		return fmt.Errorf("type %%%d carries Block explicit layout", id)
+	}
+	if d.arrayStride != nil {
+		return fmt.Errorf("type %%%d carries ArrayStride explicit layout", id)
+	}
+	if len(d.offsets) > 0 {
+		return fmt.Errorf("type %%%d carries Offset explicit layout", id)
+	}
+	switch t.kind {
+	case typeArray, typeRuntimeArray, typeVector:
+		return v.rejectWorkgroupExplicitLayout(t.elem, seen)
+	case typeStruct:
+		for _, member := range t.members {
+			if err := v.rejectWorkgroupExplicitLayout(member, seen); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

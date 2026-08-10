@@ -176,9 +176,16 @@ succeeds.
 
 ## 9. SPIR-V physical representation
 
-The SPIR-V backend lowers ABI layout into explicit decorations, including member offsets and array stride where required. Resource variables carry descriptor set/binding decorations matching the Tach ABI.
+The SPIR-V backend lowers host-visible ABI layout into explicit decorations,
+including member offsets and array stride where required. Resource variables
+carry descriptor set/binding decorations matching the Tach ABI. Logical SSA
+types and Workgroup-memory types remain undecorated; aggregate resource
+loads/stores are lowered field-by-field so physical buffer types never enter the
+logical value domain.
 
-Tach's SPIR-V validator decodes the binary and checks those decorations against the module/type/resource model rather than trusting the emitter's in-memory structures.
+Tach's SPIR-V validator decodes the binary and checks both directions of this
+rule: descriptor-reachable aggregates require the exact Tach ABI layout, while
+Workgroup-reachable aggregates must not carry explicit layout decorations.
 
 ## 10. WGSL physical representation
 

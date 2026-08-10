@@ -32,6 +32,7 @@ const (
 	OpConstantFalse        Op = 42
 	OpConstant             Op = 43
 	OpConstantComposite    Op = 44
+	OpConstantNull         Op = 46
 	OpFunction             Op = 54
 	OpFunctionParameter    Op = 55
 	OpFunctionEnd          Op = 56
@@ -213,7 +214,8 @@ var opNames = map[Op]string{
 	OpTypeVector: "OpTypeVector", OpTypeArray: "OpTypeArray", OpTypeRuntimeArray: "OpTypeRuntimeArray", OpTypeStruct: "OpTypeStruct",
 	OpTypePointer: "OpTypePointer", OpTypeFunction: "OpTypeFunction", OpConstantTrue: "OpConstantTrue",
 	OpConstantFalse: "OpConstantFalse", OpConstant: "OpConstant", OpConstantComposite: "OpConstantComposite",
-	OpFunction: "OpFunction", OpFunctionParameter: "OpFunctionParameter", OpFunctionEnd: "OpFunctionEnd",
+	OpConstantNull: "OpConstantNull",
+	OpFunction:     "OpFunction", OpFunctionParameter: "OpFunctionParameter", OpFunctionEnd: "OpFunctionEnd",
 	OpFunctionCall: "OpFunctionCall", OpVariable: "OpVariable", OpLoad: "OpLoad", OpStore: "OpStore",
 	OpAccessChain: "OpAccessChain", OpArrayLength: "OpArrayLength", OpDecorate: "OpDecorate",
 	OpMemberDecorate: "OpMemberDecorate", OpCompositeConstruct: "OpCompositeConstruct",

@@ -60,6 +60,13 @@ type builder struct {
 	glsl450      uint32
 }
 
+type typeRole uint8
+
+const (
+	typeLogical typeRole = iota
+	typeHostABI
+)
+
 func newBuilder(m *ir.Module) *builder {
 	return &builder{
 		m:            m,
@@ -110,7 +117,7 @@ func (b *builder) build() error {
 		emit(&b.debug, OpName, append([]uint32{b.funcIDs[f.Name]}, encodeString(f.Name)...)...)
 	}
 
-	if err := b.emitStructDebugAndLayouts(); err != nil {
+	if err := b.emitStructDebugTypes(); err != nil {
 		return err
 	}
 	if err := b.emitResources(); err != nil {
@@ -166,8 +173,22 @@ func typeKey(t *types.Type) string {
 	}
 }
 
-func (b *builder) typeID(t *types.Type) (uint32, error) {
-	key := typeKey(t)
+func normalizedTypeRole(t *types.Type, role typeRole) typeRole {
+	if role == typeHostABI && t != nil {
+		switch t.Kind {
+		case types.FixedArray, types.RuntimeArray, types.Struct:
+			return typeHostABI
+		}
+	}
+	return typeLogical
+}
+
+// typeID is the single SPIR-V type-lowering path. Logical types are used by
+// SSA values and Workgroup memory. Host-ABI types exist only behind Uniform or
+// StorageBuffer pointers and carry Tach's compiler-owned layout decorations.
+func (b *builder) typeID(t *types.Type, role typeRole) (uint32, error) {
+	role = normalizedTypeRole(t, role)
+	key := fmt.Sprintf("%d:%s", role, typeKey(t))
 	if id := b.types[key]; id != 0 {
 		return id, nil
 	}
@@ -175,7 +196,7 @@ func (b *builder) typeID(t *types.Type) (uint32, error) {
 		// SPIR-V atomicity is an operation property; the pointed-to object keeps
 		// the underlying integer type. Resolve it before allocating an ID so the
 		// module ID space remains dense and deterministic.
-		elem, err := b.typeID(t.Elem)
+		elem, err := b.typeID(t.Elem, typeLogical)
 		if err != nil {
 			return 0, err
 		}
@@ -196,13 +217,13 @@ func (b *builder) typeID(t *types.Type) (uint32, error) {
 	case types.F32:
 		emit(&b.typesGlobals, OpTypeFloat, id, 32)
 	case types.Vector:
-		elem, err := b.typeID(t.Elem)
+		elem, err := b.typeID(t.Elem, typeLogical)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpTypeVector, id, elem, uint32(t.Lanes))
 	case types.FixedArray:
-		elem, err := b.typeID(t.Elem)
+		elem, err := b.typeID(t.Elem, role)
 		if err != nil {
 			return 0, err
 		}
@@ -210,39 +231,45 @@ func (b *builder) typeID(t *types.Type) (uint32, error) {
 		if err != nil {
 			return 0, err
 		}
-		l, err := layout.Of(t)
-		if err != nil {
-			return 0, err
-		}
 		emit(&b.typesGlobals, OpTypeArray, id, elem, length)
-		emit(&b.annotations, OpDecorate, id, DecorationArrayStride, l.Stride)
-	case types.RuntimeArray:
-		elem, err := b.typeID(t.Elem)
-		if err != nil {
-			return 0, err
+		if role == typeHostABI {
+			l, err := layout.Of(t)
+			if err != nil {
+				return 0, err
+			}
+			emit(&b.annotations, OpDecorate, id, DecorationArrayStride, l.Stride)
 		}
-		l, err := layout.Of(t)
+	case types.RuntimeArray:
+		elem, err := b.typeID(t.Elem, role)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpTypeRuntimeArray, id, elem)
-		emit(&b.annotations, OpDecorate, id, DecorationArrayStride, l.Stride)
+		if role == typeHostABI {
+			l, err := layout.Of(t)
+			if err != nil {
+				return 0, err
+			}
+			emit(&b.annotations, OpDecorate, id, DecorationArrayStride, l.Stride)
+		}
 	case types.Struct:
 		members := []uint32{id}
 		for _, f := range t.Fields {
-			mid, err := b.typeID(f.Type)
+			mid, err := b.typeID(f.Type, role)
 			if err != nil {
 				return 0, err
 			}
 			members = append(members, mid)
 		}
 		emit(&b.typesGlobals, OpTypeStruct, members...)
-		l, err := layout.Of(t)
-		if err != nil {
-			return 0, err
-		}
-		for i, fl := range l.Fields {
-			emit(&b.annotations, OpMemberDecorate, id, uint32(i), DecorationOffset, fl.Offset)
+		if role == typeHostABI {
+			l, err := layout.Of(t)
+			if err != nil {
+				return 0, err
+			}
+			for i, fl := range l.Fields {
+				emit(&b.annotations, OpMemberDecorate, id, uint32(i), DecorationOffset, fl.Offset)
+			}
 		}
 	default:
 		return 0, fmt.Errorf("unsupported SPIR-V type %s", t)
@@ -250,8 +277,15 @@ func (b *builder) typeID(t *types.Type) (uint32, error) {
 	return id, nil
 }
 
+func typeRoleForStorage(storage uint32) typeRole {
+	if storage == StorageUniform || storage == StorageStorageBuffer {
+		return typeHostABI
+	}
+	return typeLogical
+}
+
 func (b *builder) pointerID(storage uint32, t *types.Type) (uint32, error) {
-	pointee, err := b.typeID(t)
+	pointee, err := b.typeID(t, typeRoleForStorage(storage))
 	if err != nil {
 		return 0, err
 	}
@@ -266,7 +300,7 @@ func (b *builder) pointerID(storage uint32, t *types.Type) (uint32, error) {
 }
 
 func (b *builder) functionTypeID(ret *types.Type, params []ir.Param) (uint32, error) {
-	rid, err := b.typeID(ret)
+	rid, err := b.typeID(ret, typeLogical)
 	if err != nil {
 		return 0, err
 	}
@@ -274,7 +308,7 @@ func (b *builder) functionTypeID(ret *types.Type, params []ir.Param) (uint32, er
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d", rid)
 	for i, p := range params {
-		ids[i], err = b.typeID(p.Type)
+		ids[i], err = b.typeID(p.Type, typeLogical)
 		if err != nil {
 			return 0, err
 		}
@@ -292,9 +326,9 @@ func (b *builder) functionTypeID(ret *types.Type, params []ir.Param) (uint32, er
 	return id, nil
 }
 
-func (b *builder) emitStructDebugAndLayouts() error {
+func (b *builder) emitStructDebugTypes() error {
 	for _, t := range b.m.Structs {
-		id, err := b.typeID(t)
+		id, err := b.typeID(t, typeLogical)
 		if err != nil {
 			return err
 		}
@@ -318,12 +352,12 @@ func (b *builder) storageClass(r ir.Resource) uint32 {
 func (b *builder) emitResources() error {
 	b.resourceIDs = make([]uint32, len(b.m.Resources))
 	for i, r := range b.m.Resources {
-		logical, err := b.typeID(r.Type)
+		physical, err := b.typeID(r.Type, typeHostABI)
 		if err != nil {
 			return fmt.Errorf("resource %s type: %w", r.Name, err)
 		}
 		wrapper := b.id()
-		emit(&b.typesGlobals, OpTypeStruct, wrapper, logical)
+		emit(&b.typesGlobals, OpTypeStruct, wrapper, physical)
 		emit(&b.annotations, OpDecorate, wrapper, DecorationBlock)
 		emit(&b.annotations, OpMemberDecorate, wrapper, 0, DecorationOffset, 0)
 		emit(&b.debug, OpName, append([]uint32{wrapper}, encodeString("__tach_resource_"+strconv.Itoa(i))...)...)
@@ -360,6 +394,21 @@ func scanBuiltins(block *ir.Block, out map[ir.BuiltinKind]bool) {
 	}
 }
 
+func usedBuiltins(f *ir.Function) map[ir.BuiltinKind]bool {
+	used := map[ir.BuiltinKind]bool{}
+	if !f.Compute {
+		return used
+	}
+	scanBuiltins(f.Body, used)
+	// Tach Workgroup memory has one zero-initialization rule across WGSL and
+	// SPIR-V. The native prologue elects local invocation zero to perform the
+	// stores, even when source code does not otherwise reference localIndex.
+	if len(f.WorkgroupVars) > 0 {
+		used[ir.LocalIndex] = true
+	}
+	return used
+}
+
 func builtinInfo(k ir.BuiltinKind) (*types.Type, uint32, string) {
 	vec3u := types.Vec(types.TU32, 3)
 	switch k {
@@ -381,8 +430,8 @@ func builtinInfo(k ir.BuiltinKind) (*types.Type, uint32, string) {
 func (b *builder) emitBuiltins() error {
 	used := map[ir.BuiltinKind]bool{}
 	for _, f := range b.m.Functions {
-		if f.Compute {
-			scanBuiltins(f.Body, used)
+		for k := range usedBuiltins(f) {
+			used[k] = true
 		}
 	}
 	order := []ir.BuiltinKind{ir.GlobalID, ir.LocalID, ir.LocalIndex, ir.WorkgroupID, ir.NumWorkgroups}
@@ -431,8 +480,7 @@ func (b *builder) emitEntryPoints() {
 		if !f.Compute {
 			continue
 		}
-		used := map[ir.BuiltinKind]bool{}
-		scanBuiltins(f.Body, used)
+		used := usedBuiltins(f)
 		ops := []uint32{ExecutionModelGLCompute, b.funcIDs[f.Name]}
 		ops = append(ops, encodeString(abi.KernelEntry(f.Name))...)
 		// SPIR-V 1.3 entry-point interfaces contain Input/Output variables only.
@@ -447,7 +495,7 @@ func (b *builder) emitEntryPoints() {
 }
 
 func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
-	tid, err := b.typeID(t)
+	tid, err := b.typeID(t, typeLogical)
 	if err != nil {
 		return 0, err
 	}
@@ -494,6 +542,21 @@ func (b *builder) u32Constant(v uint32) (uint32, error) {
 	return b.constant(types.TU32, strconv.FormatUint(uint64(v), 10))
 }
 
+func (b *builder) nullConstant(t *types.Type) (uint32, error) {
+	tid, err := b.typeID(t, typeLogical)
+	if err != nil {
+		return 0, err
+	}
+	key := fmt.Sprintf("%d:null", tid)
+	if id := b.constants[key]; id != 0 {
+		return id, nil
+	}
+	id := b.id()
+	b.constants[key] = id
+	emit(&b.typesGlobals, OpConstantNull, tid, id)
+	return id, nil
+}
+
 type spvPlace struct {
 	ptr         uint32
 	ty          *types.Type
@@ -516,7 +579,7 @@ type fnEmitter struct {
 }
 
 func (b *builder) emitFunction(f *ir.Function) error {
-	retType, err := b.typeID(f.Return)
+	retType, err := b.typeID(f.Return, typeLogical)
 	if err != nil {
 		return err
 	}
@@ -529,7 +592,7 @@ func (b *builder) emitFunction(f *ir.Function) error {
 
 	s := &fnEmitter{b: b, f: f, values: map[ir.ValueID]uint32{}, vtypes: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]spvPlace{}}
 	for _, p := range f.Params {
-		pt, err := b.typeID(p.Type)
+		pt, err := b.typeID(p.Type, typeLogical)
 		if err != nil {
 			return err
 		}
@@ -541,6 +604,9 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	label := b.id()
 	emit(&b.functions, OpLabel, label)
 	s.currentLabel = label
+	if err := s.emitWorkgroupZeroInitialization(); err != nil {
+		return err
+	}
 	if err := s.emitBlock(f.Body, blockNormal); err != nil {
 		return err
 	}
@@ -549,6 +615,62 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	}
 	emit(&b.functions, OpFunctionEnd)
 	return nil
+}
+
+func (s *fnEmitter) emitWorkgroupZeroInitialization() error {
+	if len(s.f.WorkgroupVars) == 0 {
+		return nil
+	}
+	vars := s.b.workgroupIDs[s.f.Name]
+	if len(vars) != len(s.f.WorkgroupVars) {
+		return fmt.Errorf("workgroup variables for %s were not declared", s.f.Name)
+	}
+	localIndexVar := s.b.builtinIDs[ir.LocalIndex]
+	if localIndexVar == 0 {
+		return fmt.Errorf("workgroup initialization requires localIndex builtin")
+	}
+	u32Type, err := s.b.typeID(types.TU32, typeLogical)
+	if err != nil {
+		return err
+	}
+	localIndex := s.b.id()
+	emit(&s.b.functions, OpLoad, u32Type, localIndex, localIndexVar)
+	zero, err := s.b.u32Constant(0)
+	if err != nil {
+		return err
+	}
+	boolType, err := s.b.typeID(types.TBool, typeLogical)
+	if err != nil {
+		return err
+	}
+	isFirst := s.b.id()
+	emit(&s.b.functions, OpIEqual, boolType, isFirst, localIndex, zero)
+
+	initialize, skip, merge := s.b.id(), s.b.id(), s.b.id()
+	emit(&s.b.functions, OpSelectionMerge, merge, SelectionControlNone)
+	emit(&s.b.functions, OpBranchConditional, isFirst, initialize, skip)
+	s.terminated = true
+
+	emit(&s.b.functions, OpLabel, initialize)
+	s.currentLabel, s.terminated = initialize, false
+	for i, w := range s.f.WorkgroupVars {
+		null, err := s.b.nullConstant(w.Type)
+		if err != nil {
+			return fmt.Errorf("zero-initialize workgroup %s: %w", w.Name, err)
+		}
+		emit(&s.b.functions, OpStore, vars[i], null)
+	}
+	emit(&s.b.functions, OpBranch, merge)
+	s.terminated = true
+
+	emit(&s.b.functions, OpLabel, skip)
+	s.currentLabel, s.terminated = skip, false
+	emit(&s.b.functions, OpBranch, merge)
+	s.terminated = true
+
+	emit(&s.b.functions, OpLabel, merge)
+	s.currentLabel, s.terminated = merge, false
+	return s.emitBarrier(&ir.Barrier{Kind: ir.BarrierWorkgroup})
 }
 
 type blockMode uint8
@@ -652,6 +774,120 @@ func (s *fnEmitter) def(irID ir.ValueID, spvID uint32, t *types.Type) {
 	}
 }
 
+func (s *fnEmitter) accessField(base spvPlace, field int, t *types.Type) (spvPlace, error) {
+	if base.ty == nil || base.ty.Kind != types.Struct {
+		return spvPlace{}, fmt.Errorf("field access base is not a struct place")
+	}
+	if field < 0 || field >= len(base.ty.Fields) || !types.Equal(base.ty.Fields[field].Type, t) {
+		return spvPlace{}, fmt.Errorf("field %d does not match place type %s", field, base.ty)
+	}
+	ptrType, err := s.b.pointerID(base.storage, t)
+	if err != nil {
+		return spvPlace{}, err
+	}
+	idx, err := s.b.u32Constant(uint32(field))
+	if err != nil {
+		return spvPlace{}, err
+	}
+	id := s.b.id()
+	emit(&s.b.functions, OpAccessChain, ptrType, id, base.ptr, idx)
+	p := spvPlace{ptr: id, ty: t, storage: base.storage}
+	if t.Kind == types.RuntimeArray {
+		p.arrayBase = base.ptr
+		p.arrayMember = uint32(field)
+		p.hasArrayLen = true
+	}
+	return p, nil
+}
+
+// loadPlace keeps physical host-layout aggregates behind descriptor pointers.
+// A constructible resource struct is loaded field-by-field into its one logical
+// SSA type; Workgroup and ordinary values use that logical type directly.
+func (s *fnEmitter) loadPlace(p spvPlace, t *types.Type) (uint32, error) {
+	if !types.IsConstructible(t) {
+		return 0, fmt.Errorf("cannot load non-constructible place type %s", t)
+	}
+	role := typeRoleForStorage(p.storage)
+	if role == typeHostABI && t.Kind == types.Struct {
+		tid, err := s.b.typeID(t, typeLogical)
+		if err != nil {
+			return 0, err
+		}
+		ops := []uint32{tid, s.b.id()}
+		for i, f := range t.Fields {
+			fp, err := s.accessField(p, i, f.Type)
+			if err != nil {
+				return 0, err
+			}
+			v, err := s.loadPlace(fp, f.Type)
+			if err != nil {
+				return 0, err
+			}
+			ops = append(ops, v)
+		}
+		emit(&s.b.functions, OpCompositeConstruct, ops...)
+		return ops[1], nil
+	}
+
+	physical, err := s.b.typeID(t, role)
+	if err != nil {
+		return 0, err
+	}
+	logical, err := s.b.typeID(t, typeLogical)
+	if err != nil {
+		return 0, err
+	}
+	if physical != logical {
+		return 0, fmt.Errorf("place type %s requires structural loading", t)
+	}
+	id := s.b.id()
+	emit(&s.b.functions, OpLoad, logical, id, p.ptr)
+	return id, nil
+}
+
+// storePlace is the exact inverse of loadPlace: logical resource structs are
+// decomposed into host-layout fields, while logical Workgroup values are stored
+// directly. No physical aggregate is admitted into the SSA value domain.
+func (s *fnEmitter) storePlace(p spvPlace, value uint32) error {
+	t := p.ty
+	if !types.IsConstructible(t) {
+		return fmt.Errorf("cannot store non-constructible place type %s", t)
+	}
+	role := typeRoleForStorage(p.storage)
+	if role == typeHostABI && t.Kind == types.Struct {
+		for i, f := range t.Fields {
+			fieldType, err := s.b.typeID(f.Type, typeLogical)
+			if err != nil {
+				return err
+			}
+			fieldValue := s.b.id()
+			emit(&s.b.functions, OpCompositeExtract, fieldType, fieldValue, value, uint32(i))
+			fp, err := s.accessField(p, i, f.Type)
+			if err != nil {
+				return err
+			}
+			if err := s.storePlace(fp, fieldValue); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	physical, err := s.b.typeID(t, role)
+	if err != nil {
+		return err
+	}
+	logical, err := s.b.typeID(t, typeLogical)
+	if err != nil {
+		return err
+	}
+	if physical != logical {
+		return fmt.Errorf("place type %s requires structural storage", t)
+	}
+	emit(&s.b.functions, OpStore, p.ptr, value)
+	return nil
+}
+
 func (s *fnEmitter) emitInstr(in ir.Instr) error {
 	switch x := in.(type) {
 	case *ir.Const:
@@ -665,7 +901,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if varID == 0 {
 			return fmt.Errorf("builtin %d was not declared", x.Kind)
 		}
-		tid, _ := s.b.typeID(x.Type)
+		tid, _ := s.b.typeID(x.Type, typeLogical)
 		id := s.b.id()
 		emit(&s.b.functions, OpLoad, tid, id, varID)
 		s.def(x.Result, id, x.Type)
@@ -678,7 +914,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 	case *ir.Convert:
 		return s.emitConvert(x)
 	case *ir.Composite:
-		tid, _ := s.b.typeID(x.Type)
+		tid, _ := s.b.typeID(x.Type, typeLogical)
 		id := s.b.id()
 		ops := []uint32{tid, id}
 		for _, v := range x.Values {
@@ -695,7 +931,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if err != nil {
 			return err
 		}
-		tid, _ := s.b.typeID(x.Type)
+		tid, _ := s.b.typeID(x.Type, typeLogical)
 		id := s.b.id()
 		emit(&s.b.functions, OpCompositeExtract, tid, id, base, uint32(x.Index))
 		s.def(x.Result, id, x.Type)
@@ -704,7 +940,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if fid == 0 {
 			return fmt.Errorf("unknown callee %s", x.Function)
 		}
-		tid, _ := s.b.typeID(x.Type)
+		tid, _ := s.b.typeID(x.Type, typeLogical)
 		result := s.b.id() // OpFunctionCall always carries a Result <id>, including void calls.
 		ops := []uint32{tid, result, fid}
 		for _, a := range x.Args {
@@ -733,9 +969,10 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if err != nil {
 			return err
 		}
-		tid, _ := s.b.typeID(x.Type)
-		id := s.b.id()
-		emit(&s.b.functions, OpLoad, tid, id, p.ptr)
+		id, err := s.loadPlace(p, x.Type)
+		if err != nil {
+			return err
+		}
 		s.def(x.Result, id, x.Type)
 	case *ir.Store:
 		p, err := s.place(x.Place)
@@ -746,7 +983,9 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if err != nil {
 			return err
 		}
-		emit(&s.b.functions, OpStore, p.ptr, v)
+		if err := s.storePlace(p, v); err != nil {
+			return err
+		}
 	case *ir.Atomic:
 		return s.emitAtomic(x)
 	case *ir.Barrier:
@@ -759,7 +998,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if !p.hasArrayLen {
 			return fmt.Errorf("runtime-array place lacks OpArrayLength base")
 		}
-		tid, _ := s.b.typeID(types.TU32)
+		tid, _ := s.b.typeID(types.TU32, typeLogical)
 		id := s.b.id()
 		emit(&s.b.functions, OpArrayLength, tid, id, p.arrayBase, p.arrayMember)
 		s.def(x.Result, id, types.TU32)
@@ -774,7 +1013,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 }
 
 func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
-	tid, err := s.b.typeID(x.Type)
+	tid, err := s.b.typeID(x.Type, typeLogical)
 	if err != nil {
 		return err
 	}
@@ -883,7 +1122,7 @@ func (s *fnEmitter) emitAtomic(x *ir.Atomic) error {
 	if err != nil {
 		return err
 	}
-	tid, err := s.b.typeID(x.Type)
+	tid, err := s.b.typeID(x.Type, typeLogical)
 	if err != nil {
 		return err
 	}
@@ -996,21 +1235,9 @@ func (s *fnEmitter) emitPlaceField(x *ir.PlaceField) error {
 	if err != nil {
 		return err
 	}
-	ptrType, err := s.b.pointerID(base.storage, x.Type)
+	p, err := s.accessField(base, x.Field, x.Type)
 	if err != nil {
 		return err
-	}
-	idx, err := s.b.u32Constant(uint32(x.Field))
-	if err != nil {
-		return err
-	}
-	id := s.b.id()
-	emit(&s.b.functions, OpAccessChain, ptrType, id, base.ptr, idx)
-	p := spvPlace{ptr: id, ty: x.Type, storage: base.storage}
-	if x.Type.Kind == types.RuntimeArray {
-		p.arrayBase = base.ptr
-		p.arrayMember = uint32(x.Field)
-		p.hasArrayLen = true
 	}
 	s.places[x.Result] = p
 	return nil
@@ -1050,7 +1277,7 @@ func (s *fnEmitter) emitUnary(x *ir.Unary) error {
 	if err != nil {
 		return err
 	}
-	tid, _ := s.b.typeID(x.Type)
+	tid, _ := s.b.typeID(x.Type, typeLogical)
 	id := s.b.id()
 	var op Op
 	switch x.Op {
@@ -1073,7 +1300,7 @@ func (s *fnEmitter) emitUnary(x *ir.Unary) error {
 }
 
 func (s *fnEmitter) splatVector(vector *types.Type, scalar uint32) (uint32, error) {
-	tid, err := s.b.typeID(vector)
+	tid, err := s.b.typeID(vector, typeLogical)
 	if err != nil {
 		return 0, err
 	}
@@ -1097,7 +1324,7 @@ func (s *fnEmitter) emitBinary(x *ir.Binary) error {
 	}
 	lt := s.vtypes[x.Left]
 	rt := s.vtypes[x.Right]
-	tid, _ := s.b.typeID(x.Type)
+	tid, _ := s.b.typeID(x.Type, typeLogical)
 	id := s.b.id()
 	kind := scalarKind(lt)
 	var op Op
@@ -1242,7 +1469,7 @@ func (s *fnEmitter) emitConvert(x *ir.Convert) error {
 	if err != nil {
 		return err
 	}
-	tid, _ := s.b.typeID(x.Type)
+	tid, _ := s.b.typeID(x.Type, typeLogical)
 	id := s.b.id()
 	var op Op
 	switch {
@@ -1322,7 +1549,7 @@ func (s *fnEmitter) emitIf(x *ir.If) error {
 			s.def(r.ID, incs[0].val, r.Type)
 			continue
 		}
-		tid, _ := s.b.typeID(r.Type)
+		tid, _ := s.b.typeID(r.Type, typeLogical)
 		id := s.b.id()
 		ops := []uint32{tid, id}
 		for _, in := range incs {
@@ -1351,7 +1578,7 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 		if err != nil {
 			return err
 		}
-		tid, _ := s.b.typeID(p.Type)
+		tid, _ := s.b.typeID(p.Type, typeLogical)
 		phi := s.b.id()
 		start := emit(&s.b.functions, OpPhi, tid, phi, init, preheader, 0, cont)
 		patches[i] = start + 5 // first word + operands: type,result,init,pre,back,cont
