@@ -1,0 +1,11 @@
+@workgroupSize(64)
+export compute reduceLanes(data: storage<u32[], read_write>) {
+  const base = globalId.x * 4u;
+  let sum = 0u;
+  for (let lane = 0u; lane < 4u; lane++) {
+    sum += data[base + lane];
+  }
+  if (globalId.x < data.length) {
+    data[globalId.x] = sum;
+  }
+}

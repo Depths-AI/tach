@@ -1,0 +1,21 @@
+type Counters = {
+  total: atomic<u32>,
+};
+
+@workgroupSize(64)
+export compute accumulate(
+  @group(0) @binding(0) counters: storage<Counters, read_write>
+) {
+  workgroup scratch: atomic<u32>[64];
+
+  if (localIndex == 0u) {
+    atomicStore(scratch[0u], 0u);
+  }
+  workgroupBarrier();
+
+  const previous = atomicAdd(scratch[localIndex], 1u);
+  if (previous == 0u) {
+    atomicAdd(counters.total, 1u);
+  }
+  storageBarrier();
+}

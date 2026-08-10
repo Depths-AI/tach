@@ -1,0 +1,29 @@
+type Params = {
+  scale: f32,
+  count: u32,
+};
+
+@workgroupSize(64)
+export compute transform(
+  data: storage<f32[], read_write>,
+  params: uniform<Params>,
+) {
+  let i = globalId.x;
+  let acc = 0.0;
+
+  while (i < params.count && acc < 1000.0) {
+    acc += data[i] * params.scale;
+    i += 64u;
+  }
+
+  let out = acc;
+  if (out > 100.0) {
+    out = 100.0;
+  } else {
+    out += 1.0;
+  }
+
+  if (globalId.x < params.count) {
+    data[globalId.x] = out;
+  }
+}
