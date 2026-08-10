@@ -1,6 +1,6 @@
-# Pine Core IR
+# Tach Core IR
 
-Pine Core IR is the single target-neutral optimization and validation boundary between the source language and all code generators.
+Tach Core IR is the single target-neutral optimization and validation boundary between the source language and all code generators.
 
 ## 1. Core model
 
@@ -64,7 +64,7 @@ Core IR `if` owns child blocks and may return values.
 
 Source:
 
-```pine
+```tach
 const v = cond ? a : b;
 ```
 
@@ -156,7 +156,7 @@ The WGSL backend maps them to WGSL builtins. The SPIR-V backend maps them either
 
 ## 10. Portable shifts
 
-Pine defines 32-bit shifts with modulo-32 shift counts. Semantic lowering makes this explicit:
+Tach defines 32-bit shifts with modulo-32 shift counts. Semantic lowering makes this explicit:
 
 ```text
 normalized = count & 31u
@@ -223,7 +223,7 @@ Future passes can compose at this boundary without changing WGSL/SPIR-V frontend
 ## 15. Backend lowering summary
 
 ```text
-Pine Core IR              WGSL                         SPIR-V
+Tach Core IR              WGSL                         SPIR-V
 ──────────────────────    ─────────────────────────    ─────────────────────────
 SSA value                 expression/local            result <id>
 resource place            global variable reference   pointer + OpAccessChain

@@ -1,6 +1,6 @@
-# Pine resource and host ABI
+# Tach resource and host ABI
 
-Pine owns one resource ABI shared by WGSL/WebGPU and SPIR-V/Vulkan output.
+Tach owns one resource ABI shared by WGSL/WebGPU and SPIR-V/Vulkan output.
 
 ## 1. Resource identity
 
@@ -17,7 +17,7 @@ physical binding layout
 
 Bindings may be specified in source:
 
-```pine
+```tach
 @group(0) @binding(3) data: storage<Data[], read_write>
 ```
 
@@ -32,7 +32,7 @@ binding -> WGSL @binding   -> SPIR-V Binding
 
 ## 2. Entry-point naming
 
-Pine defines backend-neutral entry-point names through `internal/abi`.
+Tach defines backend-neutral entry-point names through `src/abi`.
 
 A source kernel named:
 
@@ -43,18 +43,18 @@ integrate
 is exported to both shader backends as:
 
 ```text
-__pine_k_integrate
+__tach_k_integrate
 ```
 
 Generated reflection records that exact ABI name.
 
 ## 3. Logical vs physical types
 
-A logical Pine type is never rewritten to contain artificial padding fields.
+A logical Tach type is never rewritten to contain artificial padding fields.
 
 For example:
 
-```pine
+```tach
 type Particle = {
   position: vec3f,
   mass: f32,
@@ -64,7 +64,7 @@ type Particle = {
 
 remains that logical shape to semantic analysis and optimization.
 
-`internal/layout` separately computes its physical representation:
+`src/layout` separately computes its physical representation:
 
 ```text
 Particle
@@ -130,7 +130,7 @@ Reflection deliberately records both concepts.
 
 ## 7. Reflection metadata
 
-Every build emits `<name>.pine.json` with compiler-owned metadata describing the generated program.
+Every build emits `<name>.tach.json` with compiler-owned metadata describing the generated program.
 
 The metadata includes:
 
@@ -148,7 +148,7 @@ The generated JS runtime consumes the same compiler data; it does not parse WGSL
 
 ## 8. JavaScript packing
 
-Generated JS uses `DataView`-based packers from the Pine physical layout.
+Generated JS uses `DataView`-based packers from the Tach physical layout.
 
 For a struct/resource value the generated code writes fields at compiler-computed byte offsets. Runtime resources derive the final allocation size from the runtime element count and compiler-recorded stride.
 
@@ -156,12 +156,12 @@ The generated binding contract is validated before `Compile` succeeds.
 
 ## 9. SPIR-V physical representation
 
-The SPIR-V backend lowers ABI layout into explicit decorations, including member offsets and array stride where required. Resource variables carry descriptor set/binding decorations matching the Pine ABI.
+The SPIR-V backend lowers ABI layout into explicit decorations, including member offsets and array stride where required. Resource variables carry descriptor set/binding decorations matching the Tach ABI.
 
-Pine's SPIR-V validator decodes the binary and checks those decorations against the module/type/resource model rather than trusting the emitter's in-memory structures.
+Tach's SPIR-V validator decodes the binary and checks those decorations against the module/type/resource model rather than trusting the emitter's in-memory structures.
 
 ## 10. WGSL physical representation
 
-The WGSL backend emits resource declarations/wrappers compatible with Pine's physical binding layout. The generated host packer and WebGPU binding metadata use the same minimum sizes.
+The WGSL backend emits resource declarations/wrappers compatible with Tach's physical binding layout. The generated host packer and WebGPU binding metadata use the same minimum sizes.
 
 This keeps the byte contract compiler-owned across browser and native targets.

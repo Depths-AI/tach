@@ -1,8 +1,8 @@
-# Pine compiler architecture
+# Tach compiler architecture
 
 ## 1. Objective
 
-Pine is a GPGPU language whose source syntax optimizes for composition and low cognitive load, while the compiler core optimizes for exact GPU semantics and shallow backends.
+Tach is a GPGPU language whose source syntax optimizes for composition and low cognitive load, while the compiler core optimizes for exact GPU semantics and shallow backends.
 
 The primary targets are:
 
@@ -36,23 +36,23 @@ source
        ├─ uniformity analysis
        │
        ├─ WGSL emitter
-       │    └─ Pine WGSL-subset validator
+       │    └─ Tach WGSL-subset validator
        │
        ├─ SPIR-V emitter
-       │    ├─ Pine binary decoder/validator
-       │    └─ Pine disassembler
+       │    ├─ Tach binary decoder/validator
+       │    └─ Tach disassembler
        │
        └─ binding/reflection generator
-            └─ Pine generated-contract validator
+            └─ Tach generated-contract validator
 ```
 
-`internal/compiler.Compile` is the single orchestration point. A successful `Result` means every stage above has completed and the generated artifacts have passed Pine's validators.
+`src/compiler.Compile` is the single orchestration point. A successful `Result` means every stage above has completed and the generated artifacts have passed Tach's validators.
 
 ## 3. Why structured SSA-ish IR
 
 GPU compute wants both SSA values and structured control.
 
-Pine therefore keeps two separate concepts:
+Tach therefore keeps two separate concepts:
 
 ```text
 Value<T>
@@ -113,9 +113,9 @@ This architecture means neither backend reconstructs structured control from a g
 
 ## 5. Source mutation and SSA
 
-Pine deliberately permits familiar local code:
+Tach deliberately permits familiar local code:
 
-```pine
+```tach
 let sum = 0.0;
 let i = 0u;
 while (i < n) {
@@ -171,7 +171,7 @@ Logical value types are separate from physical host layouts. A struct remains a 
 
 Compute parameters are semantic resources, not ordinary function parameters.
 
-```pine
+```tach
 export compute step(
   state: storage<State[], read_write>,
   params: uniform<Params>,
@@ -192,13 +192,13 @@ Explicit `@group` / `@binding` annotations pin the ABI. Omitted locations are as
 The same group/binding pair becomes:
 
 ```text
-Pine group   -> WGSL @group       -> Vulkan DescriptorSet
-Pine binding -> WGSL @binding     -> SPIR-V Binding
+Tach group   -> WGSL @group       -> Vulkan DescriptorSet
+Tach binding -> WGSL @binding     -> SPIR-V Binding
 ```
 
 ## 9. ABI ownership
 
-The compiler computes host layout once in `internal/layout`.
+The compiler computes host layout once in `src/layout`.
 
 That one result drives:
 
@@ -210,15 +210,15 @@ That one result drives:
 
 Host bindings never reverse-engineer generated WGSL.
 
-Kernel entry-point names are also ABI-owned and shared by both backends (`__pine_k_<mangled-name>`).
+Kernel entry-point names are also ABI-owned and shared by both backends (`__tach_k_<mangled-name>`).
 
 ## 10. Portable semantics belong to Core IR
 
-Where target semantics differ, Pine defines one behavior before emission.
+Where target semantics differ, Tach defines one behavior before emission.
 
-A concrete example is 32-bit shifts. Pine normalizes the shift count to its low five bits in Core IR. Both WGSL and SPIR-V then receive the same already-defined operation.
+A concrete example is 32-bit shifts. Tach normalizes the shift count to its low five bits in Core IR. Both WGSL and SPIR-V then receive the same already-defined operation.
 
-Likewise, atomics and barriers have Pine-level meaning. The WGSL backend selects the corresponding builtin; the SPIR-V backend selects scopes and memory-semantics operands from that Pine operation.
+Likewise, atomics and barriers have Tach-level meaning. The WGSL backend selects the corresponding builtin; the SPIR-V backend selects scopes and memory-semantics operands from that Tach operation.
 
 ## 11. Uniformity analysis
 
@@ -262,7 +262,7 @@ WGSL emission is intentionally shallow:
 - builtins -> compute entry-point builtin parameters
 - atomics/math -> WGSL builtins
 
-The Pine WGSL validator reparses the exact WGSL subset emitted by Pine and rejects malformed output shape/syntax. Semantic correctness has already been established in Core IR; this layer protects backend serialization.
+The Tach WGSL validator reparses the exact WGSL subset emitted by Tach and rejects malformed output shape/syntax. Semantic correctness has already been established in Core IR; this layer protects backend serialization.
 
 ## 14. SPIR-V backend
 
@@ -279,7 +279,7 @@ The SPIR-V emitter owns binary word encoding and ID allocation. It materializes 
 - atomic scope/memory-semantics operands
 - GLSL.std.450 extended math instructions
 
-The Pine SPIR-V validator decodes the emitted bytes independently and validates module structure, IDs, types, decorations, resource layout, function structure, CFG predecessor sets, dominance/SSA use, phi edges, structured merges, memory operations, atomics, barriers, and supported extended instructions.
+The Tach SPIR-V validator decodes the emitted bytes independently and validates module structure, IDs, types, decorations, resource layout, function structure, CFG predecessor sets, dominance/SSA use, phi edges, structured merges, memory operations, atomics, barriers, and supported extended instructions.
 
 The disassembler consumes binary bytes as well; it is not an emitter-side debug dump.
 
