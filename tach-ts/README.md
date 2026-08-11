@@ -364,16 +364,18 @@ synchronization boundary instead of disappearing.
 The package exposes the native compiler as `tach`:
 
 ```text
-tach build FILE.tach
-tach check FILE.tach
+tach build [--target web|spirv|all] FILE.tach
+tach check [--target web|spirv|all] FILE.tach
 tach ir FILE.tach
 tach wgsl FILE.tach
 tach spirv-dis FILE.tach
 tach version
 ```
 
-`build` writes `.tir`, `.wgsl`, `.spv`, `.spvasm`, `.js`, `.d.ts`, and
-`.tach.json` to `build/`. Rebuild them together from `.tach` source.
+Both commands default to `web`. A web build writes `.wgsl`, `.js`, and `.d.ts`;
+`--target spirv` writes only `.spv`; `--target all` writes those artifacts plus
+`.tir`, `.spvasm`, and `.tach.json` diagnostics. Rebuilding the same module
+removes stale Tach artifacts outside the newly selected target.
 
 Published packages support Linux, macOS, and Windows on x64 and arm64. The
 installer selects the release asset for the package version and verifies its
@@ -401,11 +403,18 @@ if (!checked.ok) throw new Error(checked.error.message);
 
 const built = await build("kernels/scale.tach", { cwd: process.cwd() });
 if (!built.ok) throw new Error(built.error.message);
+
+const spirv = await build("kernels/scale.tach", {
+  cwd: process.cwd(),
+  target: "spirv",
+});
+if (!spirv.ok) throw new Error(spirv.error.message);
 ```
 
 These APIs return `Result` values. They capture output and the resolved binary.
-`cwd` selects the child directory and `env` overlays environment variables.
-Do not import this entry point into a browser bundle.
+`build` accepts `target: "web" | "spirv" | "all"`; omitting it uses the native
+compiler's `web` default. `cwd` selects the child directory and `env` overlays
+environment variables. Do not import this entry point into a browser bundle.
 
 ## Generated code boundary
 
@@ -413,9 +422,8 @@ Generated `.js` imports `defineModule` from `@depths/tach/internal` and embeds
 WGSL plus compiler-owned descriptors. That subpath is for generated code, not
 applications. Application imports belong at `@depths/tach`.
 
-The generated JavaScript, declarations, metadata, WGSL, SPIR-V, and IR are one
-validated compiler result. They are not designed to be edited or mixed across
-compiler versions.
+Every selected output set is one validated compiler result. Its files are not
+designed to be edited or mixed across compiler versions.
 
 ## Repository development
 

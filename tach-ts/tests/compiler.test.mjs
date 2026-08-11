@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,7 +16,7 @@ test("the package resolves and runs the repository compiler", async () => {
   assert.match(version.value.stdout, /^tach /u);
 });
 
-test("build emits package-backed JavaScript bindings", async () => {
+test("build defaults to web artifacts and can select SPIR-V", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tach-package-test-"));
   try {
     const source = join(directory, "scale.tach");
@@ -32,6 +32,21 @@ export function scale[i](data: buffer<float32[]>, factor: float32) {
     assert.match(generated, /from "@depths\/tach\/internal"/u);
     assert.match(generated, /export function scale\(data, factor, \$dispatch\)/u);
     assert.doesNotMatch(generated, /export const buffer/u);
+    assert.deepEqual((await readdir(join(directory, "build"))).sort(), ["scale.d.ts", "scale.js", "scale.wgsl"]);
+
+    const spirv = await build(source, { cwd: directory, target: "spirv" });
+    assert.equal(spirv.ok, true);
+    assert.deepEqual(await readdir(join(directory, "build")), ["scale.spv"]);
+
+    const checked = await runCompiler(["check", source], { cwd: directory });
+    assert.equal(checked.ok, true);
+    assert.match(checked.value.stdout, /WGSL:.*bindings:/su);
+    assert.doesNotMatch(checked.value.stdout, /SPIR-V:/u);
+
+    const checkedSPIRV = await runCompiler(["check", "--target", "spirv", source], { cwd: directory });
+    assert.equal(checkedSPIRV.ok, true);
+    assert.match(checkedSPIRV.value.stdout, /SPIR-V:/u);
+    assert.doesNotMatch(checkedSPIRV.value.stdout, /WGSL:|bindings:/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

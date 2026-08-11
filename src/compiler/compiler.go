@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,8 +16,25 @@ import (
 	"tach/src/wgsl"
 )
 
-// Result is a complete Tach compilation. Every artifact in Result has already
-// passed the validators owned by the Tach compiler.
+type BuildTarget string
+
+const (
+	TargetWeb   BuildTarget = "web"
+	TargetSPIRV BuildTarget = "spirv"
+	TargetAll   BuildTarget = "all"
+)
+
+func ParseBuildTarget(name string) (BuildTarget, error) {
+	target := BuildTarget(name)
+	switch target {
+	case TargetWeb, TargetSPIRV, TargetAll:
+		return target, nil
+	default:
+		return "", fmt.Errorf("unknown build target %q (want web, spirv, or all)", name)
+	}
+}
+
+// Result contains the validated artifacts requested from one Tach compilation.
 type Result struct {
 	SourceName string
 	IR         string
@@ -26,12 +44,21 @@ type Result struct {
 	JavaScript string
 	TypeScript string
 	Metadata   []byte
+	target     BuildTarget
 }
 
 // Compile runs the complete Tach pipeline: parsing, semantic analysis,
 // structured SSA-ish IR verification, WGSL generation+validation, SPIR-V
 // generation+binary validation, SPIR-V disassembly, and binding generation.
 func Compile(sourceName, source string) (*Result, error) {
+	return CompileTarget(sourceName, source, TargetAll)
+}
+
+// CompileTarget runs only the backends and generators required by target.
+func CompileTarget(sourceName, source string, target BuildTarget) (*Result, error) {
+	if _, err := ParseBuildTarget(string(target)); err != nil {
+		return nil, err
+	}
 	astModule, err := parser.Parse(sourceName, source)
 	if err != nil {
 		return nil, err
@@ -43,45 +70,52 @@ func Compile(sourceName, source string) (*Result, error) {
 	if err := opt.Run(module); err != nil {
 		return nil, fmt.Errorf("IR optimization: %w", err)
 	}
-	wgslSource, err := wgsl.Emit(module)
-	if err != nil {
-		return nil, fmt.Errorf("WGSL backend: %w", err)
-	}
-	spv, err := spirv.Emit(module)
-	if err != nil {
-		return nil, fmt.Errorf("SPIR-V backend: %w", err)
-	}
-	spvAsm, err := spirv.Disassemble(spv)
-	if err != nil {
-		return nil, fmt.Errorf("SPIR-V disassembly: %w", err)
-	}
 
-	generated, err := bindings.Generate(module, wgslSource)
-	if err != nil {
-		return nil, fmt.Errorf("bindings: %w", err)
+	result := &Result{SourceName: sourceName, target: target}
+	if target == TargetAll {
+		result.IR = ir.Dump(module)
 	}
-
-	return &Result{
-		SourceName: sourceName,
-		IR:         ir.Dump(module),
-		WGSL:       wgslSource,
-		SPIRV:      spv,
-		SPIRVAsm:   spvAsm,
-		JavaScript: generated.JavaScript,
-		TypeScript: generated.Declarations,
-		Metadata:   generated.MetadataJSON,
-	}, nil
+	if target == TargetWeb || target == TargetAll {
+		result.WGSL, err = wgsl.Emit(module)
+		if err != nil {
+			return nil, fmt.Errorf("WGSL backend: %w", err)
+		}
+		generated, err := bindings.Generate(module, result.WGSL)
+		if err != nil {
+			return nil, fmt.Errorf("bindings: %w", err)
+		}
+		result.JavaScript = generated.JavaScript
+		result.TypeScript = generated.Declarations
+		result.Metadata = generated.MetadataJSON
+	}
+	if target == TargetSPIRV || target == TargetAll {
+		result.SPIRV, err = spirv.Emit(module)
+		if err != nil {
+			return nil, fmt.Errorf("SPIR-V backend: %w", err)
+		}
+	}
+	if target == TargetAll {
+		result.SPIRVAsm, err = spirv.Disassemble(result.SPIRV)
+		if err != nil {
+			return nil, fmt.Errorf("SPIR-V disassembly: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func CompileFile(path string) (*Result, error) {
+	return CompileFileTarget(path, TargetAll)
+}
+
+func CompileFileTarget(path string, target BuildTarget) (*Result, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return Compile(path, string(data))
+	return CompileTarget(path, string(data), target)
 }
 
-// WriteDirectory writes a complete, already-validated compilation to dir.
+// WriteDirectory writes exactly the requested, already-validated artifact set.
 func WriteDirectory(result *Result, dir, base string) ([]string, error) {
 	if result == nil {
 		return nil, fmt.Errorf("nil compilation result")
@@ -96,25 +130,41 @@ func WriteDirectory(result *Result, dir, base string) ([]string, error) {
 		return nil, err
 	}
 
+	if _, err := ParseBuildTarget(string(result.target)); err != nil {
+		return nil, fmt.Errorf("compilation result has invalid build target %q", result.target)
+	}
 	artifacts := []struct {
-		name string
-		data []byte
+		name   string
+		data   []byte
+		target BuildTarget
 	}{
-		{base + ".tir", []byte(result.IR)},
-		{base + ".wgsl", []byte(result.WGSL)},
-		{base + ".spv", result.SPIRV},
-		{base + ".spvasm", []byte(result.SPIRVAsm)},
-		{base + ".js", []byte(result.JavaScript)},
-		{base + ".d.ts", []byte(result.TypeScript)},
-		{base + ".tach.json", result.Metadata},
+		{base + ".tir", []byte(result.IR), TargetAll},
+		{base + ".wgsl", []byte(result.WGSL), TargetWeb},
+		{base + ".spv", result.SPIRV, TargetSPIRV},
+		{base + ".spvasm", []byte(result.SPIRVAsm), TargetAll},
+		{base + ".js", []byte(result.JavaScript), TargetWeb},
+		{base + ".d.ts", []byte(result.TypeScript), TargetWeb},
+		{base + ".tach.json", result.Metadata, TargetAll},
 	}
 	paths := make([]string, 0, len(artifacts))
 	for _, a := range artifacts {
+		if result.target != TargetAll && result.target != a.target {
+			continue
+		}
 		path := filepath.Join(dir, a.name)
 		if err := os.WriteFile(path, a.data, 0o644); err != nil {
 			return nil, fmt.Errorf("write %s: %w", path, err)
 		}
 		paths = append(paths, path)
+	}
+	for _, a := range artifacts {
+		if result.target == TargetAll || result.target == a.target {
+			continue
+		}
+		path := filepath.Join(dir, a.name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("remove stale %s: %w", path, err)
+		}
 	}
 	return paths, nil
 }

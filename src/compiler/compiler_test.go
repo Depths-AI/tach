@@ -9,6 +9,54 @@ import (
 	"testing"
 )
 
+func TestBuildTargetsCompileAndWriteOnlyTheirArtifacts(t *testing.T) {
+	const source = `export function copy[i](data: buffer<uint32[]>) {
+  if (i < data.length) { data[i] = i; }
+}`
+	directory := t.TempDir()
+	tests := []struct {
+		target BuildTarget
+		files  string
+	}{
+		{TargetAll, "module.d.ts,module.js,module.spv,module.spvasm,module.tach.json,module.tir,module.wgsl"},
+		{TargetWeb, "module.d.ts,module.js,module.wgsl"},
+		{TargetSPIRV, "module.spv"},
+	}
+	for _, test := range tests {
+		result, err := CompileTarget("module.tach", source, test.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.target == TargetWeb && (result.IR != "" || len(result.SPIRV) != 0 || result.SPIRVAsm != "") {
+			t.Fatal("web target generated diagnostic or SPIR-V artifacts")
+		}
+		if test.target == TargetSPIRV && (result.IR != "" || result.WGSL != "" || result.JavaScript != "" || result.TypeScript != "" || len(result.Metadata) != 0 || result.SPIRVAsm != "") {
+			t.Fatal("spirv target generated non-SPIR-V artifacts")
+		}
+		if _, err := WriteDirectory(result, directory, "module"); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, len(entries))
+		for i, entry := range entries {
+			names[i] = entry.Name()
+		}
+		if got := strings.Join(names, ","); got != test.files {
+			t.Fatalf("%s target files = %s, want %s", test.target, got, test.files)
+		}
+	}
+}
+
+func TestUnknownBuildTargetIsRejected(t *testing.T) {
+	_, err := CompileTarget("module.tach", "", BuildTarget("metal"))
+	if err == nil || !strings.Contains(err.Error(), "web, spirv, or all") {
+		t.Fatalf("CompileTarget error = %v, want target diagnostic", err)
+	}
+}
+
 func TestCompletePipelineStructuredSSA(t *testing.T) {
 	source := `
 type Params = { scale: float32, count: uint32 };

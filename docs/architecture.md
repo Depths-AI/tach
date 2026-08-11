@@ -78,10 +78,11 @@ lexer -> parser -> AST
           + generated-contract validation
 ```
 
-`src/compiler.Compile` is the orchestration point. It returns one `Result`
-containing the optimized IR dump, WGSL, SPIR-V bytes, disassembly, JavaScript,
-TypeScript declarations, and metadata. `WriteDirectory` writes those seven
-already-validated values together.
+`src/compiler.CompileTarget` is the orchestration point. It always runs the
+shared front end and optimizer, then enters only the requested backend:
+`web`, `spirv`, or both for `all`. `Compile` is the complete `all` entry point
+used by internal cross-target tests. `WriteDirectory` writes exactly the
+selected validated set and removes stale Tach siblings for that module.
 
 No generated stage reads another artifact to rediscover semantics. In
 particular, bindings do not parse WGSL, and the SPIR-V disassembler decodes the

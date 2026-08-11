@@ -36,7 +36,7 @@ export default async function buildExamples() {
     const sourcePath = join(examplesDir, sourceName);
     const name = sourceName.slice(0, -".tach".length);
     console.log(`Compiling ${relative(repositoryRoot, sourcePath)}`);
-    unwrap(await build(sourcePath, { cwd: projectRoot }));
+    unwrap(await build(sourcePath, { cwd: projectRoot, target: "all" }));
 
     for (const suffix of artifactSuffixes) await access(join(outputDir, name + suffix), constants.R_OK);
     const metadata = JSON.parse(await readFile(join(outputDir, `${name}.tach.json`), "utf8"));

@@ -220,31 +220,42 @@ rules. The [TypeScript runtime guide](tach-ts/README.md) covers the full API.
 
 ## Compiler output
 
-One module produces seven artifacts:
+`build` and `check` use the same target selection. Both default to `web`:
+
+| Target | `build` writes | `check` validates |
+|---|---|---|
+| `web` | `.wgsl`, `.js`, `.d.ts` | WGSL and generated bindings |
+| `spirv` | `.spv` | SPIR-V |
+| `all` | every artifact below | both backends plus diagnostics |
+
+The complete `all` artifact set is:
 
 | File | What it is for |
 |---|---|
-| `.tir` | readable, verified Tach Core IR |
+| `.tir` | readable, verified Tach Core IR diagnostic |
 | `.wgsl` | WebGPU compute shader |
 | `.spv` | SPIR-V 1.3 compute module |
-| `.spvasm` | disassembly of the emitted SPIR-V bytes |
+| `.spvasm` | diagnostic disassembly of the emitted SPIR-V bytes |
 | `.js` | generated command constructors |
 | `.d.ts` | generated TypeScript object types and function signatures |
-| `.tach.json` | buffers, value parameters, layouts, entry points, and launch metadata |
+| `.tach.json` | diagnostic reflection for buffers, values, layouts, entry points, and launches |
 
 The useful CLI commands are:
 
 ```text
 tach build FILE.tach
-tach check FILE.tach
+tach build --target spirv FILE.tach
+tach build --target all FILE.tach
+tach check [--target web|spirv|all] FILE.tach
 tach ir FILE.tach
 tach wgsl FILE.tach
 tach spirv-dis FILE.tach
 tach version
 ```
 
-The `.tach` file is the source of truth. Rebuild the seven outputs together;
-do not edit or mix generated artifacts by hand.
+The `.tach` file is the source of truth. A later build of the same module
+removes stale Tach artifacts outside the selected target, so `build/` reflects
+that invocation exactly. Do not edit or mix generated artifacts by hand.
 
 ## What the compiler owns
 

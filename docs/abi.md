@@ -267,7 +267,9 @@ types must not be contaminated by host-layout decorations.
 
 ## 9. Reflection metadata
 
-Every build writes `<module>.tach.json`. Its exact top-level shape is:
+An `all` build writes `<module>.tach.json`; web builds keep the same reflection
+inside their generated JavaScript instead of writing a separate file. The
+JSON artifact's exact top-level shape is:
 
 ```ts
 interface Metadata {
@@ -599,8 +601,8 @@ kernel author's responsibility.
 
 ## 17. Compatibility rule
 
-The `.tach` file is the source of truth. The seven generated artifacts form
-one compiler result and must travel together. Public kernel names, parameter
-order, byte layout, launch rank, and runtime lifetime are ABI, but the metadata
-schema is intentionally not versioned yet. Recompile rather than hand-editing
-or combining generated output.
+The `.tach` file is the source of truth. Files from one selected build form one
+compiler result and must travel together; the `all` target is the seven-file
+diagnostic superset. Public kernel names, parameter order, byte layout, launch
+rank, and runtime lifetime are ABI, but the metadata schema is intentionally
+not versioned yet. Recompile rather than hand-editing or combining output.

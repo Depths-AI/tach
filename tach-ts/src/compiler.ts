@@ -12,6 +12,12 @@ export interface CompilerRunOptions {
   readonly env?: Readonly<Record<string, string>>;
 }
 
+export type BuildTarget = "web" | "spirv" | "all";
+
+export interface BuildOptions extends CompilerRunOptions {
+  readonly target?: BuildTarget;
+}
+
 export interface CompilerRun {
   readonly path: string;
   readonly stdout: string;
@@ -236,7 +242,8 @@ export async function runCompiler(
 
 export async function build(
   source: string,
-  options: CompilerRunOptions = {},
+  options: BuildOptions = {},
 ): Promise<Result<CompilerRun>> {
-  return runCompiler(["build", source], options);
+  const { target, ...runOptions } = options;
+  return runCompiler(target === undefined ? ["build", source] : ["build", "--target", target, source], runOptions);
 }
