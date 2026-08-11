@@ -49,17 +49,11 @@ func Verify(m *Module) error {
 			fn[f.Name] = true
 		}
 	}
-	bindings := map[[2]uint32]string{}
 	for i, r := range m.Resources {
 		if r.Name == "" {
 			return fmt.Errorf("resource %d has empty name", i)
 		}
-		k := [2]uint32{r.Group, r.Binding}
-		if prev, ok := bindings[k]; ok {
-			return fmt.Errorf("resources %s and %s share group=%d binding=%d", prev, r.Name, r.Group, r.Binding)
-		}
-		bindings[k] = r.Name
-		if r.Kind != Uniform && r.Kind != Storage {
+		if r.Kind != Uniform && r.Kind != Buffer {
 			return fmt.Errorf("resource %s has invalid kind", r.Name)
 		}
 		if r.Kind == Uniform && types.ContainsRuntimeArray(r.Type) {
@@ -73,9 +67,6 @@ func Verify(m *Module) error {
 		}
 		if r.Kind == Uniform && r.Access != Read {
 			return fmt.Errorf("uniform resource %s must be read-only", r.Name)
-		}
-		if r.Kind == Storage && types.ContainsAtomic(r.Type) && r.Access != ReadWrite {
-			return fmt.Errorf("storage resource %s containing atomic values must be read_write", r.Name)
 		}
 	}
 	fmap := map[string]*Function{}
@@ -118,6 +109,11 @@ func verifyUniqueIDs(f *Function) error {
 	}
 	for _, p := range f.Params {
 		if err := defValue(p.ID, "parameter "+p.Name); err != nil {
+			return err
+		}
+	}
+	for _, p := range f.Indices {
+		if err := defValue(p.ID, "logical index "+p.Name); err != nil {
 			return err
 		}
 	}
@@ -186,6 +182,14 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		if len(f.Params) != 0 {
 			return fmt.Errorf("compute function cannot have value parameters")
 		}
+		if len(f.Indices) < 1 || len(f.Indices) > 3 {
+			return fmt.Errorf("compute function requires 1 to 3 logical indices")
+		}
+		for _, index := range f.Indices {
+			if !types.Equal(index.Type, types.TU32) {
+				return fmt.Errorf("logical index %s has type %s, want u32", index.Name, index.Type)
+			}
+		}
 		if f.Return.Kind != types.Void {
 			return fmt.Errorf("compute function must return void")
 		}
@@ -194,8 +198,13 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 				return fmt.Errorf("workgroup size must be positive")
 			}
 		}
-	} else if len(f.WorkgroupVars) != 0 {
-		return fmt.Errorf("helper function cannot declare workgroup variables")
+	} else {
+		if len(f.Indices) != 0 {
+			return fmt.Errorf("helper function cannot have logical indices")
+		}
+		if len(f.WorkgroupVars) != 0 {
+			return fmt.Errorf("helper function cannot declare workgroup variables")
+		}
 	}
 	wgnames := map[string]bool{}
 	for i, w := range f.WorkgroupVars {
@@ -211,6 +220,9 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		}
 	}
 	e := verifyEnv{values: map[ValueID]*types.Type{}, places: map[PlaceID]placeInfo{}}
+	for _, index := range f.Indices {
+		e.values[index.ID] = index.Type
+	}
 	for _, p := range f.Params {
 		if p.ID == 0 {
 			return fmt.Errorf("value id 0 is reserved")
@@ -275,20 +287,6 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 		case *Const:
 			if !types.IsScalar(x.Type) {
 				return e, fmt.Errorf("constant %%%d has non-scalar type %s", x.Result, x.Type)
-			}
-			if err := defVal(x.Result, x.Type); err != nil {
-				return e, err
-			}
-		case *Builtin:
-			if !f.Compute {
-				return e, fmt.Errorf("builtin used outside compute entry point")
-			}
-			want := types.Vec(types.TU32, 3)
-			if x.Kind == LocalIndex {
-				want = types.TU32
-			}
-			if !types.Equal(x.Type, want) {
-				return e, fmt.Errorf("builtin %d has type %s, want %s", x.Kind, x.Type, want)
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
 				return e, err
@@ -535,7 +533,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			if p.resource >= 0 {
 				r := m.Resources[p.resource]
-				if r.Kind != Storage || r.Access != ReadWrite {
+				if r.Kind != Buffer || r.Access != Mutable {
 					return e, fmt.Errorf("store through non-writable resource %s", r.Name)
 				}
 			}
@@ -547,10 +545,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if p.ty.Kind != types.Atomic || !types.Equal(p.ty.Elem, x.Type) || (x.Type.Kind != types.I32 && x.Type.Kind != types.U32) {
 				return e, fmt.Errorf("atomic operation type %s does not match place %s", x.Type, p.ty)
 			}
-			if p.resource >= 0 {
+			if p.resource >= 0 && x.Op != AtomicLoad {
 				r := m.Resources[p.resource]
-				if r.Kind != Storage || r.Access != ReadWrite {
-					return e, fmt.Errorf("atomic operation through non-writable storage resource %s", r.Name)
+				if r.Kind != Buffer || r.Access != Mutable {
+					return e, fmt.Errorf("atomic operation through non-writable buffer resource %s", r.Name)
 				}
 			}
 			switch x.Op {
@@ -593,7 +591,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !f.Compute {
 				return e, fmt.Errorf("barrier outside compute function")
 			}
-			if x.Kind != BarrierWorkgroup && x.Kind != BarrierStorage {
+			if x.Kind != BarrierWorkgroup && x.Kind != BarrierBuffer {
 				return e, fmt.Errorf("unknown barrier kind %d", x.Kind)
 			}
 		case *ArrayLength:
@@ -778,7 +776,7 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 		if !baseOK || !types.Equal(x.Type, t) {
 			return fmt.Errorf("abs requires i32/f32 scalar or vector and preserves type")
 		}
-	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicInverseSqrt:
+	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicRSqrt:
 		if err := need(1); err != nil {
 			return err
 		}
@@ -832,7 +830,7 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 			return err
 		}
 		if !same() || !floatVec(args[0]) || args[0].Lanes != 3 || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("cross requires two vec3f operands")
+			return fmt.Errorf("cross requires two f32x3 operands")
 		}
 	case IntrinsicNormalize:
 		if err := need(1); err != nil {

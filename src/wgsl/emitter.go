@@ -20,6 +20,7 @@ func workgroupName(f *ir.Function, i int) string {
 }
 
 type emitter struct {
+	p           *program
 	m           *ir.Module
 	b           strings.Builder
 	indent      int
@@ -31,7 +32,12 @@ func Emit(m *ir.Module) (string, error) {
 	if err := ir.Verify(m); err != nil {
 		return "", err
 	}
-	e := &emitter{m: m, structIndex: map[string]int{}, funcIndex: map[string]int{}}
+	p, err := lower(m)
+	if err != nil {
+		return "", err
+	}
+	optimize(p)
+	e := &emitter{p: p, m: m, structIndex: map[string]int{}, funcIndex: map[string]int{}}
 	for i, t := range m.Structs {
 		e.structIndex[t.Name] = i
 	}
@@ -150,13 +156,13 @@ func (e *emitter) emitResource(i int, r ir.Resource) {
 	e.indent--
 	e.line("}")
 	if r.Kind == ir.Uniform {
-		e.line("@group(%d) @binding(%d) var<uniform> %s: %s;", r.Group, r.Binding, resourceName(i), w)
+		e.line("@group(0) @binding(%d) var<uniform> %s: %s;", i, resourceName(i), w)
 	} else {
 		access := "read"
-		if r.Access == ir.ReadWrite {
+		if r.Access == ir.Mutable || types.ContainsAtomic(r.Type) {
 			access = "read_write"
 		}
-		e.line("@group(%d) @binding(%d) var<storage, %s> %s: %s;", r.Group, r.Binding, access, resourceName(i), w)
+		e.line("@group(0) @binding(%d) var<storage, %s> %s: %s;", i, access, resourceName(i), w)
 	}
 }
 
@@ -170,35 +176,6 @@ func hasRuntimeTail(t *types.Type) bool {
 	return t.Kind == types.Struct && len(t.Fields) > 0 && hasRuntimeTail(t.Fields[len(t.Fields)-1].Type)
 }
 
-func scanBuiltins(b *ir.Block, out map[ir.BuiltinKind]bool) {
-	for _, in := range b.Instrs {
-		switch x := in.(type) {
-		case *ir.Builtin:
-			out[x.Kind] = true
-		case *ir.If:
-			scanBuiltins(x.Then, out)
-			scanBuiltins(x.Else, out)
-		case *ir.Loop:
-			scanBuiltins(x.Cond, out)
-			scanBuiltins(x.Body, out)
-		}
-	}
-}
-func builtinParam(k ir.BuiltinKind) (attr, name, ty string) {
-	switch k {
-	case ir.GlobalID:
-		return "global_invocation_id", "_tach_global_id", "vec3<u32>"
-	case ir.LocalID:
-		return "local_invocation_id", "_tach_local_id", "vec3<u32>"
-	case ir.LocalIndex:
-		return "local_invocation_index", "_tach_local_index", "u32"
-	case ir.WorkgroupID:
-		return "workgroup_id", "_tach_workgroup_id", "vec3<u32>"
-	case ir.NumWorkgroups:
-		return "num_workgroups", "_tach_num_workgroups", "vec3<u32>"
-	}
-	return "", "", ""
-}
 func (e *emitter) funcName(f *ir.Function) string {
 	if f.Compute {
 		return kernelName(f.Name)
@@ -212,14 +189,15 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	}
 	var params []string
 	if f.Compute {
-		bs := map[ir.BuiltinKind]bool{}
-		scanBuiltins(f.Body, bs)
-		order := []ir.BuiltinKind{ir.GlobalID, ir.LocalID, ir.LocalIndex, ir.WorkgroupID, ir.NumWorkgroups}
-		for _, k := range order {
-			if bs[k] {
-				a, n, t := builtinParam(k)
-				params = append(params, fmt.Sprintf("@builtin(%s) %s: %s", a, n, t))
-			}
+		lowered := e.p.functions[f]
+		if lowered.needsGlobal() {
+			params = append(params, "@builtin(global_invocation_id) _tach_global_index: vec3<u32>")
+		}
+		if lowered.needsLocal() {
+			params = append(params, "@builtin(local_invocation_id) _tach_local_index: vec3<u32>")
+		}
+		if lowered.needsLocalLinear() {
+			params = append(params, "@builtin(local_invocation_index) _tach_local_linear: u32")
 		}
 	} else {
 		for _, p := range f.Params {
@@ -232,7 +210,15 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	}
 	e.line(head + " {")
 	e.indent++
-	st := &fnState{e: e, f: f, values: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]placeExpr{}}
+	st := &fnState{e: e, f: f, lowered: e.p.functions[f], values: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]placeExpr{}}
+	for _, id := range st.lowered.coordinates.Order {
+		if st.lowered.uses(id) == 0 {
+			continue
+		}
+		expression, _ := st.lowered.expression(id)
+		e.line("let %s: u32 = %s;", v(id), expression)
+		st.def(id, types.TU32)
+	}
 	for _, p := range f.Params {
 		st.values[p.ID] = p.Type
 	}
@@ -250,10 +236,11 @@ type placeExpr struct {
 	resource int
 }
 type fnState struct {
-	e      *emitter
-	f      *ir.Function
-	values map[ir.ValueID]*types.Type
-	places map[ir.PlaceID]placeExpr
+	e       *emitter
+	f       *ir.Function
+	lowered *loweredFunction
+	values  map[ir.ValueID]*types.Type
+	places  map[ir.PlaceID]placeExpr
 }
 
 func v(id ir.ValueID) string                        { return fmt.Sprintf("_v%d", id) }
@@ -299,20 +286,22 @@ func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result, loop *ir.Loop
 }
 func (s *fnState) emitInstr(in ir.Instr) error {
 	e := s.e
+	if definition, ok := in.(ir.ValueDef); ok && s.lowered != nil && s.lowered.replaced(definition.ResultValue()) {
+		return nil
+	}
 	switch x := in.(type) {
 	case *ir.Const:
+		if s.lowered != nil && s.lowered.uses(x.Result) == 0 {
+			return nil
+		}
 		raw := x.Raw
-		if x.Type.Kind == types.U32 && !strings.HasSuffix(raw, "u") {
+		if x.Type.Kind == types.U32 {
 			raw += "u"
 		}
-		if x.Type.Kind == types.I32 && !strings.HasSuffix(raw, "i") {
+		if x.Type.Kind == types.I32 {
 			raw += "i"
 		}
 		e.line("let %s: %s = %s;", v(x.Result), e.typeName(x.Type), raw)
-		s.def(x.Result, x.Type)
-	case *ir.Builtin:
-		_, name, _ := builtinParam(x.Kind)
-		e.line("let %s: %s = %s;", v(x.Result), e.typeName(x.Type), name)
 		s.def(x.Result, x.Type)
 	case *ir.Unary:
 		e.line("let %s: %s = %s%s;", v(x.Result), e.typeName(x.Type), x.Op, v(x.X))
@@ -325,7 +314,11 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		for i, id := range x.Args {
 			args[i] = v(id)
 		}
-		e.line("let %s: %s = %s(%s);", v(x.Result), e.typeName(x.Type), x.Kind.String(), strings.Join(args, ", "))
+		name := x.Kind.String()
+		if x.Kind == ir.IntrinsicRSqrt {
+			name = "inverseSqrt"
+		}
+		e.line("let %s: %s = %s(%s);", v(x.Result), e.typeName(x.Type), name, strings.Join(args, ", "))
 		s.def(x.Result, x.Type)
 	case *ir.Convert:
 		e.line("let %s: %s = %s(%s);", v(x.Result), e.typeName(x.Type), e.typeName(x.Type), v(x.X))
@@ -443,7 +436,7 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		switch x.Kind {
 		case ir.BarrierWorkgroup:
 			e.line("workgroupBarrier();")
-		case ir.BarrierStorage:
+		case ir.BarrierBuffer:
 			e.line("storageBarrier();")
 		default:
 			return fmt.Errorf("unknown barrier kind %d", x.Kind)

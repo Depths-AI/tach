@@ -23,21 +23,24 @@ func TestParticlesEndToIR(t *testing.T) {
 		t.Fatal(err)
 	}
 	dump := ir.Dump(m)
-	for _, want := range []string{"compute @integrate", "place.index", "call @integrateParticle", "builtin"} {
+	for _, want := range []string{"compute @integrate[i=%1]", "place.index", "call @integrateParticle"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("IR missing %q:\n%s", want, dump)
 		}
 	}
+	if strings.Contains(dump, "builtin") {
+		t.Fatalf("Core IR leaked a backend builtin:\n%s", dump)
+	}
 }
 
-func TestDuplicateComputeParameterNameRejectedEvenWhenBindingAlreadyExists(t *testing.T) {
+func TestDuplicateComputeParameterNameRejected(t *testing.T) {
 	m, err := parser.Parse("dup-param.tach", `
-@workgroupSize(1)
-export compute first(@group(0) @binding(1) shared: storage<u32[], read_write>) { }
-@workgroupSize(1)
-export compute second(
-  @group(0) @binding(0) shared: storage<u32[], read_write>,
-  @group(0) @binding(1) shared: storage<u32[], read_write>
+@workgroup(1)
+export compute first[i](shared: buffer<u32[]>) { }
+@workgroup(1)
+export compute second[i](
+  shared: buffer<u32[]>,
+  shared: buffer<u32[]>
 ) { }
 `)
 	if err != nil {
@@ -49,16 +52,16 @@ export compute second(
 	}
 }
 
-func TestComputeKernelRequiresStorage(t *testing.T) {
+func TestComputeKernelRequiresBuffer(t *testing.T) {
 	m, err := parser.Parse("uniform-only.tach", `
-@workgroupSize(1)
-export compute invisible(params: uniform<u32>) { }
+@workgroup(1)
+export compute invisible[i](params: uniform<u32>) { }
 `)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = sema.CheckAndLower(m)
-	if err == nil || !strings.Contains(err.Error(), "requires at least one storage parameter") {
-		t.Fatalf("CheckAndLower error = %v, want storage-parameter diagnostic", err)
+	if err == nil || !strings.Contains(err.Error(), "requires at least one buffer parameter") {
+		t.Fatalf("CheckAndLower error = %v, want buffer-parameter diagnostic", err)
 	}
 }

@@ -26,25 +26,26 @@ function rate(value: number): string {
 }
 
 function card(result: BenchmarkResult): HTMLElement {
+  const compared = result.cpuMs !== null && result.speedup !== null && result.cpuRate !== null;
   const element = document.createElement("article");
   element.className = "benchmark";
   element.dataset.benchmark = result.id;
   element.innerHTML = `
     <div class="card-heading">
       <div><p class="kind">${result.dispatches} dispatches per timed batch</p><h2>${result.name}</h2></div>
-      <span class="check ${result.correct ? "pass" : "fail"}">${result.correct ? "verified" : "mismatch"}</span>
+      <span class="check ${result.correct === null ? "gpu" : result.correct ? "pass" : "fail"}">${result.correct === null ? "GPU only" : result.correct ? "verified" : "mismatch"}</span>
     </div>
     <p class="description">${result.description}</p>
     <p class="problem">${result.problem}; median of ${result.samples} samples</p>
     <div class="metrics">
       <div><span>WebGPU batch</span><strong>${milliseconds(result.gpuMs)}</strong></div>
-      <div><span>Pure TypeScript</span><strong>${milliseconds(result.cpuMs)}</strong></div>
-      <div class="speedup"><span>Acceleration</span><strong>${result.speedup.toFixed(2)}×</strong></div>
+      <div><span>Pure TypeScript</span><strong>${compared ? milliseconds(result.cpuMs!) : "not run"}</strong></div>
+      <div class="speedup"><span>Acceleration</span><strong>${compared ? `${result.speedup!.toFixed(2)}×` : "—"}</strong></div>
     </div>
     <div class="throughput">
       <span>WebGPU ${rate(result.gpuRate)}</span>
-      <i style="--ratio:${Math.min(1, result.gpuRate / Math.max(result.gpuRate, result.cpuRate))}"></i>
-      <span>TypeScript ${rate(result.cpuRate)} ${result.rateUnit}</span>
+      <i style="--ratio:${compared ? Math.min(1, result.gpuRate / Math.max(result.gpuRate, result.cpuRate!)) : 1}"></i>
+      <span>${compared ? `TypeScript ${rate(result.cpuRate!)} ${result.rateUnit}` : result.rateUnit}</span>
     </div>
     <p class="verification">${result.check}</p>`;
   return element;
@@ -75,20 +76,23 @@ async function main(): Promise<readonly BenchmarkResult[]> {
   const gpu = opened.value;
   const info = gpu.adapter.info;
   adapter.textContent = [info.description, info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter";
-  const fast = new URLSearchParams(location.search).has("quick");
+  const search = new URLSearchParams(location.search);
+  const fast = search.has("quick");
+  const compareCPU = !search.has("gpu-only");
 
   try {
-    const run = await runBenchmarks(gpu, fast, (name, index, total) => {
+    const run = await runBenchmarks(gpu, fast, compareCPU, (name, index, total) => {
       status.textContent = `Running ${index + 1} of ${total}: ${name}…`;
     });
     const results = run.results;
     paint(run.frame);
     grid.replaceChildren(...results.map(card));
-    const geometricMean = Math.exp(results.reduce((sum, item) => sum + Math.log(item.speedup), 0) / results.length);
-    const verified = results.every((item) => item.correct);
-    summary.innerHTML = `<strong>${geometricMean.toFixed(2)}×</strong><span>geometric-mean acceleration across five workloads</span>`;
-    summary.classList.toggle("failed", !verified);
-    status.textContent = `${verified ? "Verified" : "Completed"} 5 benchmarks on ${adapter.textContent}.`;
+    const verified = results.every((item) => item.correct === true);
+    summary.innerHTML = compareCPU
+      ? `<strong>${Math.exp(results.reduce((sum, item) => sum + Math.log(item.speedup!), 0) / results.length).toFixed(2)}×</strong><span>geometric-mean acceleration across five workloads</span>`
+      : "<strong>GPU</strong><span>five full-size WebGPU workloads; CPU comparison skipped</span>";
+    summary.classList.toggle("failed", compareCPU && !verified);
+    status.textContent = `${compareCPU ? verified ? "Verified" : "Completed" : "Measured"} 5 benchmarks on ${adapter.textContent}.`;
     output.textContent = JSON.stringify(results, null, 2);
     return results;
   } finally {

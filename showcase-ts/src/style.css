@@ -96,6 +96,7 @@ h1 {
 
 .check.pass { color: #67e6bb; background: #17382f; }
 .check.fail { color: #ff9b7a; background: #402319; }
+.check.gpu { color: #69a8ff; background: #172a40; }
 
 .metrics {
   display: grid;

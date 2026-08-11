@@ -4,8 +4,8 @@ type Params = {
 };
 
 type Particle = {
-  position: vec4f,
-  velocity: vec4f,
+  position: f32x4,
+  velocity: f32x4,
 };
 
 fn integrateParticle(p: Particle, dt: f32): Particle {
@@ -15,12 +15,10 @@ fn integrateParticle(p: Particle, dt: f32): Particle {
   };
 }
 
-@workgroupSize(256)
-export compute integrate(
-  @group(0) @binding(0) particles: storage<Particle[], read_write>,
-  @group(0) @binding(1) params: uniform<Params>,
+export compute integrate[i](
+  particles: buffer<Particle[]>,
+  params: uniform<Params>,
 ) {
-  const i = globalId.x;
   if (i >= params.count) {
     return;
   }

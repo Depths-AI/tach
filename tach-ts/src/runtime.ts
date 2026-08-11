@@ -33,10 +33,10 @@ export interface ComputeDispatch {
   readonly [computeDispatchBrand]: never;
 }
 
-export type DispatchSize = number | readonly [x: number, y?: number, z?: number];
+export type DispatchSize = number | readonly [x: number, y: number] | readonly [x: number, y: number, z: number];
 
-export interface DispatchOptions {
-  readonly size?: DispatchSize;
+export interface DispatchOptions<Size extends DispatchSize = DispatchSize> {
+  readonly size?: Size;
   readonly dispatches?: number;
 }
 

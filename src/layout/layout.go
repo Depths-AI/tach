@@ -6,10 +6,8 @@ import (
 	"tach/src/types"
 )
 
-// Tach's portable host ABI intentionally uses one layout for every host-visible
-// structure. It is the strict superset of WGSL storage and uniform layout
-// constraints, so the same bytes are valid for WebGPU storage,
-// WebGPU uniform, and Vulkan block layouts.
+// Tach's portable host ABI uses one canonical layout for every host-visible
+// structure. Backends adapt their declarations to these compiler-owned bytes.
 type TypeLayout struct {
 	Size    uint32
 	Align   uint32
@@ -88,8 +86,7 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 		if err != nil {
 			return TypeLayout{}, err
 		}
-		// Runtime arrays are storage-only. Their natural stride remains valid for
-		// both WGSL storage and Vulkan storage buffers.
+		// Runtime arrays are buffer-only and use their element's natural stride.
 		stride, err := roundUp(e.Align, e.Size)
 		if err != nil {
 			return TypeLayout{}, err

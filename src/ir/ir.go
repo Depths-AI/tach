@@ -21,28 +21,27 @@ type ResourceKind uint8
 
 const (
 	Uniform ResourceKind = iota + 1
-	Storage
+	Buffer
 )
 
 type Access uint8
 
 const (
 	Read Access = iota + 1
-	ReadWrite
+	Mutable
 )
 
 type Resource struct {
-	Name    string
-	Kind    ResourceKind
-	Type    *types.Type // logical resource type; runtime array is allowed for storage
-	Access  Access
-	Group   uint32
-	Binding uint32
-	Span    source.Span
+	Name   string
+	Kind   ResourceKind
+	Type   *types.Type // logical resource type; runtime array is allowed for buffers
+	Access Access
+	Span   source.Span
 }
 
 type Function struct {
 	Name           string
+	Indices        []Param
 	Params         []Param
 	Return         *types.Type
 	Body           *Block
@@ -100,28 +99,6 @@ func (*Const) instrNode()                {}
 func (x *Const) SpanOf() source.Span     { return x.Span }
 func (x *Const) ResultValue() ValueID    { return x.Result }
 func (x *Const) ResultType() *types.Type { return x.Type }
-
-type BuiltinKind uint8
-
-const (
-	GlobalID BuiltinKind = iota + 1
-	LocalID
-	LocalIndex
-	WorkgroupID
-	NumWorkgroups
-)
-
-type Builtin struct {
-	Result ValueID
-	Type   *types.Type
-	Kind   BuiltinKind
-	Span   source.Span
-}
-
-func (*Builtin) instrNode()                {}
-func (x *Builtin) SpanOf() source.Span     { return x.Span }
-func (x *Builtin) ResultValue() ValueID    { return x.Result }
-func (x *Builtin) ResultType() *types.Type { return x.Type }
 
 type Unary struct {
 	Result ValueID
@@ -215,7 +192,7 @@ const (
 	IntrinsicLog
 	IntrinsicLog2
 	IntrinsicSqrt
-	IntrinsicInverseSqrt
+	IntrinsicRSqrt
 	IntrinsicPow
 	IntrinsicMin
 	IntrinsicMax
@@ -377,7 +354,7 @@ type BarrierKind uint8
 
 const (
 	BarrierWorkgroup BarrierKind = iota + 1
-	BarrierStorage
+	BarrierBuffer
 )
 
 type Barrier struct {
@@ -437,10 +414,10 @@ func Dump(m *Module) string {
 		b.WriteString("}\n\n")
 	}
 	for i, r := range m.Resources {
-		if r.Kind == Storage {
-			fmt.Fprintf(&b, "resource @%d %s: %s<%s, %s> group=%d binding=%d\n", i, r.Name, r.Kind, r.Type, r.Access, r.Group, r.Binding)
+		if r.Kind == Buffer {
+			fmt.Fprintf(&b, "resource @%d %s: %s<%s> access=%s\n", i, r.Name, r.Kind, r.Type, r.Access)
 		} else {
-			fmt.Fprintf(&b, "resource @%d %s: %s<%s> group=%d binding=%d\n", i, r.Name, r.Kind, r.Type, r.Group, r.Binding)
+			fmt.Fprintf(&b, "resource @%d %s: %s<%s>\n", i, r.Name, r.Kind, r.Type)
 		}
 	}
 	if len(m.Resources) > 0 {
@@ -456,8 +433,8 @@ func (k ResourceKind) String() string {
 	switch k {
 	case Uniform:
 		return "uniform"
-	case Storage:
-		return "storage"
+	case Buffer:
+		return "buffer"
 	default:
 		return fmt.Sprintf("resource_kind(%d)", k)
 	}
@@ -466,26 +443,10 @@ func (a Access) String() string {
 	switch a {
 	case Read:
 		return "read"
-	case ReadWrite:
-		return "read_write"
+	case Mutable:
+		return "mutable"
 	default:
 		return fmt.Sprintf("access(%d)", a)
-	}
-}
-func (k BuiltinKind) String() string {
-	switch k {
-	case GlobalID:
-		return "global_id"
-	case LocalID:
-		return "local_id"
-	case LocalIndex:
-		return "local_index"
-	case WorkgroupID:
-		return "workgroup_id"
-	case NumWorkgroups:
-		return "num_workgroups"
-	default:
-		return fmt.Sprintf("builtin(%d)", k)
 	}
 }
 func (k IntrinsicKind) String() string {
@@ -514,8 +475,8 @@ func (k IntrinsicKind) String() string {
 		return "log2"
 	case IntrinsicSqrt:
 		return "sqrt"
-	case IntrinsicInverseSqrt:
-		return "inverseSqrt"
+	case IntrinsicRSqrt:
+		return "rsqrt"
 	case IntrinsicPow:
 		return "pow"
 	case IntrinsicMin:
@@ -569,15 +530,22 @@ func (k BarrierKind) String() string {
 	switch k {
 	case BarrierWorkgroup:
 		return "workgroup_barrier"
-	case BarrierStorage:
-		return "storage_barrier"
+	case BarrierBuffer:
+		return "buffer_barrier"
 	default:
 		return fmt.Sprintf("barrier(%d)", k)
 	}
 }
 func dumpFunc(b *strings.Builder, f *Function) {
 	if f.Compute {
-		fmt.Fprintf(b, "compute @%s workgroup(%d,%d,%d) {\n", f.Name, f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
+		fmt.Fprintf(b, "compute @%s[", f.Name)
+		for i, index := range f.Indices {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(b, "%s=%%%d", index.Name, index.ID)
+		}
+		fmt.Fprintf(b, "] workgroup(%d,%d,%d) {\n", f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
 		for i, w := range f.WorkgroupVars {
 			fmt.Fprintf(b, "  workgroup @%d %s: %s\n", i, w.Name, w.Type)
 		}
@@ -599,8 +567,6 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 		switch x := in.(type) {
 		case *Const:
 			fmt.Fprintf(b, "%s%%%d = const %s %s\n", ind, x.Result, x.Type, x.Raw)
-		case *Builtin:
-			fmt.Fprintf(b, "%s%%%d = builtin %s : %s\n", ind, x.Result, x.Kind, x.Type)
 		case *Unary:
 			fmt.Fprintf(b, "%s%%%d = %s %%%d : %s\n", ind, x.Result, x.Op, x.X, x.Type)
 		case *Binary:

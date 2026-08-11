@@ -3,17 +3,17 @@ type Params = {
   count: u32,
 };
 
-@workgroupSize(64)
-export compute transform(
-  data: storage<f32[], read_write>,
+@workgroup(64)
+export compute transform[start](
+  data: buffer<f32[]>,
   params: uniform<Params>,
 ) {
-  let i = globalId.x;
+  let i = start;
   let acc = 0.0;
 
   while (i < params.count && acc < 1000.0) {
     acc += data[i] * params.scale;
-    i += 64u;
+    i += 64;
   }
 
   let out = acc;
@@ -23,7 +23,7 @@ export compute transform(
     out += 1.0;
   }
 
-  if (globalId.x < params.count) {
-    data[globalId.x] = out;
+  if (start < params.count) {
+    data[start] = out;
   }
 }

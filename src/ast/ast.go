@@ -48,21 +48,26 @@ func (*FuncDecl) declNode()              {}
 func (d *FuncDecl) GetSpan() source.Span { return d.Span }
 
 type ComputeDecl struct {
-	Name   string
-	Attrs  []Attribute
-	Params []Param
-	Body   *BlockStmt
-	Span   source.Span
+	Name    string
+	Attrs   []Attribute
+	Indices []Index
+	Params  []Param
+	Body    *BlockStmt
+	Span    source.Span
 }
 
 func (*ComputeDecl) declNode()              {}
 func (d *ComputeDecl) GetSpan() source.Span { return d.Span }
 
+type Index struct {
+	Name string
+	Span source.Span
+}
+
 type Param struct {
-	Name  string
-	Attrs []Attribute
-	Type  TypeExpr
-	Span  source.Span
+	Name string
+	Type TypeExpr
+	Span source.Span
 }
 
 type TypeExpr interface {
@@ -96,19 +101,12 @@ func (t *FixedArrayType) GetSpan() source.Span { return t.Span }
 
 type GenericType struct {
 	Name string
-	Args []TypeArg
+	Args []TypeExpr
 	Span source.Span
 }
 
 func (*GenericType) typeNode()              {}
 func (t *GenericType) GetSpan() source.Span { return t.Span }
-
-type TypeArg struct {
-	Type   TypeExpr
-	Name   string
-	IsName bool
-	Span   source.Span
-}
 
 type Stmt interface {
 	Node

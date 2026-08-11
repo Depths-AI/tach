@@ -839,6 +839,9 @@ func (v *validation) validateReferencesAndTypes() error {
 			if _, err := v.requireType(a[0], ctx); err != nil {
 				return err
 			}
+			if a[2] != FunctionControlNone && a[2] != FunctionControlInline|FunctionControlConst {
+				return fmt.Errorf("%s function control outside Tach profile", ctx)
+			}
 			ft, err := v.requireType(a[3], ctx)
 			if err != nil {
 				return err
@@ -1453,7 +1456,7 @@ func (v *validation) validateExtInst(in Instruction) error {
 			return err
 		}
 		if !allResultType() || rt.kind != typeVector || rt.lanes != 3 || base.kind != typeFloat {
-			return fmt.Errorf("%s Cross requires matching vec3f operands and result", ctx)
+			return fmt.Errorf("%s Cross requires matching f32x3 operands and result", ctx)
 		}
 	case GLSL450Normalize:
 		if err := need(1); err != nil {

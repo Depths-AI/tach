@@ -14,11 +14,10 @@ import (
 )
 
 type Checker struct {
-	ast       *ast.Module
-	mod       *ir.Module
-	types     map[string]*types.Type
-	funcs     map[string]*funcSig
-	resources map[[2]uint32]int
+	ast   *ast.Module
+	mod   *ir.Module
+	types map[string]*types.Type
+	funcs map[string]*funcSig
 }
 
 type funcSig struct {
@@ -78,11 +77,10 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	// identities even when definitions have region-scoped visibility.
 	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block}
 }
-func (b *fnBuilder) sync(_ *fnBuilder) {}
 
 func CheckAndLower(m *ast.Module) (*ir.Module, error) {
-	c := &Checker{ast: m, mod: &ir.Module{}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}, resources: map[[2]uint32]int{}}
-	for _, n := range []string{"void", "bool", "i32", "u32", "f32", "vec2f", "vec3f", "vec4f", "vec2u", "vec3u", "vec4u", "vec2i", "vec3i", "vec4i"} {
+	c := &Checker{ast: m, mod: &ir.Module{}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}}
+	for _, n := range []string{"void", "bool", "i32", "u32", "f32", "f32x2", "f32x3", "f32x4", "u32x2", "u32x3", "u32x4", "i32x2", "i32x3", "i32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
 	if err := c.collectTypes(); err != nil {
@@ -103,6 +101,7 @@ func CheckAndLower(m *ast.Module) (*ir.Module, error) {
 	if err := c.lowerFunctions(); err != nil {
 		return nil, err
 	}
+	inferBufferAccess(c.mod)
 	if err := checkRecursion(c.mod); err != nil {
 		return nil, err
 	}
@@ -140,7 +139,7 @@ func (c *Checker) resolveTypeFields() error {
 				return diag(f.Span, "duplicate field %q in %s", f.Name, td.Name)
 			}
 			seen[f.Name] = true
-			ft, err := c.resolveType(f.Type, false)
+			ft, err := c.resolveType(f.Type)
 			if err != nil {
 				return err
 			}
@@ -169,7 +168,7 @@ func (c *Checker) checkRuntimeArrayPlacement() error {
 				continue
 			}
 			if types.ContainsRuntimeArray(f.Type) {
-				return fmt.Errorf("%s.%s nests a runtime-sized structure; Tach follows WGSL's single trailing runtime-array rule", t.Name, f.Name)
+				return fmt.Errorf("%s.%s nests a runtime-sized structure; Tach permits one trailing runtime array", t.Name, f.Name)
 			}
 		}
 	}
@@ -224,7 +223,7 @@ func (c *Checker) collectFunctions() error {
 					return diag(p.Span, "duplicate parameter %q", p.Name)
 				}
 				seen[p.Name] = true
-				t, err := c.resolveType(p.Type, false)
+				t, err := c.resolveType(p.Type)
 				if err != nil {
 					return err
 				}
@@ -234,7 +233,7 @@ func (c *Checker) collectFunctions() error {
 				sig.params = append(sig.params, namedType{p.Name, t})
 			}
 			if x.Return != nil {
-				r, err := c.resolveType(x.Return, false)
+				r, err := c.resolveType(x.Return)
 				if err != nil {
 					return err
 				}
@@ -256,7 +255,7 @@ func (c *Checker) collectFunctions() error {
 	}
 	return nil
 }
-func (c *Checker) resolveType(te ast.TypeExpr, resource bool) (*types.Type, error) {
+func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 	switch t := te.(type) {
 	case *ast.NamedType:
 		x := c.types[t.Name]
@@ -265,7 +264,7 @@ func (c *Checker) resolveType(te ast.TypeExpr, resource bool) (*types.Type, erro
 		}
 		return x, nil
 	case *ast.RuntimeArrayType:
-		e, err := c.resolveType(t.Elem, false)
+		e, err := c.resolveType(t.Elem)
 		if err != nil {
 			return nil, err
 		}
@@ -274,31 +273,28 @@ func (c *Checker) resolveType(te ast.TypeExpr, resource bool) (*types.Type, erro
 		}
 		return types.Runtime(e), nil
 	case *ast.FixedArrayType:
-		e, err := c.resolveType(t.Elem, false)
+		e, err := c.resolveType(t.Elem)
 		if err != nil {
 			return nil, err
 		}
 		if !types.IsWorkgroupStorable(e) {
 			return nil, diag(t.Span, "invalid fixed array element type %s", e)
 		}
-		raw, suffix, _ := splitNumberLiteral(t.Count)
-		if suffix == 'f' {
-			return nil, diag(t.Span, "fixed array length must be a positive u32 constant")
-		}
+		raw, _ := splitNumberLiteral(t.Count)
 		n, err := strconv.ParseUint(raw, 0, 32)
 		if err != nil || n == 0 {
 			return nil, diag(t.Span, "fixed array length must be a positive u32 constant")
 		}
 		return types.Array(e, uint32(n)), nil
 	case *ast.GenericType:
-		if resource && (t.Name == "uniform" || t.Name == "storage") {
+		if t.Name == "uniform" || t.Name == "buffer" {
 			return nil, diag(t.Span, "resource wrapper %s is only valid in compute parameter position", t.Name)
 		}
 		if t.Name == "atomic" {
-			if len(t.Args) != 1 || t.Args[0].IsName {
+			if len(t.Args) != 1 {
 				return nil, diag(t.Span, "atomic<T> takes exactly one type argument")
 			}
-			e, err := c.resolveType(t.Args[0].Type, false)
+			e, err := c.resolveType(t.Args[0])
 			if err != nil {
 				return nil, err
 			}
@@ -328,6 +324,50 @@ func (c *Checker) lowerFunctions() error {
 	}
 	return nil
 }
+
+func inferBufferAccess(m *ir.Module) {
+	for _, f := range m.Functions {
+		roots := map[ir.PlaceID]int{}
+		var walk func(*ir.Block)
+		walk = func(block *ir.Block) {
+			for _, in := range block.Instrs {
+				switch x := in.(type) {
+				case *ir.PlaceRoot:
+					roots[x.Result] = x.Resource
+				case *ir.PlaceField:
+					if resource, ok := roots[x.Base]; ok {
+						roots[x.Result] = resource
+					}
+				case *ir.PlaceIndex:
+					if resource, ok := roots[x.Base]; ok {
+						roots[x.Result] = resource
+					}
+				case *ir.Store:
+					markBufferWritable(m, roots, x.Place)
+				case *ir.Atomic:
+					if x.Op != ir.AtomicLoad {
+						markBufferWritable(m, roots, x.Place)
+					}
+				case *ir.If:
+					walk(x.Then)
+					walk(x.Else)
+				case *ir.Loop:
+					walk(x.Cond)
+					walk(x.Body)
+				}
+			}
+		}
+		walk(f.Body)
+	}
+}
+
+func markBufferWritable(m *ir.Module, roots map[ir.PlaceID]int, place ir.PlaceID) {
+	resource, ok := roots[place]
+	if ok && m.Resources[resource].Kind == ir.Buffer {
+		m.Resources[resource].Access = ir.Mutable
+	}
+}
+
 func (c *Checker) lowerHelper(d *ast.FuncDecl) error {
 	sig := c.funcs[d.Name]
 	f := &ir.Function{Name: d.Name, Return: sig.ret, Body: &ir.Block{}, Span: d.Span}
@@ -351,70 +391,43 @@ func (c *Checker) lowerHelper(d *ast.FuncDecl) error {
 	return nil
 }
 func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
-	wg, err := workgroup(d.Attrs)
+	if len(d.Indices) < 1 || len(d.Indices) > 3 {
+		return diag(d.Span, "compute kernel %s requires 1 to 3 logical indices", d.Name)
+	}
+	wg, err := workgroup(d.Attrs, len(d.Indices))
 	if err != nil {
 		return err
 	}
 	f := &ir.Function{Name: d.Name, Return: types.TVoid, Body: &ir.Block{}, Compute: true, Workgroup: wg, Span: d.Span}
 	e := newEnv()
 	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body}
-	nextBinding := uint32(0)
-	localBindings := map[[2]uint32]bool{}
-	hasStorage := false
+	for _, index := range d.Indices {
+		if _, used := e.syms[index.Name]; used {
+			return diag(index.Span, "duplicate logical index %q", index.Name)
+		}
+		id := b.value()
+		f.Indices = append(f.Indices, ir.Param{Name: index.Name, ID: id, Type: types.TU32})
+		e.syms[index.Name] = symbol{name: index.Name, ty: types.TU32, value: id, resource: -1, workgroup: -1}
+	}
+	hasBuffer := false
 	for _, p := range d.Params {
 		kind, ty, access, err := c.resourceType(p.Type)
 		if err != nil {
 			return err
 		}
-		if kind == ir.Storage {
-			hasStorage = true
-		}
-		group, binding, explicit, err := bindingAttrs(p.Attrs)
-		if err != nil {
-			return err
-		}
-		if !explicit {
-			group = 0
-			// Automatic bindings are module-global. This keeps independently typed
-			// resources from different entry points from accidentally acquiring the
-			// same shader ABI address. Explicit compatible bindings may still be
-			// shared intentionally across entry points.
-			for {
-				k := [2]uint32{group, nextBinding}
-				_, globallyUsed := c.resources[k]
-				if !localBindings[k] && !globallyUsed {
-					binding = nextBinding
-					nextBinding++
-					break
-				}
-				nextBinding++
-			}
-		}
-		key := [2]uint32{group, binding}
-		if localBindings[key] {
-			return diag(p.Span, "duplicate compute binding @group(%d) @binding(%d)", group, binding)
+		if kind == ir.Buffer {
+			hasBuffer = true
 		}
 		if _, used := e.syms[p.Name]; used {
 			return diag(p.Span, "duplicate parameter %q", p.Name)
 		}
-		localBindings[key] = true
-		idx, ok := c.resources[key]
-		if ok {
-			r := c.mod.Resources[idx]
-			if r.Kind != kind || r.Access != access || !types.Equal(r.Type, ty) {
-				return diag(p.Span, "binding @group(%d) @binding(%d) conflicts with resource %s from another entry point", group, binding, r.Name)
-			}
-		} else {
-			name := p.Name
-			idx = len(c.mod.Resources)
-			c.resources[key] = idx
-			c.mod.Resources = append(c.mod.Resources, ir.Resource{Name: name, Kind: kind, Type: ty, Access: access, Group: group, Binding: binding, Span: p.Span})
-		}
+		idx := len(c.mod.Resources)
+		c.mod.Resources = append(c.mod.Resources, ir.Resource{Name: p.Name, Kind: kind, Type: ty, Access: access, Span: p.Span})
 		e.syms[p.Name] = symbol{name: p.Name, ty: ty, resource: idx, workgroup: -1}
 		f.ResourceParams = append(f.ResourceParams, ir.ResourceParam{Name: p.Name, Resource: idx})
 	}
-	if !hasStorage {
-		return diag(d.Span, "compute kernel %s requires at least one storage parameter", d.Name)
+	if !hasBuffer {
+		return diag(d.Span, "compute kernel %s requires at least one buffer parameter", d.Name)
 	}
 	if err := c.lowerBlock(b, d.Body, e, "function"); err != nil {
 		return err
@@ -427,13 +440,13 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 }
 func (c *Checker) resourceType(te ast.TypeExpr) (ir.ResourceKind, *types.Type, ir.Access, error) {
 	g, ok := te.(*ast.GenericType)
-	if !ok || (g.Name != "uniform" && g.Name != "storage") {
-		return 0, nil, 0, diag(te.GetSpan(), "compute parameters must be uniform<T> or storage<T, access>")
+	if !ok || (g.Name != "uniform" && g.Name != "buffer") {
+		return 0, nil, 0, diag(te.GetSpan(), "compute parameters must be uniform<T> or buffer<T>")
 	}
-	if len(g.Args) < 1 || len(g.Args) > 2 || g.Args[0].IsName {
-		return 0, nil, 0, diag(g.Span, "invalid %s resource type", g.Name)
+	if len(g.Args) != 1 {
+		return 0, nil, 0, diag(g.Span, "%s<T> takes exactly one type argument", g.Name)
 	}
-	t, err := c.resolveType(g.Args[0].Type, false)
+	t, err := c.resolveType(g.Args[0])
 	if err != nil {
 		return 0, nil, 0, err
 	}
@@ -444,9 +457,6 @@ func (c *Checker) resourceType(te ast.TypeExpr) (ir.ResourceKind, *types.Type, i
 		return 0, nil, 0, diag(g.Span, "resource layout: %v", err)
 	}
 	if g.Name == "uniform" {
-		if len(g.Args) != 1 {
-			return 0, nil, 0, diag(g.Span, "uniform<T> takes exactly one type argument")
-		}
 		if t.Kind == types.RuntimeArray {
 			return 0, nil, 0, diag(g.Span, "uniform resources cannot be runtime-sized")
 		}
@@ -455,40 +465,28 @@ func (c *Checker) resourceType(te ast.TypeExpr) (ir.ResourceKind, *types.Type, i
 		}
 		return ir.Uniform, t, ir.Read, nil
 	}
-	acc := ir.Read
-	if len(g.Args) == 2 {
-		if !g.Args[1].IsName {
-			return 0, nil, 0, diag(g.Args[1].Span, "storage access must be read or read_write")
-		}
-		switch g.Args[1].Name {
-		case "read":
-			acc = ir.Read
-		case "read_write":
-			acc = ir.ReadWrite
-		default:
-			return 0, nil, 0, diag(g.Args[1].Span, "unknown storage access %q", g.Args[1].Name)
-		}
-	}
-	if types.ContainsAtomic(t) && acc != ir.ReadWrite {
-		return 0, nil, 0, diag(g.Span, "storage resources containing atomic values require read_write access")
-	}
-	return ir.Storage, t, acc, nil
+	return ir.Buffer, t, ir.Read, nil
 }
 
-func workgroup(attrs []ast.Attribute) ([3]uint32, error) {
-	var out = [3]uint32{1, 1, 1}
+func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
+	defaults := [][3]uint32{{256, 1, 1}, {16, 16, 1}, {8, 8, 4}}
+	// DECISION: Fixed defaults stay within Tach's portable 256-invocation
+	// profile. Device specialization can replace them once target limits are
+	// explicit compiler inputs.
+	out := defaults[dimensions-1]
 	found := false
 	for _, a := range attrs {
-		if a.Name != "workgroupSize" {
+		if a.Name != "workgroup" {
 			return out, diag(a.Span, "unknown compute attribute @%s", a.Name)
 		}
 		if found {
-			return out, diag(a.Span, "duplicate @workgroupSize")
+			return out, diag(a.Span, "duplicate @workgroup")
 		}
 		found = true
-		if len(a.Args) < 1 || len(a.Args) > 3 {
-			return out, diag(a.Span, "@workgroupSize expects 1 to 3 integer arguments")
+		if len(a.Args) < 1 || len(a.Args) > dimensions {
+			return out, diag(a.Span, "@workgroup expects 1 to %d integer arguments for this kernel", dimensions)
 		}
+		out = [3]uint32{1, 1, 1}
 		for i, e := range a.Args {
 			v, err := constU32(e)
 			if err != nil {
@@ -499,51 +497,27 @@ func workgroup(attrs []ast.Attribute) ([3]uint32, error) {
 			}
 			out[i] = v
 		}
-	}
-	if !found {
-		return out, fmt.Errorf("compute entry point requires @workgroupSize(...)")
+		limits := [3]uint32{256, 256, 64}
+		invocations := uint64(1)
+		for i, dimension := range out {
+			if dimension > limits[i] {
+				return out, diag(a.Span, "@workgroup dimension %d exceeds Tach's portable limit %d", i, limits[i])
+			}
+			invocations *= uint64(dimension)
+		}
+		if invocations > 256 {
+			return out, diag(a.Span, "@workgroup contains %d invocations; Tach's portable limit is 256", invocations)
+		}
 	}
 	return out, nil
-}
-func bindingAttrs(attrs []ast.Attribute) (group, binding uint32, explicit bool, err error) {
-	gset, bset := false, false
-	for _, a := range attrs {
-		if a.Name != "group" && a.Name != "binding" {
-			return 0, 0, false, diag(a.Span, "unknown resource attribute @%s", a.Name)
-		}
-		if len(a.Args) != 1 {
-			return 0, 0, false, diag(a.Span, "@%s expects one integer argument", a.Name)
-		}
-		v, e := constU32(a.Args[0])
-		if e != nil {
-			return 0, 0, false, e
-		}
-		if a.Name == "group" {
-			if gset {
-				return 0, 0, false, diag(a.Span, "duplicate @group")
-			}
-			gset = true
-			group = v
-		} else {
-			if bset {
-				return 0, 0, false, diag(a.Span, "duplicate @binding")
-			}
-			bset = true
-			binding = v
-		}
-	}
-	if gset != bset {
-		return 0, 0, false, fmt.Errorf("@group and @binding must be specified together")
-	}
-	return group, binding, gset, nil
 }
 func constU32(e ast.Expr) (uint32, error) {
 	n, ok := e.(*ast.NumberExpr)
 	if !ok {
 		return 0, diag(e.GetSpan(), "expected integer literal")
 	}
-	s, suffix, basePrefixed := splitNumberLiteral(n.Raw)
-	if suffix == 'f' || !basePrefixed && strings.ContainsAny(s, ".eE") {
+	s, basePrefixed := splitNumberLiteral(n.Raw)
+	if !basePrefixed && strings.ContainsAny(s, ".eE") {
 		return 0, diag(e.GetSpan(), "expected integer literal")
 	}
 	v, err := strconv.ParseUint(s, 0, 32)
@@ -553,17 +527,10 @@ func constU32(e ast.Expr) (uint32, error) {
 	return uint32(v), nil
 }
 
-func splitNumberLiteral(raw string) (body string, suffix byte, basePrefixed bool) {
+func splitNumberLiteral(raw string) (body string, basePrefixed bool) {
 	body = strings.ReplaceAll(raw, "_", "")
 	basePrefixed = strings.HasPrefix(body, "0x") || strings.HasPrefix(body, "0X") || strings.HasPrefix(body, "0b") || strings.HasPrefix(body, "0B")
-	if len(body) > 0 {
-		last := body[len(body)-1]
-		if last == 'u' || last == 'i' || last == 'f' && !basePrefixed {
-			suffix = last
-			body = body[:len(body)-1]
-		}
-	}
-	return body, suffix, basePrefixed
+	return body, basePrefixed
 }
 
 func (c *Checker) lowerBlock(b *fnBuilder, src *ast.BlockStmt, e env, kind string) error {
@@ -586,7 +553,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
 		}
-		ty, err := c.resolveType(x.Type, false)
+		ty, err := c.resolveType(x.Type)
 		if err != nil {
 			return err
 		}
@@ -604,7 +571,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		var expected *types.Type
 		var err error
 		if x.Type != nil {
-			expected, err = c.resolveType(x.Type, false)
+			expected, err = c.resolveType(x.Type)
 			if err != nil {
 				return err
 			}
@@ -672,22 +639,16 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 				nv, nt, err = c.lowerExpr(b, e, rhs, sym.ty)
 			} else {
 				binOp := strings.TrimSuffix(op, "=")
-				want := sym.ty
-				if binOp == "<<" || binOp == ">>" {
-					want = types.ShiftCountType(sym.ty)
-					if want == nil {
-						return diag(target.GetSpan(), "%s requires an i32/u32 scalar or integer vector", binOp)
-					}
-				}
+				want := binaryRHSExpected(sym.ty, rhs, binOp)
 				rv, rt, e2 := c.lowerExpr(b, e, rhs, want)
 				if e2 != nil {
 					return e2
 				}
-				if !types.Equal(rt, want) {
-					return diag(rhs.GetSpan(), "assignment value is %s, want %s", rt, want)
-				}
 				if binOp == "<<" || binOp == ">>" {
-					rv, rt = c.normalizeShiftCount(b, rv, rt, rhs.GetSpan())
+					rv, rt, e2 = c.prepareShiftCount(b, rv, rt, sym.ty, rhs.GetSpan())
+					if e2 != nil {
+						return e2
+					}
 				}
 				nv, nt, err = c.emitBinary(b, binOp, sym.value, sym.ty, rv, rt, span)
 			}
@@ -714,19 +675,16 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 		old := b.value()
 		b.emit(&ir.Load{Result: old, Type: pt, Place: p, Span: target.GetSpan()})
 		binOp := strings.TrimSuffix(op, "=")
-		want := pt
-		if binOp == "<<" || binOp == ">>" {
-			want = types.ShiftCountType(pt)
-			if want == nil {
-				return diag(target.GetSpan(), "%s requires an i32/u32 scalar or integer vector", binOp)
-			}
-		}
+		want := binaryRHSExpected(pt, rhs, binOp)
 		rv, rt, e2 := c.lowerExpr(b, e, rhs, want)
 		if e2 != nil {
 			return e2
 		}
 		if binOp == "<<" || binOp == ">>" {
-			rv, rt = c.normalizeShiftCount(b, rv, rt, rhs.GetSpan())
+			rv, rt, e2 = c.prepareShiftCount(b, rv, rt, pt, rhs.GetSpan())
+			if e2 != nil {
+				return e2
+			}
 		}
 		v, vt, err = c.emitBinary(b, binOp, old, pt, rv, rt, span)
 	}
@@ -811,7 +769,6 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 	if err := c.lowerBlock(tb, x.Then, te, "branch"); err != nil {
 		return err
 	}
-	b.sync(tb)
 	elseBlock := &ir.Block{}
 	eb := b.child(elseBlock)
 	ee := e.clone()
@@ -820,7 +777,6 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 			return err
 		}
 	}
-	b.sync(eb)
 	thenFalls := thenBlock.Term == nil
 	elseFalls := elseBlock.Term == nil
 	results := make([]ir.Result, 0, len(names))
@@ -882,14 +838,12 @@ func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
 		return diag(x.Cond.GetSpan(), "while condition is %s, want bool", ct)
 	}
 	condBlock.Term = &ir.Yield{Values: []ir.ValueID{cv}}
-	b.sync(cb)
 	bodyBlock := &ir.Block{}
 	bb := b.child(bodyBlock)
 	bodyEnv := loopEnv.clone()
 	if err := c.lowerBlock(bb, x.Body, bodyEnv, "loop"); err != nil {
 		return err
 	}
-	b.sync(bb)
 	if bodyBlock.Term == nil {
 		vals := make([]ir.ValueID, len(names))
 		for i, n := range names {
@@ -978,11 +932,6 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			}
 			return s.value, s.ty, nil
 		}
-		if k, t, ok := builtin(v.Name); ok {
-			id := b.value()
-			b.emit(&ir.Builtin{Result: id, Type: t, Kind: k, Span: v.Span})
-			return id, t, nil
-		}
 		return 0, nil, diag(v.Span, "unknown identifier %q", v.Name)
 	case *ast.MemberExpr:
 		if v.Name == "length" {
@@ -1012,13 +961,22 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return id, ft, nil
 		}
 		if bt.Kind == types.Vector {
-			idx := component(v.Name)
-			if idx < 0 || idx >= bt.Lanes {
+			components, ok := vectorComponents(v.Name, bt.Lanes)
+			if !ok {
 				return 0, nil, diag(v.Span, "vector %s has no component %s", bt, v.Name)
 			}
-			id := b.value()
-			b.emit(&ir.Extract{Result: id, Type: bt.Elem, Base: base, Index: idx, Span: v.Span})
-			return id, bt.Elem, nil
+			values := make([]ir.ValueID, len(components))
+			for index, component := range components {
+				values[index] = b.value()
+				b.emit(&ir.Extract{Result: values[index], Type: bt.Elem, Base: base, Index: component, Span: v.Span})
+			}
+			if len(values) == 1 {
+				return values[0], bt.Elem, nil
+			}
+			resultType := types.Vec(bt.Elem, len(values))
+			result := b.value()
+			b.emit(&ir.Composite{Result: result, Type: resultType, Values: values, Span: v.Span})
+			return result, resultType, nil
 		}
 		return 0, nil, diag(v.Span, "member access on %s", bt)
 	case *ast.IndexExpr:
@@ -1069,6 +1027,15 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		} else {
 			want = expected
 		}
+		if v.Op == "-" && want == nil {
+			if n, ok := v.X.(*ast.NumberExpr); ok {
+				want = types.TI32
+				raw, basePrefixed := splitNumberLiteral(n.Raw)
+				if !basePrefixed && strings.ContainsAny(raw, ".eE") {
+					want = types.TF32
+				}
+			}
+		}
 		id, t, err := c.lowerExpr(b, e, v.X, want)
 		if err != nil {
 			return 0, nil, err
@@ -1100,27 +1067,36 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		}
 		thenBlock := &ir.Block{}
 		tb := b.child(thenBlock)
-		tv, tt, err := c.lowerExpr(tb, e.clone(), v.Then, expected)
+		elseBlock := &ir.Block{}
+		eb := b.child(elseBlock)
+		thenNumber, thenIsNumber := v.Then.(*ast.NumberExpr)
+		elseNumber, elseIsNumber := v.Else.(*ast.NumberExpr)
+		branchType := numberPairExpected(thenNumber, elseNumber, expected)
+		var tv, ev ir.ValueID
+		var tt, et *types.Type
+		if expected == nil && thenIsNumber && !elseIsNumber && !floatNumber(thenNumber) {
+			ev, et, err = c.lowerExpr(eb, e.clone(), v.Else, nil)
+			if err == nil {
+				tv, tt, err = c.lowerExpr(tb, e.clone(), v.Then, et)
+			}
+		} else {
+			tv, tt, err = c.lowerExpr(tb, e.clone(), v.Then, branchType)
+			if err == nil {
+				branchType = expected
+				if branchType == nil {
+					branchType = tt
+				}
+				ev, et, err = c.lowerExpr(eb, e.clone(), v.Else, branchType)
+			}
+		}
 		if err != nil {
 			return 0, nil, err
 		}
 		thenBlock.Term = &ir.Yield{Values: []ir.ValueID{tv}}
-		b.sync(tb)
-		elseBlock := &ir.Block{}
-		eb := b.child(elseBlock)
-		elseExpected := expected
-		if elseExpected == nil {
-			elseExpected = tt
-		}
-		ev, et, err := c.lowerExpr(eb, e.clone(), v.Else, elseExpected)
-		if err != nil {
-			return 0, nil, err
-		}
+		elseBlock.Term = &ir.Yield{Values: []ir.ValueID{ev}}
 		if !types.Equal(tt, et) {
 			return 0, nil, diag(v.Span, "conditional branches have types %s and %s", tt, et)
 		}
-		elseBlock.Term = &ir.Yield{Values: []ir.ValueID{ev}}
-		b.sync(eb)
 		r := b.value()
 		b.emit(&ir.If{Results: []ir.Result{{ID: r, Type: tt}}, Cond: cond, Then: thenBlock, Else: elseBlock, Span: v.Span})
 		return r, tt, nil
@@ -1131,36 +1107,26 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 	}
 }
 func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *types.Type) (ir.ValueID, *types.Type, error) {
-	raw, suffix, basePrefixed := splitNumberLiteral(n.Raw)
+	raw, basePrefixed := splitNumberLiteral(n.Raw)
 	isFloatSpelling := !basePrefixed && strings.ContainsAny(raw, ".eE")
 
 	var t *types.Type
-	switch suffix {
-	case 'u':
-		t = types.TU32
-	case 'i':
-		t = types.TI32
-	case 'f':
+	if expected != nil && types.IsNumericScalar(expected) {
+		t = expected
+	} else if isFloatSpelling {
 		t = types.TF32
-	default:
-		if expected != nil && types.IsNumericScalar(expected) {
-			t = expected
-		} else if isFloatSpelling {
-			t = types.TF32
-		} else {
-			t = types.TI32
-		}
-	}
-	if expected != nil && types.IsNumericScalar(expected) && !types.Equal(t, expected) && suffix != 0 {
-		return 0, nil, diag(n.Span, "literal suffix gives %s, context requires %s", t, expected)
+	} else {
+		// Whole-number literals are naturally non-negative. Unary minus selects
+		// i32 when no surrounding context supplies a type.
+		t = types.TU32
 	}
 
 	// Canonicalize literals in Core IR. Backends never need to understand Tach
-	// digit separators, base prefixes, or source suffixes.
+	// digit separators or base prefixes.
 	canonical := raw
 	switch t.Kind {
 	case types.U32:
-		if suffix == 'f' || isFloatSpelling {
+		if isFloatSpelling {
 			return 0, nil, diag(n.Span, "u32 literal must be an integer")
 		}
 		v, err := strconv.ParseUint(raw, 0, 32)
@@ -1169,7 +1135,7 @@ func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *types.T
 		}
 		canonical = strconv.FormatUint(v, 10)
 	case types.I32:
-		if suffix == 'f' || isFloatSpelling {
+		if isFloatSpelling {
 			return 0, nil, diag(n.Span, "i32 literal must be an integer")
 		}
 		// Base-prefixed literals are still value literals, not bit-pattern casts.
@@ -1218,20 +1184,17 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
 		}
 		then.Term = &ir.Yield{Values: []ir.ValueID{rv}}
-		b.sync(tb)
 		id, _, err := c.lowerExpr(eb, e.clone(), &ast.BoolExpr{Value: false, Span: x.Span}, types.TBool)
 		if err != nil {
 			return 0, nil, err
 		}
 		els.Term = &ir.Yield{Values: []ir.ValueID{id}}
-		b.sync(eb)
 	} else {
 		id, _, err := c.lowerExpr(tb, e.clone(), &ast.BoolExpr{Value: true, Span: x.Span}, types.TBool)
 		if err != nil {
 			return 0, nil, err
 		}
 		then.Term = &ir.Yield{Values: []ir.ValueID{id}}
-		b.sync(tb)
 		rv, rt, err := c.lowerExpr(eb, e.clone(), x.Right, types.TBool)
 		if err != nil {
 			return 0, nil, err
@@ -1240,17 +1203,14 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
 		}
 		els.Term = &ir.Yield{Values: []ir.ValueID{rv}}
-		b.sync(eb)
 	}
 	r := b.value()
 	b.emit(&ir.If{Results: []ir.Result{{ID: r, Type: types.TBool}}, Cond: left, Then: then, Else: els, Span: x.Span})
 	return r, types.TBool, nil
 }
 func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expected *types.Type) (ir.ValueID, *types.Type, error) {
-	// WGSL/SPIR-V shifts have a deliberately asymmetric type rule: the shifted
-	// value is signed or unsigned integer, while the count is always u32 with
-	// matching vector width. Resolve that directly instead of relying on ordinary
-	// binary contextual typing.
+	// Tach shifts use an unsigned count with the shifted value's vector width.
+	// Resolve that directly instead of relying on ordinary binary contextual typing.
 	if x.Op == "<<" || x.Op == ">>" {
 		l, lt, err := c.lowerExpr(b, e, x.Left, expected)
 		if err != nil {
@@ -1260,11 +1220,18 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 		if countType == nil {
 			return 0, nil, diag(x.Left.GetSpan(), "%s requires an i32/u32 scalar or integer vector on the left, got %s", x.Op, lt)
 		}
-		r, rt, err := c.lowerExpr(b, e, x.Right, countType)
+		want := countType
+		if countType.Kind == types.Vector {
+			want = binaryRHSExpected(lt, x.Right, x.Op)
+		}
+		r, rt, err := c.lowerExpr(b, e, x.Right, want)
 		if err != nil {
 			return 0, nil, err
 		}
-		r, rt = c.normalizeShiftCount(b, r, rt, x.Right.GetSpan())
+		r, rt, err = c.prepareShiftCount(b, r, rt, lt, x.Right.GetSpan())
+		if err != nil {
+			return 0, nil, err
+		}
 		return c.emitBinary(b, x.Op, l, lt, r, rt, x.Span)
 	}
 
@@ -1273,27 +1240,23 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 	var r ir.ValueID
 	var rt *types.Type
 	var err error
-	_, ln := x.Left.(*ast.NumberExpr)
-	_, rn := x.Right.(*ast.NumberExpr)
-	if ln && !rn {
+	leftNumber, ln := x.Left.(*ast.NumberExpr)
+	rightNumber, rn := x.Right.(*ast.NumberExpr)
+	expected = numberPairExpected(leftNumber, rightNumber, expected)
+	if ln && !rn && expected == nil && !floatNumber(leftNumber) {
 		r, rt, err = c.lowerExpr(b, e, x.Right, nil)
 		if err != nil {
 			return 0, nil, err
 		}
 		want := rt
-		if x.Op == "*" || x.Op == "/" {
-			if rt.Kind == types.Vector {
-				want = rt.Elem
-			}
+		if rt.Kind == types.Vector && vectorScalarOperator(x.Op) {
+			want = rt.Elem
 		}
 		l, lt, err = c.lowerExpr(b, e, x.Left, want)
 	} else {
 		l, lt, err = c.lowerExpr(b, e, x.Left, expected)
 		if err == nil {
-			want := lt
-			if (x.Op == "*" || x.Op == "/") && lt.Kind == types.Vector {
-				want = lt.Elem
-			}
+			want := binaryRHSExpected(lt, x.Right, x.Op)
 			r, rt, err = c.lowerExpr(b, e, x.Right, want)
 		}
 	}
@@ -1303,9 +1266,63 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 	return c.emitBinary(b, x.Op, l, lt, r, rt, x.Span)
 }
 
-// normalizeShiftCount gives Tach one backend-independent shift meaning. Tach's
-// 32-bit shifts use the low five bits of each count, matching WGSL semantics
-// while ensuring SPIR-V never observes an out-of-range shift count.
+func numberPairExpected(left, right *ast.NumberExpr, expected *types.Type) *types.Type {
+	if expected != nil || left == nil || right == nil {
+		return expected
+	}
+	if floatNumber(left) || floatNumber(right) {
+		return types.TF32
+	}
+	return nil
+}
+
+func floatNumber(number *ast.NumberExpr) bool {
+	raw, basePrefixed := splitNumberLiteral(number.Raw)
+	return !basePrefixed && strings.ContainsAny(raw, ".eE")
+}
+
+func vectorScalarOperator(op string) bool {
+	switch op {
+	case "+", "-", "*", "/", "%", "&", "|", "^":
+		return true
+	}
+	return false
+}
+
+func binaryRHSExpected(left *types.Type, right ast.Expr, op string) *types.Type {
+	if left == nil || left.Kind != types.Vector || (!vectorScalarOperator(op) && op != "<<" && op != ">>") {
+		if op == "<<" || op == ">>" {
+			return types.ShiftCountType(left)
+		}
+		return left
+	}
+	if _, literal := right.(*ast.NumberExpr); literal {
+		if op == "<<" || op == ">>" {
+			return types.TU32
+		}
+		return left.Elem
+	}
+	return nil
+}
+
+func (c *Checker) prepareShiftCount(b *fnBuilder, value ir.ValueID, got, shifted *types.Type, span source.Span) (ir.ValueID, *types.Type, error) {
+	want := types.ShiftCountType(shifted)
+	if want == nil {
+		return 0, nil, diag(span, "shift requires an i32/u32 scalar or integer vector")
+	}
+	if want.Kind == types.Vector && types.Equal(got, types.TU32) {
+		value = c.splat(b, value, want, span)
+		got = want
+	}
+	if !types.Equal(got, want) {
+		return 0, nil, diag(span, "shift count is %s, want u32 or %s", got, want)
+	}
+	value, got = c.normalizeShiftCount(b, value, got, span)
+	return value, got, nil
+}
+
+// normalizeShiftCount gives Tach one backend-independent shift meaning: every
+// 32-bit shift uses the low five bits of its count.
 func (c *Checker) normalizeShiftCount(b *fnBuilder, value ir.ValueID, t *types.Type, span source.Span) (ir.ValueID, *types.Type) {
 	maskScalar := b.value()
 	b.emit(&ir.Const{Result: maskScalar, Type: types.TU32, Raw: "31", Span: span})
@@ -1324,6 +1341,13 @@ func (c *Checker) normalizeShiftCount(b *fnBuilder, value ir.ValueID, t *types.T
 }
 
 func (c *Checker) emitBinary(b *fnBuilder, op string, l ir.ValueID, lt *types.Type, r ir.ValueID, rt *types.Type, span source.Span) (ir.ValueID, *types.Type, error) {
+	if vectorScalarOperator(op) {
+		if lt.Kind == types.Vector && types.Equal(rt, lt.Elem) && op != "*" && op != "/" {
+			r, rt = c.splat(b, r, lt, span), lt
+		} else if rt.Kind == types.Vector && types.Equal(lt, rt.Elem) && op != "*" {
+			l, lt = c.splat(b, l, rt, span), rt
+		}
+	}
 	var out *types.Type
 	switch op {
 	case "==", "!=", "<", "<=", ">", ">=":
@@ -1402,8 +1426,8 @@ func intrinsicBuiltin(name string) (ir.IntrinsicKind, bool) {
 		return ir.IntrinsicLog2, true
 	case "sqrt":
 		return ir.IntrinsicSqrt, true
-	case "inverseSqrt":
-		return ir.IntrinsicInverseSqrt, true
+	case "rsqrt":
+		return ir.IntrinsicRSqrt, true
 	case "pow":
 		return ir.IntrinsicPow, true
 	case "min":
@@ -1434,7 +1458,7 @@ func isReservedCallable(name string) bool {
 	if _, ok := atomicBuiltin(name); ok {
 		return true
 	}
-	if name == "workgroupBarrier" || name == "storageBarrier" {
+	if name == "workgroupBarrier" || name == "bufferBarrier" {
 		return true
 	}
 	return types.ParseBuiltin(name) != nil
@@ -1469,9 +1493,20 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 	}
 	args[0], argTypes[0] = v, t
 	for i := 1; i < wantN; i++ {
-		v, t, err := c.lowerExpr(b, e, x.Args[i], argTypes[0])
+		want := argTypes[0]
+		broadcast := intrinsicBroadcastsScalars(kind) && argTypes[0].Kind == types.Vector
+		if broadcast {
+			want = nil
+			if _, literal := x.Args[i].(*ast.NumberExpr); literal {
+				want = argTypes[0].Elem
+			}
+		}
+		v, t, err := c.lowerExpr(b, e, x.Args[i], want)
 		if err != nil {
 			return 0, nil, err
+		}
+		if broadcast && types.Equal(t, argTypes[0].Elem) {
+			v, t = c.splat(b, v, argTypes[0], x.Args[i].GetSpan()), argTypes[0]
 		}
 		args[i], argTypes[i] = v, t
 	}
@@ -1495,7 +1530,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		if !ok {
 			return 0, nil, diag(x.Span, "abs requires i32/f32 scalar or vector, got %s", t)
 		}
-	case ir.IntrinsicFloor, ir.IntrinsicCeil, ir.IntrinsicTrunc, ir.IntrinsicSin, ir.IntrinsicCos, ir.IntrinsicTan, ir.IntrinsicExp, ir.IntrinsicExp2, ir.IntrinsicLog, ir.IntrinsicLog2, ir.IntrinsicSqrt, ir.IntrinsicInverseSqrt:
+	case ir.IntrinsicFloor, ir.IntrinsicCeil, ir.IntrinsicTrunc, ir.IntrinsicSin, ir.IntrinsicCos, ir.IntrinsicTan, ir.IntrinsicExp, ir.IntrinsicExp2, ir.IntrinsicLog, ir.IntrinsicLog2, ir.IntrinsicSqrt, ir.IntrinsicRSqrt:
 		if !types.IsFloatLike(argTypes[0]) {
 			return 0, nil, diag(x.Span, "%s requires f32 scalar/vector, got %s", kind, argTypes[0])
 		}
@@ -1504,10 +1539,13 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 			return 0, nil, diag(x.Span, "pow requires matching f32 scalar/vector operands")
 		}
 	case ir.IntrinsicMin, ir.IntrinsicMax:
+		// DECISION: Float bounds stay unavailable until Tach defines NaN and
+		// signed-zero behavior; integer-only semantics are identical everywhere.
 		if !same() || !types.IsIntegerLike(argTypes[0]) {
 			return 0, nil, diag(x.Span, "%s requires matching integer scalar/vector operands", kind)
 		}
 	case ir.IntrinsicClamp:
+		// See the float-bound decision above; clamp inherits the same ceiling.
 		if !same() || !types.IsIntegerLike(argTypes[0]) {
 			return 0, nil, diag(x.Span, "clamp requires three matching integer scalar/vector operands")
 		}
@@ -1528,7 +1566,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		out = types.TF32
 	case ir.IntrinsicCross:
 		if !same() || !floatVec(argTypes[0]) || argTypes[0].Lanes != 3 {
-			return 0, nil, diag(x.Span, "cross requires two vec3f operands")
+			return 0, nil, diag(x.Span, "cross requires two f32x3 operands")
 		}
 	case ir.IntrinsicNormalize:
 		if !floatVec(argTypes[0]) {
@@ -1545,6 +1583,14 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 	return r, out, nil
 }
 
+func intrinsicBroadcastsScalars(kind ir.IntrinsicKind) bool {
+	switch kind {
+	case ir.IntrinsicPow, ir.IntrinsicMin, ir.IntrinsicMax, ir.IntrinsicClamp:
+		return true
+	}
+	return false
+}
+
 func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *types.Type) (ir.ValueID, *types.Type, error) {
 	id, ok := x.Callee.(*ast.IdentExpr)
 	if !ok {
@@ -1556,7 +1602,7 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 	if kind, ok := intrinsicBuiltin(id.Name); ok {
 		return c.lowerIntrinsic(b, e, x, kind, expected)
 	}
-	if id.Name == "workgroupBarrier" || id.Name == "storageBarrier" {
+	if id.Name == "workgroupBarrier" || id.Name == "bufferBarrier" {
 		if len(x.Args) != 0 {
 			return 0, nil, diag(x.Span, "%s expects no arguments", id.Name)
 		}
@@ -1564,8 +1610,8 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 			return 0, nil, diag(x.Span, "%s is only valid in compute functions", id.Name)
 		}
 		kind := ir.BarrierWorkgroup
-		if id.Name == "storageBarrier" {
-			kind = ir.BarrierStorage
+		if id.Name == "bufferBarrier" {
+			kind = ir.BarrierBuffer
 		}
 		b.emit(&ir.Barrier{Kind: kind, Span: x.Span})
 		return 0, types.TVoid, nil
@@ -1682,32 +1728,47 @@ func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *ast.CallExpr, target 
 		return r, target, nil
 	}
 	if target.Kind == types.Vector {
-		if len(x.Args) != 1 && len(x.Args) != target.Lanes {
-			return 0, nil, diag(x.Span, "%s constructor expects 1 or %d scalar arguments", types.Friendly(target), target.Lanes)
+		if len(x.Args) == 0 {
+			return 0, nil, diag(x.Span, "%s constructor requires components", target)
 		}
-		vals := make([]ir.ValueID, target.Lanes)
-		if len(x.Args) == 1 {
-			v, t, err := c.lowerExpr(b, e, x.Args[0], target.Elem)
+		vals := make([]ir.ValueID, 0, target.Lanes)
+		for _, argument := range x.Args {
+			v, t, err := c.lowerExpr(b, e, argument, nil)
 			if err != nil {
 				return 0, nil, err
 			}
-			if !types.Equal(t, target.Elem) {
-				return 0, nil, diag(x.Args[0].GetSpan(), "vector splat expects %s, got %s", target.Elem, t)
-			}
-			for i := range vals {
-				vals[i] = v
-			}
-		} else {
-			for i, a := range x.Args {
-				v, t, err := c.lowerExpr(b, e, a, target.Elem)
+			if types.IsNumericScalar(t) {
+				v, err = c.convertScalar(b, v, t, target.Elem, argument.GetSpan())
 				if err != nil {
 					return 0, nil, err
 				}
-				if !types.Equal(t, target.Elem) {
-					return 0, nil, diag(a.GetSpan(), "vector component is %s, want %s", t, target.Elem)
+				if len(x.Args) == 1 {
+					for range target.Lanes {
+						vals = append(vals, v)
+					}
+				} else {
+					vals = append(vals, v)
 				}
-				vals[i] = v
+				continue
 			}
+			if t.Kind != types.Vector || !types.IsNumeric(t) {
+				return 0, nil, diag(argument.GetSpan(), "%s constructor component is not numeric", target)
+			}
+			if len(x.Args) == 1 && types.Equal(t, target) {
+				return v, target, nil
+			}
+			for lane := 0; lane < t.Lanes; lane++ {
+				extracted := b.value()
+				b.emit(&ir.Extract{Result: extracted, Type: t.Elem, Base: v, Index: lane, Span: argument.GetSpan()})
+				extracted, err = c.convertScalar(b, extracted, t.Elem, target.Elem, argument.GetSpan())
+				if err != nil {
+					return 0, nil, err
+				}
+				vals = append(vals, extracted)
+			}
+		}
+		if len(vals) != target.Lanes {
+			return 0, nil, diag(x.Span, "%s constructor received %d lanes, want %d", target, len(vals), target.Lanes)
 		}
 		r := b.value()
 		b.emit(&ir.Composite{Result: r, Type: target, Values: vals, Span: x.Span})
@@ -1715,6 +1776,29 @@ func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *ast.CallExpr, target 
 	}
 	return 0, nil, diag(x.Span, "type %s is not directly constructible", target)
 }
+
+func (c *Checker) convertScalar(b *fnBuilder, value ir.ValueID, from, to *types.Type, span source.Span) (ir.ValueID, error) {
+	if types.Equal(from, to) {
+		return value, nil
+	}
+	if !types.IsNumericScalar(from) || !types.IsNumericScalar(to) {
+		return 0, diag(span, "cannot convert %s to %s", from, to)
+	}
+	result := b.value()
+	b.emit(&ir.Convert{Result: result, Type: to, X: value, From: from, Span: span})
+	return result, nil
+}
+
+func (c *Checker) splat(b *fnBuilder, value ir.ValueID, vector *types.Type, span source.Span) ir.ValueID {
+	values := make([]ir.ValueID, vector.Lanes)
+	for index := range values {
+		values[index] = value
+	}
+	result := b.value()
+	b.emit(&ir.Composite{Result: result, Type: vector, Values: values, Span: span})
+	return result
+}
+
 func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *types.Type, error) {
 	switch v := x.(type) {
 	case *ast.IdentExpr:
@@ -1735,12 +1819,12 @@ func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *type
 			return 0, nil, err
 		}
 		if bt.Kind == types.Vector {
-			idx := component(v.Name)
-			if idx < 0 || idx >= bt.Lanes {
+			components, ok := vectorComponents(v.Name, bt.Lanes)
+			if !ok || len(components) != 1 {
 				return 0, nil, diag(v.Span, "vector %s has no component %s", bt, v.Name)
 			}
 			iv := b.value()
-			b.emit(&ir.Const{Result: iv, Type: types.TU32, Raw: fmt.Sprintf("%d", idx), Span: v.Span})
+			b.emit(&ir.Const{Result: iv, Type: types.TU32, Raw: fmt.Sprintf("%d", components[0]), Span: v.Span})
 			p := b.place()
 			b.emit(&ir.PlaceIndex{Result: p, Type: bt.Elem, Base: bp, Index: iv, Span: v.Span})
 			return p, bt.Elem, nil
@@ -1778,33 +1862,29 @@ func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *type
 		return 0, nil, diag(x.GetSpan(), "expression is not an addressable GPU place")
 	}
 }
-func builtin(name string) (ir.BuiltinKind, *types.Type, bool) {
-	switch name {
-	case "globalId":
-		return ir.GlobalID, types.Vec(types.TU32, 3), true
-	case "localId":
-		return ir.LocalID, types.Vec(types.TU32, 3), true
-	case "localIndex":
-		return ir.LocalIndex, types.TU32, true
-	case "workgroupId":
-		return ir.WorkgroupID, types.Vec(types.TU32, 3), true
-	case "numWorkgroups":
-		return ir.NumWorkgroups, types.Vec(types.TU32, 3), true
+func vectorComponents(name string, lanes int) ([]int, bool) {
+	if len(name) < 1 || len(name) > 4 {
+		return nil, false
 	}
-	return 0, nil, false
-}
-func component(name string) int {
-	switch name {
-	case "x":
-		return 0
-	case "y":
-		return 1
-	case "z":
-		return 2
-	case "w":
-		return 3
+	out := make([]int, len(name))
+	for index, component := range []byte(name) {
+		switch component {
+		case 'x':
+			out[index] = 0
+		case 'y':
+			out[index] = 1
+		case 'z':
+			out[index] = 2
+		case 'w':
+			out[index] = 3
+		default:
+			return nil, false
+		}
+		if out[index] >= lanes {
+			return nil, false
+		}
 	}
-	return -1
+	return out, true
 }
 func diag(span source.Span, f string, a ...any) error {
 	return &source.Error{Span: span, Message: fmt.Sprintf(f, a...)}

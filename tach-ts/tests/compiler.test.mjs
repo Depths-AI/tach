@@ -21,9 +21,8 @@ test("build emits package-backed JavaScript bindings", async () => {
   try {
     const source = join(directory, "scale.tach");
     await writeFile(source, `
-@workgroupSize(1)
-export compute scale(data: storage<f32[], read_write>, factor: uniform<f32>) {
-  const i = globalId.x;
+@workgroup(1)
+export compute scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
   if (i < data.length) { data[i] *= factor; }
 }
 `);

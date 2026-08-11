@@ -169,10 +169,6 @@ func (p *Parser) params() ([]ast.Param, error) {
 	var out []ast.Param
 	if !p.at(lexer.RParen) {
 		for {
-			attrs, err := p.attrs()
-			if err != nil {
-				return nil, err
-			}
 			n, err := p.expect(lexer.Ident)
 			if err != nil {
 				return nil, err
@@ -184,7 +180,7 @@ func (p *Parser) params() ([]ast.Param, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, ast.Param{Name: n.Text, Attrs: attrs, Type: ty, Span: join(n.Span, ty.GetSpan())})
+			out = append(out, ast.Param{Name: n.Text, Type: ty, Span: join(n.Span, ty.GetSpan())})
 			if !p.at(lexer.Comma) {
 				break
 			}
@@ -208,7 +204,7 @@ func (p *Parser) funcDecl() (*ast.FuncDecl, error) {
 		return nil, err
 	}
 	var ret ast.TypeExpr
-	if p.at(lexer.Colon) || p.at(lexer.Arrow) {
+	if p.at(lexer.Colon) {
 		p.take()
 		ret, err = p.typeExpr()
 		if err != nil {
@@ -230,6 +226,10 @@ func (p *Parser) computeDecl(attrs []ast.Attribute) (*ast.ComputeDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+	indices, err := p.indices()
+	if err != nil {
+		return nil, err
+	}
 	ps, err := p.params()
 	if err != nil {
 		return nil, err
@@ -238,7 +238,29 @@ func (p *Parser) computeDecl(attrs []ast.Attribute) (*ast.ComputeDecl, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.ComputeDecl{Name: n.Text, Attrs: attrs, Params: ps, Body: b, Span: join(start, b.Span)}, nil
+	return &ast.ComputeDecl{Name: n.Text, Attrs: attrs, Indices: indices, Params: ps, Body: b, Span: join(start, b.Span)}, nil
+}
+
+func (p *Parser) indices() ([]ast.Index, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	var out []ast.Index
+	for !p.at(lexer.RBracket) {
+		n, err := p.expect(lexer.Ident)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ast.Index{Name: n.Text, Span: n.Span})
+		if !p.at(lexer.Comma) {
+			break
+		}
+		p.take()
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 func (p *Parser) typeExpr() (ast.TypeExpr, error) {
 	n, err := p.expect(lexer.Ident)
@@ -250,16 +272,11 @@ func (p *Parser) typeExpr() (ast.TypeExpr, error) {
 		p.take()
 		g := &ast.GenericType{Name: n.Text, Span: n.Span}
 		for {
-			if p.at(lexer.Ident) && (p.cur().Text == "read" || p.cur().Text == "read_write") {
-				x := p.take()
-				g.Args = append(g.Args, ast.TypeArg{Name: x.Text, IsName: true, Span: x.Span})
-			} else {
-				x, err := p.typeExpr()
-				if err != nil {
-					return nil, err
-				}
-				g.Args = append(g.Args, ast.TypeArg{Type: x, Span: x.GetSpan()})
+			x, err := p.typeExpr()
+			if err != nil {
+				return nil, err
 			}
+			g.Args = append(g.Args, x)
 			if !p.at(lexer.Comma) {
 				break
 			}
@@ -417,11 +434,10 @@ func (p *Parser) stmt() (ast.Stmt, error) {
 		if _, err := p.expect(lexer.LParen); err != nil {
 			return nil, err
 		}
-		if !p.text("const") && !p.text("let") {
-			return nil, p.err(p.cur(), "for initializer must be a const/let declaration")
+		if !p.text("let") {
+			return nil, p.err(p.cur(), "for initializer must be a let declaration")
 		}
 		initStart := p.take()
-		mut := initStart.Text == "let"
 		n, err := p.expect(lexer.Ident)
 		if err != nil {
 			return nil, err
@@ -445,7 +461,7 @@ func (p *Parser) stmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		init := &ast.VarStmt{Mutable: mut, Name: n.Text, Type: ty, Value: iv, Span: join(initStart.Span, semi.Span)}
+		init := &ast.VarStmt{Mutable: true, Name: n.Text, Type: ty, Value: iv, Span: join(initStart.Span, semi.Span)}
 
 		cond, err := p.expr(0)
 		if err != nil {

@@ -1,6 +1,7 @@
 type ParticleParams = {
   dt: f32,
   count: u32,
+  steps: u32,
 };
 
 type FractalParams = {
@@ -49,31 +50,28 @@ fn blend(base: f32, layer: f32, amount: f32): f32 {
 }
 
 fn hashPixel(x: u32, y: u32): f32 {
-  let value = x * 374761393u + y * 668265263u;
-  value = (value ^ (value >> 13u)) * 1274126177u;
-  value ^= value >> 16u;
-  return f32(value & 65535u) / 65535.0;
+  let value = x * 374761393 + y * 668265263;
+  value = (value ^ (value >> 13)) * 1274126177;
+  value ^= value >> 16;
+  return f32(value & 65535) / 65535.0;
 }
 
-@workgroupSize(256)
-export compute integrateParticles(
-  positions: storage<f32[], read_write>,
-  velocities: storage<f32[], read>,
+export compute integrateParticles[i](
+  positions: buffer<f32[]>,
+  velocities: buffer<f32[]>,
   params: uniform<ParticleParams>,
 ) {
-  const i = globalId.x;
   if (i < params.count) {
-    positions[i] += velocities[i] * params.dt;
+    for (let step = 0; step < params.steps; step++) {
+      positions[i] += velocities[i] * params.dt;
+    }
   }
 }
 
-@workgroupSize(16, 16, 1)
-export compute mandelbrot(
-  output: storage<u32[], read_write>,
+export compute mandelbrot[x, y](
+  output: buffer<u32[]>,
   params: uniform<FractalParams>,
 ) {
-  const x = globalId.x;
-  const y = globalId.y;
   if (x >= params.width || y >= params.height) {
     return;
   }
@@ -82,7 +80,7 @@ export compute mandelbrot(
   const cy = (f32(y) - f32(params.height) * 0.5) * params.scale + params.centerY;
   let zx = 0.0;
   let zy = 0.0;
-  let iteration = 0u;
+  let iteration = 0;
   while (iteration < params.maxIterations && zx * zx + zy * zy <= 4.0) {
     const nextX = zx * zx - zy * zy + cx;
     zy = 2.0 * zx * zy + cy;
@@ -92,40 +90,41 @@ export compute mandelbrot(
   output[y * params.width + x] = iteration;
 }
 
-@workgroupSize(16, 16, 1)
-export compute multiplyMatrices(
-  left: storage<f32[], read>,
-  right: storage<f32[], read>,
-  output: storage<f32[], read_write>,
+@workgroup(16, 16)
+export compute multiplyMatrices[column, row](
+  left: buffer<f32[]>,
+  right: buffer<f32[]>,
+  output: buffer<f32[]>,
   params: uniform<MatrixParams>,
 ) {
   workgroup leftTile: f32[256];
   workgroup rightTile: f32[256];
 
-  const row = globalId.y;
-  const column = globalId.x;
+  const localColumn = column % 16;
+  const localRow = row % 16;
+  const local = localRow * 16 + localColumn;
   let sum = 0.0;
-  let tile = 0u;
+  let tile = 0;
   while (tile < params.size) {
-    const leftColumn = tile + localId.x;
-    const rightRow = tile + localId.y;
+    const leftColumn = tile + localColumn;
+    const rightRow = tile + localRow;
     if (row < params.size && leftColumn < params.size) {
-      leftTile[localIndex] = left[row * params.size + leftColumn];
+      leftTile[local] = left[row * params.size + leftColumn];
     } else {
-      leftTile[localIndex] = 0.0;
+      leftTile[local] = 0.0;
     }
     if (rightRow < params.size && column < params.size) {
-      rightTile[localIndex] = right[rightRow * params.size + column];
+      rightTile[local] = right[rightRow * params.size + column];
     } else {
-      rightTile[localIndex] = 0.0;
+      rightTile[local] = 0.0;
     }
     workgroupBarrier();
 
-    for (let k = 0u; k < 16u; k++) {
-      sum += leftTile[localId.y * 16u + k] * rightTile[k * 16u + localId.x];
+    for (let k = 0; k < 16; k++) {
+      sum += leftTile[localRow * 16 + k] * rightTile[k * 16 + localColumn];
     }
     workgroupBarrier();
-    tile += 16u;
+    tile += 16;
   }
 
   if (row < params.size && column < params.size) {
@@ -133,20 +132,18 @@ export compute multiplyMatrices(
   }
 }
 
-@workgroupSize(256)
-export compute priceOptions(
-  output: storage<f32[], read_write>,
+export compute priceOptions[i](
+  output: buffer<f32[]>,
   params: uniform<OptionParams>,
 ) {
-  const i = globalId.x;
   if (i >= params.count) {
     return;
   }
 
-  const spot = 80.0 + f32(i % 400u) * 0.1;
-  const strike = 90.0 + f32(i % 200u) * 0.1;
-  const years = 0.25 + f32(i % 365u) / 365.0;
-  const volatility = 0.15 + f32(i % 100u) * 0.001;
+  const spot = 80.0 + f32(i % 400) * 0.1;
+  const strike = 90.0 + f32(i % 200) * 0.1;
+  const years = 0.25 + f32(i % 365) / 365.0;
+  const volatility = 0.15 + f32(i % 100) * 0.001;
   const rate = 0.03;
   const sigmaRootTime = volatility * sqrt(years);
   const d1 = (log(spot / strike) + (rate + 0.5 * volatility * volatility) * years) / sigmaRootTime;
@@ -154,13 +151,10 @@ export compute priceOptions(
   output[i] = spot * normalCDF(d1) - strike * exp(-rate * years) * normalCDF(d2);
 }
 
-@workgroupSize(16, 16, 1)
-export compute proceduralScene(
-  rgba: storage<u32[], read_write>,
+export compute proceduralScene[x, y](
+  rgba: buffer<u32[]>,
   params: uniform<RenderParams>,
 ) {
-  const x = globalId.x;
-  const y = globalId.y;
   if (x >= params.width || y >= params.height) {
     return;
   }
@@ -197,13 +191,13 @@ export compute proceduralScene(
   green = blend(green, 0.44 + 0.3 * (sunY / 0.145 + 0.5), disk * 0.96);
   blue = blend(blue, 0.16, disk * 0.96);
 
-  const cellSize = 12u;
+  const cellSize = 12;
   const cellX = x / cellSize;
   const cellY = y / cellSize;
   const seed = hashPixel(cellX, cellY);
   if (seed > 0.91 && py > -0.06) {
-    const centerX = 2.0 + hashPixel(cellX + 17u, cellY + 31u) * 8.0;
-    const centerY = 2.0 + hashPixel(cellX + 47u, cellY + 11u) * 8.0;
+    const centerX = 2.0 + hashPixel(cellX + 17, cellY + 31) * 8.0;
+    const centerY = 2.0 + hashPixel(cellX + 47, cellY + 11) * 8.0;
     const starX = f32(x % cellSize) - centerX;
     const starY = f32(y % cellSize) - centerY;
     const core = exp(-(starX * starX + starY * starY) * 1.7);
@@ -244,7 +238,7 @@ export compute proceduralScene(
   blue = blend(blue, 0.09 + grid * 0.72 + reflection * 0.42, ground);
 
   const vignette = saturate(1.0 - (px * px * 0.5 + (v - 0.5) * (v - 0.5)) * 1.35);
-  const grain = 0.97 + hashPixel(x + 101u, y + 79u) * 0.06;
+  const grain = 0.97 + hashPixel(x + 101, y + 79) * 0.06;
   const scanline = 0.975 + 0.025 * sin(f32(y) * 1.65);
   const exposure = (0.62 + 0.38 * vignette) * grain * scanline;
   red *= exposure;
@@ -256,5 +250,5 @@ export compute proceduralScene(
   const green8 = u32(saturate(green) * 255.0 + 0.5);
   const blue8 = u32(saturate(blue) * 255.0 + 0.5);
   const alpha8 = u32(saturate(alpha) * 255.0 + 0.5);
-  rgba[y * params.width + x] = red8 | (green8 << 8u) | (blue8 << 16u) | (alpha8 << 24u);
+  rgba[y * params.width + x] = red8 | (green8 << 8) | (blue8 << 16) | (alpha8 << 24);
 }

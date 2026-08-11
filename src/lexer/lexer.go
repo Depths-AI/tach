@@ -125,10 +125,8 @@ func (l *Lexer) Next() (Token, error) {
 		return Token{Kind: Ident, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 	}
 	if unicode.IsDigit(r) {
-		// Integer literals support decimal, hexadecimal, and binary spelling.
-		// Floating-point literals are decimal and may use scientific notation.
-		// Suffixes stay compact: u, i, f. Semantic analysis canonicalizes every
-		// literal before it reaches either backend.
+		// Tach literals carry values, not target-language type suffixes. Semantic
+		// analysis supplies a concrete type before values enter Core IR.
 		l.advance()
 		if r == '0' {
 			next, _ := l.peek()
@@ -158,9 +156,8 @@ func (l *Lexer) Next() (Token, error) {
 				if digits == 0 {
 					return Token{}, &source.Error{Span: l.span(start), Message: "base-prefixed integer literal requires digits"}
 				}
-				c, _ := l.peek()
-				if c == 'u' || c == 'i' || c == 'f' {
-					l.advance()
+				if c, _ := l.peek(); unicode.IsLetter(c) {
+					return Token{}, &source.Error{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 				}
 				return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 			}
@@ -205,9 +202,8 @@ func (l *Lexer) Next() (Token, error) {
 				return Token{}, &source.Error{Span: l.span(start), Message: "floating-point exponent requires digits"}
 			}
 		}
-		c, _ = l.peek()
-		if c == 'u' || c == 'i' || c == 'f' {
-			l.advance()
+		if c, _ = l.peek(); unicode.IsLetter(c) {
+			return Token{}, &source.Error{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 		}
 		return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 	}
@@ -307,9 +303,6 @@ func (l *Lexer) Next() (Token, error) {
 		} else if r2 == '-' {
 			l.advance()
 			return Token{Kind: MinusMinus, Text: "--", Span: l.span(start)}, nil
-		} else if r2 == '>' {
-			l.advance()
-			return Token{Kind: Arrow, Text: "->", Span: l.span(start)}, nil
 		}
 		return Token{Kind: Minus, Text: "-", Span: l.span(start)}, nil
 	case '*':

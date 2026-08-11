@@ -17,12 +17,14 @@ export interface BenchmarkResult {
   readonly samples: number;
   readonly dispatches: number;
   readonly gpuMs: number;
-  readonly cpuMs: number;
-  readonly speedup: number;
+  readonly gpuSamplesMs: readonly number[];
+  readonly cpuMs: number | null;
+  readonly cpuSamplesMs: readonly number[] | null;
+  readonly speedup: number | null;
   readonly gpuRate: number;
-  readonly cpuRate: number;
+  readonly cpuRate: number | null;
   readonly rateUnit: string;
-  readonly correct: boolean;
+  readonly correct: boolean | null;
   readonly check: string;
 }
 
@@ -39,8 +41,8 @@ export interface BenchmarkRun {
 
 interface Profile {
   readonly samples: number;
-  readonly particleValues: number;
-  readonly particleDispatches: number;
+  readonly particleCount: number;
+  readonly particleSteps: number;
   readonly fractalSize: number;
   readonly fractalIterations: number;
   readonly fractalDispatches: number;
@@ -53,8 +55,8 @@ interface Profile {
 
 const full: Profile = {
   samples: 5,
-  particleValues: 1 << 20,
-  particleDispatches: 128,
+  particleCount: 1 << 18,
+  particleSteps: 128,
   fractalSize: 768,
   fractalIterations: 192,
   fractalDispatches: 4,
@@ -67,8 +69,8 @@ const full: Profile = {
 
 const quick: Profile = {
   samples: 3,
-  particleValues: 1 << 18,
-  particleDispatches: 2,
+  particleCount: 1 << 16,
+  particleSteps: 2,
   fractalSize: 128,
   fractalIterations: 64,
   fractalDispatches: 2,
@@ -92,8 +94,10 @@ function nextFrame(): Promise<void> {
 
 async function measureGPU(samples: number, work: () => Promise<void>): Promise<number[]> {
   const times: number[] = [];
+  await nextFrame();
+  await work();
+  await work();
   for (let sample = 0; sample < samples; sample++) {
-    await nextFrame();
     const start = performance.now();
     await work();
     times.push(performance.now() - start);
@@ -123,66 +127,74 @@ function result(
   work: number,
   rateScale: number,
   gpuTimes: readonly number[],
-  cpuTimes: readonly number[],
-  correct: boolean,
+  cpuTimes: readonly number[] | null,
+  correct: boolean | null,
   check: string,
 ): BenchmarkResult {
   const gpuMs = median(gpuTimes);
-  const cpuMs = median(cpuTimes);
+  const cpuMs = cpuTimes === null ? null : median(cpuTimes);
   return {
     ...identity,
     samples,
     gpuMs,
+    gpuSamplesMs: [...gpuTimes],
     cpuMs,
-    speedup: cpuMs / gpuMs,
+    cpuSamplesMs: cpuTimes === null ? null : [...cpuTimes],
+    speedup: cpuMs === null ? null : cpuMs / gpuMs,
     gpuRate: work / (gpuMs / 1000) / rateScale,
-    cpuRate: work / (cpuMs / 1000) / rateScale,
+    cpuRate: cpuMs === null ? null : work / (cpuMs / 1000) / rateScale,
     correct,
     check,
   };
 }
 
-async function particles(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
-  const count = profile.particleValues;
-  const positions = new Float32Array(count);
-  const velocities = new Float32Array(count);
-  for (let i = 0; i < count; i++) {
+async function particles(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
+  const count = profile.particleCount;
+  const values = count * 4;
+  const positions = new Float32Array(values);
+  const velocities = new Float32Array(values);
+  for (let i = 0; i < values; i++) {
     positions[i] = (i % 1024) * 0.001;
     velocities[i] = ((i * 17) % 257 - 128) * 0.0001;
   }
   const gpuPositions = gpu.buffer(positions);
   const gpuVelocities = gpu.buffer(velocities);
-  const params = { dt: 0.001, count };
-  await complete(gpu, integrateParticles(gpuPositions, gpuVelocities, params, { size: count }));
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, integrateParticles(
     gpuPositions,
     gpuVelocities,
-    params,
-    { size: count, dispatches: profile.particleDispatches },
+    { dt: 0.001, count: values, steps: profile.particleSteps },
+    { size: values },
   )));
+  const identity = {
+    id: "particles",
+    name: "Particle integration",
+    description: "One dispatch keeps each position resident in a register across every integration step.",
+    problem: `${count.toLocaleString()} particles × ${profile.particleSteps} fused steps`,
+    dispatches: 1,
+    rateUnit: "million component updates/s",
+  };
+  if (!compareCPU) {
+    gpuPositions.destroy();
+    gpuVelocities.destroy();
+    return result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, null, null,
+      "CPU comparison skipped");
+  }
   const actual = await gpuPositions.read();
 
   const expected = positions.slice();
-  const integrateCPU = (dispatches: number): void => {
-    for (let dispatch = 0; dispatch < dispatches; dispatch++) {
-      for (let i = 0; i < count; i++) expected[i] = expected[i]! + velocities[i]! * params.dt;
+  const integrateCPU = (steps: number): void => {
+    for (let step = 0; step < steps; step++) {
+      for (let i = 0; i < values; i++) expected[i] = expected[i]! + velocities[i]! * 0.001;
     }
   };
-  integrateCPU(1);
-  const cpuTimes = await measureCPU(profile.samples, () => integrateCPU(profile.particleDispatches));
+  integrateCPU(profile.particleSteps * 2);
+  const cpuTimes = await measureCPU(profile.samples, () => integrateCPU(profile.particleSteps));
   let maxError = 0;
-  for (let i = 0; i < count; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
+  for (let i = 0; i < values; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
   gpuPositions.destroy();
   gpuVelocities.destroy();
 
-  return result({
-    id: "particles",
-    name: "Particle integration",
-    description: "Persistent position and velocity buffers; each batch advances every scalar component repeatedly.",
-    problem: `${(count / 4).toLocaleString()} particles × ${profile.particleDispatches} steps`,
-    dispatches: profile.particleDispatches,
-    rateUnit: "million component updates/s",
-  }, profile.samples, count * profile.particleDispatches, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
+  return result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
   `maximum absolute error ${maxError.toExponential(2)}`);
 }
 
@@ -208,7 +220,7 @@ function mandelbrotCPU(output: Uint32Array, params: FractalParams, dispatches: n
   }
 }
 
-async function fractal(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
+async function fractal(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
   const width = profile.fractalSize;
   const height = profile.fractalSize;
   const pixels = width * height;
@@ -221,12 +233,24 @@ async function fractal(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
     centerY: 0,
   };
   const output = gpu.buffer(new Uint32Array(pixels));
-  await complete(gpu, mandelbrot(output, params, { size: [width, height] }));
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, mandelbrot(
     output,
     params,
     { size: [width, height], dispatches: profile.fractalDispatches },
   )));
+  const identity = {
+    id: "fractal",
+    name: "Mandelbrot escape",
+    description: "A divergent, data-dependent loop computes every pixel independently with f32 arithmetic.",
+    problem: `${width} × ${height}, limit ${params.maxIterations} × ${profile.fractalDispatches} renders`,
+    dispatches: profile.fractalDispatches,
+    rateUnit: "million pixel-dispatches/s",
+  };
+  if (!compareCPU) {
+    output.destroy();
+    return result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, null, null,
+      "CPU comparison skipped");
+  }
   const actual = await output.read();
 
   const expected = new Uint32Array(pixels);
@@ -246,14 +270,7 @@ async function fractal(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
   output.destroy();
   const agreement = close / pixels;
 
-  return result({
-    id: "fractal",
-    name: "Mandelbrot escape",
-    description: "A divergent, data-dependent loop computes every pixel independently with f32 arithmetic.",
-    problem: `${width} × ${height}, limit ${params.maxIterations} × ${profile.fractalDispatches} renders`,
-    dispatches: profile.fractalDispatches,
-    rateUnit: "million pixel-dispatches/s",
-  }, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, cpuTimes, agreement >= 0.995,
+  return result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, cpuTimes, agreement >= 0.995,
   `${(agreement * 100).toFixed(3)}% within one iteration; maximum difference ${maxDifference}`);
 }
 
@@ -278,7 +295,7 @@ function multiplyCPU(
   }
 }
 
-async function matrices(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
+async function matrices(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
   const size = profile.matrixSize;
   const cells = size * size;
   const left = new Float32Array(cells);
@@ -290,13 +307,6 @@ async function matrices(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
   const gpuLeft = gpu.buffer(left);
   const gpuRight = gpu.buffer(right);
   const gpuOutput = gpu.buffer(new Float32Array(cells));
-  await complete(gpu, multiplyMatrices(
-    gpuLeft,
-    gpuRight,
-    gpuOutput,
-    { size },
-    { size: [size, size] },
-  ));
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, multiplyMatrices(
     gpuLeft,
     gpuRight,
@@ -304,6 +314,21 @@ async function matrices(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
     { size },
     { size: [size, size], dispatches: profile.matrixDispatches },
   )));
+  const identity = {
+    id: "matrix",
+    name: "Tiled matrix multiply",
+    description: "16 × 16 tiles reuse two Workgroup arrays and synchronize twice per tile.",
+    problem: `${size} × ${size} matrices × ${profile.matrixDispatches} products`,
+    dispatches: profile.matrixDispatches,
+    rateUnit: "GFLOP/s",
+  };
+  if (!compareCPU) {
+    gpuLeft.destroy();
+    gpuRight.destroy();
+    gpuOutput.destroy();
+    return result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
+      gpuTimes, null, null, "CPU comparison skipped");
+  }
   const actual = await gpuOutput.read();
 
   const expected = new Float32Array(cells);
@@ -321,14 +346,7 @@ async function matrices(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
   gpuRight.destroy();
   gpuOutput.destroy();
 
-  return result({
-    id: "matrix",
-    name: "Tiled matrix multiply",
-    description: "16 × 16 tiles reuse two Workgroup arrays and synchronize twice per tile.",
-    problem: `${size} × ${size} matrices × ${profile.matrixDispatches} products`,
-    dispatches: profile.matrixDispatches,
-    rateUnit: "GFLOP/s",
-  }, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
+  return result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
   gpuTimes, cpuTimes, maxError < 0.01, `maximum absolute error ${maxError.toExponential(2)}`);
 }
 
@@ -356,15 +374,27 @@ function priceOptionsCPU(output: Float32Array, dispatches: number): void {
   }
 }
 
-async function options(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
+async function options(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
   const count = profile.optionCount;
   const output = gpu.buffer(new Float32Array(count));
-  await complete(gpu, priceOptions(output, { count }, { size: count }));
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, priceOptions(
     output,
     { count },
     { size: count, dispatches: profile.optionDispatches },
   )));
+  const identity = {
+    id: "options",
+    name: "Black–Scholes pricing",
+    description: "Independent option prices stress log, exp, sqrt, branching, and a generated helper function.",
+    problem: `${count.toLocaleString()} options × ${profile.optionDispatches} valuations`,
+    dispatches: profile.optionDispatches,
+    rateUnit: "million option valuations/s",
+  };
+  if (!compareCPU) {
+    output.destroy();
+    return result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, null, null,
+      "CPU comparison skipped");
+  }
   const actual = await output.read();
 
   const expected = new Float32Array(count);
@@ -374,14 +404,7 @@ async function options(gpu: Tach, profile: Profile): Promise<BenchmarkResult> {
   for (let i = 0; i < count; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
   output.destroy();
 
-  return result({
-    id: "options",
-    name: "Black–Scholes pricing",
-    description: "Independent option prices stress log, exp, sqrt, branching, and a generated helper function.",
-    problem: `${count.toLocaleString()} options × ${profile.optionDispatches} valuations`,
-    dispatches: profile.optionDispatches,
-    rateUnit: "million option valuations/s",
-  }, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
+  return result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
   `maximum absolute error ${maxError.toExponential(2)}`);
 }
 
@@ -509,19 +532,35 @@ function renderSceneCPU(output: Uint32Array, params: RenderParams, dispatches: n
 async function rendering(
   gpu: Tach,
   profile: Profile,
+  compareCPU: boolean,
 ): Promise<{ readonly result: BenchmarkResult; readonly frame: RenderedFrame }> {
   const width = 1920;
   const height = 1080;
   const pixels = width * height;
   const params: RenderParams = { width, height, time: 1.7 };
   const output = gpu.buffer(new Uint32Array(pixels));
-  await complete(gpu, proceduralScene(output, params, { size: [width, height] }));
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, proceduralScene(
     output,
     params,
     { size: [width, height], dispatches: profile.renderDispatches },
   )));
   const actual = await output.read();
+  const identity = {
+    id: "render",
+    name: "Procedural RGBA composition",
+    description: "A full-HD scene composes gradients, aurora, stars, rings, mountains, a perspective grid, reflection, grain, and RGBA packing per pixel.",
+    problem: `${width} × ${height} RGBA × ${profile.renderDispatches} frames`,
+    dispatches: profile.renderDispatches,
+    rateUnit: "million RGBA pixels/s",
+  };
+  if (!compareCPU) {
+    output.destroy();
+    return {
+      result: result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, null, null,
+        "CPU comparison skipped"),
+      frame: { width, height, pixels: actual },
+    };
+  }
 
   const expected = new Uint32Array(pixels);
   renderSceneCPU(expected, params, 1);
@@ -550,14 +589,7 @@ async function rendering(
   output.destroy();
 
   return {
-    result: result({
-      id: "render",
-      name: "Procedural RGBA composition",
-      description: "A full-HD scene composes gradients, aurora, stars, rings, mountains, a perspective grid, reflection, grain, and RGBA packing per pixel.",
-      problem: `${width} × ${height} RGBA × ${profile.renderDispatches} frames`,
-      dispatches: profile.renderDispatches,
-      rateUnit: "million RGBA pixels/s",
-    }, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, cpuTimes,
+    result: result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, cpuTimes,
     meanDifference <= 2 && agreement >= 0.98,
     `mean RGB error ${meanDifference.toFixed(3)}; ${(agreement * 100).toFixed(3)}% of pixels within 8; maximum ${maximumDifference}`),
     frame: { width, height, pixels: actual },
@@ -567,19 +599,21 @@ async function rendering(
 export async function runBenchmarks(
   gpu: Tach,
   fast: boolean,
+  compareCPU: boolean,
   progress: Progress,
 ): Promise<BenchmarkRun> {
-  const profile = fast ? quick : full;
+  const selected = fast ? quick : full;
+  const profile = compareCPU ? selected : { ...selected, samples: 9 };
   const workloads = [particles, fractal, matrices, options] as const;
   const results: BenchmarkResult[] = [];
   const total = workloads.length + 1;
   for (let index = 0; index < workloads.length; index++) {
     const workload = workloads[index]!;
     progress(["Particle integration", "Mandelbrot escape", "Tiled matrix multiply", "Black–Scholes pricing"][index]!, index, total);
-    results.push(await workload(gpu, profile));
+    results.push(await workload(gpu, profile, compareCPU));
   }
   progress("Procedural RGBA composition", workloads.length, total);
-  const rendered = await rendering(gpu, profile);
+  const rendered = await rendering(gpu, profile, compareCPU);
   results.push(rendered.result);
   return { results, frame: rendered.frame };
 }

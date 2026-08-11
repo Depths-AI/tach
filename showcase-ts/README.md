@@ -7,7 +7,7 @@ public `@depths/tach` binding contract.
 
 The suite covers five different compute shapes:
 
-- particle integration repeatedly updates a persistent read/write buffer;
+- particle integration fuses repeated steps while keeping state register-resident;
 - Mandelbrot escape uses a two-dimensional dispatch and divergent loops;
 - matrix multiplication tiles through workgroup memory and barriers;
 - Black-Scholes pricing exercises a generated helper plus `log`, `exp`,
@@ -29,11 +29,20 @@ const velocities = gpu.buffer(new Float32Array(count));
 await gpu.submit(integrateParticles(
   positions,
   velocities,
-  { dt: 0.001, count },
-  { size: count, dispatches: 128 },
+  { dt: 0.001, count, steps: 128 },
+  { size: count },
 ));
 await gpu.idle();
 ```
+
+`steps` is an ordinary suffix-free Tach loop. The target-neutral optimizer
+recognizes its safe repeated buffer update, loads position, velocity, and `dt`
+only on the first executed iteration, carries them as SSA values, and commits
+the position once after the loop. A zero-iteration loop performs no memory
+access. The loop itself remains source-visible because replacing ordered
+dispatches with an invocation-local loop is invalid for kernels with
+cross-invocation reads, atomics, or barriers; `dispatches` retains its literal
+ordered-dispatch meaning.
 
 `submit()` itself stops at queue submission. The explicit `idle()` is part of
 this benchmark because a wall-clock sample needs completed GPU work; a frame
@@ -47,7 +56,7 @@ their backing bytes without an element-by-element JavaScript packing pass.
 ## Measurement contract
 
 Before timing, the harness completes native compilation, WGSL module and
-pipeline creation, the initial storage upload, uniform-arena creation,
+pipeline creation, the initial buffer upload, uniform-arena creation,
 bind-group creation, and a warmup invocation. Each GPU sample then measures one
 application-visible `submit()` plus `idle()` pair, including command encoding,
 submission, and `queue.onSubmittedWorkDone()`. Buffer readback and correctness
@@ -62,7 +71,7 @@ The full profile runs:
 
 | Workload | Timed batch |
 | --- | --- |
-| Particle integration | 1,048,576 scalar components, 128 dispatches |
+| Particle integration | 1,048,576 scalar components, 128 fused steps in 1 dispatch |
 | Mandelbrot escape | 768 x 768 pixels, limit 192, 4 dispatches |
 | Tiled matrix multiply | 256 x 256 matrices, 4 dispatches |
 | Black-Scholes pricing | 1,048,576 options, 8 dispatches |
@@ -76,8 +85,14 @@ From the repository root:
 npm ci
 npm run compiler
 npm run install:browser --workspace=@tach/showcase-ts
+npm run benchmark:gpu --workspace=@tach/showcase-ts
 npm run benchmark --workspace=@tach/showcase-ts
 ```
+
+`benchmark:gpu` runs the same full-size WebGPU warmups and timed batches but
+skips every TypeScript reference workload and correctness comparison. It writes
+the ignored `showcase-ts/test-report.md`, so rapid compiler iteration does not
+overwrite the tracked comparison baseline.
 
 `benchmark` builds the generated module and production site, runs the full
 hardware benchmark in headless Chromium, verifies every GPU result against its

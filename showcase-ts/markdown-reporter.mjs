@@ -45,7 +45,8 @@ export default class MarkdownReporter {
   onEnd(run) {
     const test = this.test;
     const results = test?.results ?? [];
-    const verified = results.length === 5 && results.every((item) => item.correct);
+    const compared = results.length === 5 && results.every((item) => item.cpuMs !== null);
+    const verified = compared && results.every((item) => item.correct);
     const geometricMean = verified
       ? Math.exp(results.reduce((sum, item) => sum + Math.log(item.speedup), 0) / results.length)
       : undefined;
@@ -59,7 +60,7 @@ export default class MarkdownReporter {
       `- Status: **${run.status.toUpperCase()}**`,
       `- Profile: **${oneLine(test?.profile)}**`,
       `- Workloads: ${results.length}/5`,
-      `- Correctness: **${verified ? "VERIFIED" : "FAILED"}**`,
+      `- Correctness: **${compared ? verified ? "VERIFIED" : "FAILED" : "NOT RUN"}**`,
       `- Geometric-mean acceleration: **${geometricMean === undefined ? "unavailable" : `${geometricMean.toFixed(2)}x`}**`,
       `- Harness duration: ${duration(run.duration)}`,
       `- Adapter: \`${oneLine(test?.adapter)}\``,
@@ -68,8 +69,10 @@ export default class MarkdownReporter {
       "## Measurement contract",
       "",
       "- The native compiler, generated WGSL, shader module, compute pipeline, initial buffer upload, uniform arena, bind group, and JavaScript JIT warmup are completed before timing.",
-      "- Every sample records multiple dispatches into one compute pass, submits once, and waits once for queue completion.",
-      "- Reported times are medians of separate timed batches. GPU readback and correctness comparison happen after timing.",
+      "- Every sample records one or more dispatches into one compute pass, submits once, and waits once for queue completion.",
+      compared
+        ? "- Reported times are medians of separate timed batches. GPU readback and correctness comparison happen after timing."
+        : "- Reported times are medians of separate timed batches. CPU execution and correctness comparison are skipped.",
       "- GPU values are application-visible batch wall times, so command encoding and submission are included; one-time setup and readback are not.",
       "- The comparison target is the same algorithm in single-threaded TypeScript over typed arrays, not a native SIMD or multithreaded library.",
       "",
@@ -80,7 +83,7 @@ export default class MarkdownReporter {
     ];
 
     for (const item of results) {
-      lines.push(`| ${oneLine(item.name)} | ${oneLine(item.problem)} | ${item.samples} | ${item.dispatches} | ${duration(item.gpuMs)} | ${duration(item.cpuMs)} | **${item.speedup.toFixed(2)}x** | ${item.gpuRate.toFixed(2)} ${oneLine(item.rateUnit)} | ${item.correct ? "PASS" : "FAIL"}: ${oneLine(item.check)} |`);
+      lines.push(`| ${oneLine(item.name)} | ${oneLine(item.problem)} | ${item.samples} | ${item.dispatches} | ${duration(item.gpuMs)} | ${item.cpuMs === null ? "—" : duration(item.cpuMs)} | ${item.speedup === null ? "—" : `**${item.speedup.toFixed(2)}x**`} | ${item.gpuRate.toFixed(2)} ${oneLine(item.rateUnit)} | ${item.correct === null ? "NOT RUN" : `${item.correct ? "PASS" : "FAIL"}: ${oneLine(item.check)}`} |`);
     }
 
     if (test?.error) {

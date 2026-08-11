@@ -1,9 +1,7 @@
-@workgroupSize(32)
-export compute scale(
-  data: storage<f32[], read_write>,
+export compute scale[i](
+  data: buffer<f32[]>,
   factor: uniform<f32>,
 ) {
-  const i = globalId.x;
   if (i < data.length) {
     data[i] *= factor;
   }

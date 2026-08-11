@@ -29,9 +29,9 @@ func compileSourceForMutation(t *testing.T, source string) []byte {
 func compileSPVForMutation(t *testing.T) []byte {
 	t.Helper()
 	return compileSourceForMutation(t, `
-@workgroupSize(1)
-export compute math(out: storage<f32[], read_write>) {
-  if (globalId.x < out.length) { out[globalId.x] = sin(f32(globalId.x)); }
+@workgroup(1)
+export compute math[i](out: buffer<f32[]>) {
+  if (i < out.length) { out[i] = sin(f32(i)); }
 }`)
 }
 
@@ -126,6 +126,29 @@ func TestValidatorRejectsUnsupportedGLSL450Instruction(t *testing.T) {
 	}
 }
 
+func TestValidatorRejectsFunctionControlOutsideEmittedProfile(t *testing.T) {
+	bin := compileSourceForMutation(t, `
+fn twice(x: f32): f32 { return x + x; }
+@workgroup(1)
+export compute useHelper[i](out: buffer<f32>) { out = twice(2.0); }
+`)
+	m, err := Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range m.Instructions {
+		if in.Op == OpFunction && in.Operands[2] != FunctionControlNone {
+			binary.LittleEndian.PutUint32(bin[(in.Offset+3)*4:], FunctionControlInline)
+			err = Validate(bin)
+			if err == nil || !strings.Contains(err.Error(), "function control outside Tach profile") {
+				t.Fatalf("Validate error = %v, want function-control rejection", err)
+			}
+			return
+		}
+	}
+	t.Fatal("test module emitted no marked helper function")
+}
+
 func TestValidatorRejectsDuplicateSSAResult(t *testing.T) {
 	bin := append([]byte(nil), compileSPVForMutation(t)...)
 	m, err := Decode(bin)
@@ -179,11 +202,11 @@ func TestValidatorRequiresDescriptorArrayStride(t *testing.T) {
 
 func TestValidatorRejectsWorkgroupArrayStride(t *testing.T) {
 	bin := compileSourceForMutation(t, `
-@workgroupSize(1)
-export compute arrayMemory(out: storage<u32, read_write>) {
+@workgroup(1)
+export compute arrayMemory[i](out: buffer<u32>) {
   workgroup scratch: u32[4];
-  scratch[0u] = 7u;
-  out = scratch[0u];
+  scratch[0] = 7;
+  out = scratch[0];
 }`)
 	root := workgroupRootType(t, bin)
 	bin = insertBeforeTypes(t, bin, OpDecorate, root, DecorationArrayStride, 4)
@@ -196,10 +219,10 @@ export compute arrayMemory(out: storage<u32, read_write>) {
 func TestValidatorRejectsWorkgroupMemberOffsets(t *testing.T) {
 	bin := compileSourceForMutation(t, `
 type Pair = { x: u32, y: u32 };
-@workgroupSize(1)
-export compute structMemory(out: storage<u32, read_write>) {
+@workgroup(1)
+export compute structMemory[i](out: buffer<u32>) {
   workgroup pair: Pair;
-  pair = { x: 7u, y: 9u };
+  pair = { x: 7, y: 9 };
   const copy: Pair = pair;
   out = copy.x + copy.y;
 }`)

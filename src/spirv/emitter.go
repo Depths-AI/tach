@@ -19,7 +19,12 @@ func Emit(m *ir.Module) ([]byte, error) {
 	if err := ir.Verify(m); err != nil {
 		return nil, fmt.Errorf("IR verification: %w", err)
 	}
-	b := newBuilder(m)
+	p, err := lower(m)
+	if err != nil {
+		return nil, err
+	}
+	optimize(p)
+	b := newBuilder(p)
 	if err := b.build(); err != nil {
 		return nil, err
 	}
@@ -35,6 +40,7 @@ func Emit(m *ir.Module) ([]byte, error) {
 }
 
 type builder struct {
+	p *program
 	m *ir.Module
 
 	nextID uint32
@@ -55,7 +61,7 @@ type builder struct {
 	constants    map[string]uint32
 	funcIDs      map[string]uint32
 	resourceIDs  []uint32
-	builtinIDs   map[ir.BuiltinKind]uint32
+	inputIDs     map[inputKind]uint32
 	workgroupIDs map[string][]uint32
 	glsl450      uint32
 }
@@ -67,16 +73,17 @@ const (
 	typeHostABI
 )
 
-func newBuilder(m *ir.Module) *builder {
+func newBuilder(p *program) *builder {
 	return &builder{
-		m:            m,
+		p:            p,
+		m:            p.source,
 		nextID:       1,
 		types:        map[string]uint32{},
 		pointers:     map[string]uint32{},
 		fnTypes:      map[string]uint32{},
 		constants:    map[string]uint32{},
 		funcIDs:      map[string]uint32{},
-		builtinIDs:   map[ir.BuiltinKind]uint32{},
+		inputIDs:     map[inputKind]uint32{},
 		workgroupIDs: map[string][]uint32{},
 	}
 }
@@ -123,7 +130,7 @@ func (b *builder) build() error {
 	if err := b.emitResources(); err != nil {
 		return err
 	}
-	if err := b.emitBuiltins(); err != nil {
+	if err := b.emitInputs(); err != nil {
 		return err
 	}
 	if err := b.emitWorkgroups(); err != nil {
@@ -369,9 +376,9 @@ func (b *builder) emitResources() error {
 		varID := b.id()
 		b.resourceIDs[i] = varID
 		emit(&b.typesGlobals, OpVariable, ptr, varID, storage)
-		emit(&b.annotations, OpDecorate, varID, DecorationDescriptorSet, r.Group)
-		emit(&b.annotations, OpDecorate, varID, DecorationBinding, r.Binding)
-		if r.Kind == ir.Storage && r.Access == ir.Read {
+		emit(&b.annotations, OpDecorate, varID, DecorationDescriptorSet, 0)
+		emit(&b.annotations, OpDecorate, varID, DecorationBinding, uint32(i))
+		if r.Kind == ir.Buffer && r.Access == ir.Read && !types.ContainsAtomic(r.Type) {
 			emit(&b.annotations, OpDecorate, varID, DecorationNonWritable)
 		}
 		emit(&b.debug, OpName, append([]uint32{varID}, encodeString(r.Name)...)...)
@@ -379,73 +386,39 @@ func (b *builder) emitResources() error {
 	return nil
 }
 
-func scanBuiltins(block *ir.Block, out map[ir.BuiltinKind]bool) {
-	for _, in := range block.Instrs {
-		switch x := in.(type) {
-		case *ir.Builtin:
-			out[x.Kind] = true
-		case *ir.If:
-			scanBuiltins(x.Then, out)
-			scanBuiltins(x.Else, out)
-		case *ir.Loop:
-			scanBuiltins(x.Cond, out)
-			scanBuiltins(x.Body, out)
-		}
-	}
-}
-
-func usedBuiltins(f *ir.Function) map[ir.BuiltinKind]bool {
-	used := map[ir.BuiltinKind]bool{}
-	if !f.Compute {
-		return used
-	}
-	scanBuiltins(f.Body, used)
-	// Tach Workgroup memory has one zero-initialization rule across WGSL and
-	// SPIR-V. The native prologue elects local invocation zero to perform the
-	// stores, even when source code does not otherwise reference localIndex.
-	if len(f.WorkgroupVars) > 0 {
-		used[ir.LocalIndex] = true
-	}
-	return used
-}
-
-func builtinInfo(k ir.BuiltinKind) (*types.Type, uint32, string) {
+func inputInfo(k inputKind) (*types.Type, uint32, string) {
 	vec3u := types.Vec(types.TU32, 3)
 	switch k {
-	case ir.GlobalID:
-		return vec3u, BuiltInGlobalInvocationID, "globalId"
-	case ir.LocalID:
-		return vec3u, BuiltInLocalInvocationID, "localId"
-	case ir.LocalIndex:
-		return types.TU32, BuiltInLocalInvocationIndex, "localIndex"
-	case ir.WorkgroupID:
-		return vec3u, BuiltInWorkgroupID, "workgroupId"
-	case ir.NumWorkgroups:
-		return vec3u, BuiltInNumWorkgroups, "numWorkgroups"
+	case inputGlobalIndex:
+		return vec3u, BuiltInGlobalInvocationID, "globalIndex"
+	case inputLocalIndex:
+		return vec3u, BuiltInLocalInvocationID, "localIndex"
+	case inputLocalLinear:
+		return types.TU32, BuiltInLocalInvocationIndex, "localLinear"
 	default:
 		return nil, 0, ""
 	}
 }
 
-func (b *builder) emitBuiltins() error {
-	used := map[ir.BuiltinKind]bool{}
+func (b *builder) emitInputs() error {
+	used := map[inputKind]bool{}
 	for _, f := range b.m.Functions {
-		for k := range usedBuiltins(f) {
+		for k := range b.p.functions[f].inputs() {
 			used[k] = true
 		}
 	}
-	order := []ir.BuiltinKind{ir.GlobalID, ir.LocalID, ir.LocalIndex, ir.WorkgroupID, ir.NumWorkgroups}
+	order := []inputKind{inputGlobalIndex, inputLocalIndex, inputLocalLinear}
 	for _, k := range order {
 		if !used[k] {
 			continue
 		}
-		t, decoration, name := builtinInfo(k)
+		t, decoration, name := inputInfo(k)
 		ptr, err := b.pointerID(StorageInput, t)
 		if err != nil {
 			return err
 		}
 		id := b.id()
-		b.builtinIDs[k] = id
+		b.inputIDs[k] = id
 		emit(&b.typesGlobals, OpVariable, ptr, id, StorageInput)
 		emit(&b.annotations, OpDecorate, id, DecorationBuiltIn, decoration)
 		emit(&b.debug, OpName, append([]uint32{id}, encodeString("__tach_"+name)...)...)
@@ -475,18 +448,18 @@ func (b *builder) emitWorkgroups() error {
 }
 
 func (b *builder) emitEntryPoints() {
-	order := []ir.BuiltinKind{ir.GlobalID, ir.LocalID, ir.LocalIndex, ir.WorkgroupID, ir.NumWorkgroups}
+	order := []inputKind{inputGlobalIndex, inputLocalIndex, inputLocalLinear}
 	for _, f := range b.m.Functions {
 		if !f.Compute {
 			continue
 		}
-		used := usedBuiltins(f)
+		used := b.p.functions[f].inputs()
 		ops := []uint32{ExecutionModelGLCompute, b.funcIDs[f.Name]}
 		ops = append(ops, encodeString(abi.KernelEntry(f.Name))...)
 		// SPIR-V 1.3 entry-point interfaces contain Input/Output variables only.
 		for _, k := range order {
 			if used[k] {
-				ops = append(ops, b.builtinIDs[k])
+				ops = append(ops, b.inputIDs[k])
 			}
 		}
 		emit(&b.entryPoints, OpEntryPoint, ops...)
@@ -514,19 +487,19 @@ func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
 			return 0, fmt.Errorf("invalid bool constant %q", raw)
 		}
 	case types.I32:
-		v, err := strconv.ParseInt(strings.TrimSuffix(raw, "i"), 10, 32)
+		v, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpConstant, tid, id, uint32(int32(v)))
 	case types.U32:
-		v, err := strconv.ParseUint(strings.TrimSuffix(raw, "u"), 10, 32)
+		v, err := strconv.ParseUint(raw, 10, 32)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpConstant, tid, id, uint32(v))
 	case types.F32:
-		v, err := strconv.ParseFloat(strings.TrimSuffix(raw, "f"), 32)
+		v, err := strconv.ParseFloat(raw, 32)
 		if err != nil {
 			return 0, err
 		}
@@ -573,6 +546,7 @@ type fnEmitter struct {
 	values map[ir.ValueID]uint32
 	vtypes map[ir.ValueID]*types.Type
 	places map[ir.PlaceID]spvPlace
+	inputs map[inputKind]uint32
 
 	currentLabel uint32
 	terminated   bool
@@ -588,9 +562,13 @@ func (b *builder) emitFunction(f *ir.Function) error {
 		return err
 	}
 	fid := b.funcIDs[f.Name]
-	emit(&b.functions, OpFunction, retType, fid, FunctionControlNone, fnType)
+	control := FunctionControlNone
+	if !f.Compute {
+		control = FunctionControlInline | FunctionControlConst
+	}
+	emit(&b.functions, OpFunction, retType, fid, control, fnType)
 
-	s := &fnEmitter{b: b, f: f, values: map[ir.ValueID]uint32{}, vtypes: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]spvPlace{}}
+	s := &fnEmitter{b: b, f: f, values: map[ir.ValueID]uint32{}, vtypes: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]spvPlace{}, inputs: map[inputKind]uint32{}}
 	for _, p := range f.Params {
 		pt, err := b.typeID(p.Type, typeLogical)
 		if err != nil {
@@ -607,6 +585,9 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	if err := s.emitWorkgroupZeroInitialization(); err != nil {
 		return err
 	}
+	if err := s.emitCoordinates(); err != nil {
+		return err
+	}
 	if err := s.emitBlock(f.Body, blockNormal); err != nil {
 		return err
 	}
@@ -614,6 +595,53 @@ func (b *builder) emitFunction(f *ir.Function) error {
 		return fmt.Errorf("function ended without a terminator")
 	}
 	emit(&b.functions, OpFunctionEnd)
+	return nil
+}
+
+func (s *fnEmitter) emitCoordinates() error {
+	lowered := s.b.p.functions[s.f]
+	active := false
+	for _, value := range lowered.coordinates.Order {
+		active = active || lowered.used(value)
+	}
+	if !active {
+		return nil
+	}
+	u32Type, err := s.b.typeID(types.TU32, typeLogical)
+	if err != nil {
+		return err
+	}
+	for _, value := range lowered.coordinates.Order {
+		if !lowered.used(value) {
+			continue
+		}
+		input, dimension := lowered.coordinate(value)
+		loaded := s.inputs[input]
+		if loaded == 0 {
+			variable := s.b.inputIDs[input]
+			if variable == 0 {
+				return fmt.Errorf("coordinate input %d was not declared", input)
+			}
+			t := types.TU32
+			if input != inputLocalLinear {
+				t = types.Vec(types.TU32, 3)
+			}
+			typeID, err := s.b.typeID(t, typeLogical)
+			if err != nil {
+				return err
+			}
+			loaded = s.b.id()
+			emit(&s.b.functions, OpLoad, typeID, loaded, variable)
+			s.inputs[input] = loaded
+		}
+		if input == inputLocalLinear {
+			s.def(value, loaded, types.TU32)
+			continue
+		}
+		id := s.b.id()
+		emit(&s.b.functions, OpCompositeExtract, u32Type, id, loaded, dimension)
+		s.def(value, id, types.TU32)
+	}
 	return nil
 }
 
@@ -625,7 +653,7 @@ func (s *fnEmitter) emitWorkgroupZeroInitialization() error {
 	if len(vars) != len(s.f.WorkgroupVars) {
 		return fmt.Errorf("workgroup variables for %s were not declared", s.f.Name)
 	}
-	localIndexVar := s.b.builtinIDs[ir.LocalIndex]
+	localIndexVar := s.b.inputIDs[inputLocalLinear]
 	if localIndexVar == 0 {
 		return fmt.Errorf("workgroup initialization requires localIndex builtin")
 	}
@@ -635,6 +663,7 @@ func (s *fnEmitter) emitWorkgroupZeroInitialization() error {
 	}
 	localIndex := s.b.id()
 	emit(&s.b.functions, OpLoad, u32Type, localIndex, localIndexVar)
+	s.inputs[inputLocalLinear] = localIndex
 	zero, err := s.b.u32Constant(0)
 	if err != nil {
 		return err
@@ -889,21 +918,21 @@ func (s *fnEmitter) storePlace(p spvPlace, value uint32) error {
 }
 
 func (s *fnEmitter) emitInstr(in ir.Instr) error {
+	if definition, ok := in.(ir.ValueDef); ok {
+		lowered := s.b.p.functions[s.f]
+		if lowered.replaced(definition.ResultValue()) {
+			return nil
+		}
+	}
 	switch x := in.(type) {
 	case *ir.Const:
+		if !s.b.p.functions[s.f].used(x.Result) {
+			return nil
+		}
 		id, err := s.b.constant(x.Type, x.Raw)
 		if err != nil {
 			return err
 		}
-		s.def(x.Result, id, x.Type)
-	case *ir.Builtin:
-		varID := s.b.builtinIDs[x.Kind]
-		if varID == 0 {
-			return fmt.Errorf("builtin %d was not declared", x.Kind)
-		}
-		tid, _ := s.b.typeID(x.Type, typeLogical)
-		id := s.b.id()
-		emit(&s.b.functions, OpLoad, tid, id, varID)
 		s.def(x.Result, id, x.Type)
 	case *ir.Unary:
 		return s.emitUnary(x)
@@ -1062,7 +1091,7 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		inst = GLSL450Log2
 	case ir.IntrinsicSqrt:
 		inst = GLSL450Sqrt
-	case ir.IntrinsicInverseSqrt:
+	case ir.IntrinsicRSqrt:
 		inst = GLSL450InverseSqrt
 	case ir.IntrinsicPow:
 		inst = GLSL450Pow
@@ -1191,7 +1220,7 @@ func (s *fnEmitter) emitBarrier(x *ir.Barrier) error {
 	switch x.Kind {
 	case ir.BarrierWorkgroup:
 		sem |= MemorySemanticsWorkgroupMemory
-	case ir.BarrierStorage:
+	case ir.BarrierBuffer:
 		sem |= MemorySemanticsUniformMemory
 	default:
 		return fmt.Errorf("unsupported barrier kind %d", x.Kind)

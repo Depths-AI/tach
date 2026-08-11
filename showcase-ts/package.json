@@ -16,7 +16,8 @@
     "install:browser": "playwright install chromium",
     "preview": "vite preview",
     "test": "npm run build && playwright test",
-    "benchmark": "npm run build && playwright test --config=playwright.full.config.mjs"
+    "benchmark": "npm run build && playwright test --config=playwright.full.config.mjs",
+    "benchmark:gpu": "npm run build && playwright test --config=playwright.gpu.config.mjs"
   },
   "dependencies": {
     "@depths/tach": "0.0.0"

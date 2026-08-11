@@ -2,6 +2,7 @@ package spirv_test
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -56,6 +57,36 @@ func TestParticlesSPIRV(t *testing.T) {
 	}
 }
 
+func TestLogicalIndicesAreOptimizedAfterSPIRVBackendLowering(t *testing.T) {
+	bin := emitSource(t, "coordinates.tach", `
+@workgroup(16, 8)
+export compute coordinates[x, y](out: buffer<u32[]>) {
+  const localX = x % 16;
+  const localY = y % 8;
+  const local = localY * 16 + localX;
+  out[local] = local + x + y;
+}`)
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var global, local, linear bool
+	for _, in := range m.Instructions {
+		if in.Op == spirv.OpUMod || in.Op == spirv.OpIMul {
+			t.Fatal("SPIR-V backend left local-coordinate arithmetic in emitted code")
+		}
+		if in.Op != spirv.OpDecorate || len(in.Operands) < 3 || in.Operands[1] != spirv.DecorationBuiltIn {
+			continue
+		}
+		global = global || in.Operands[2] == spirv.BuiltInGlobalInvocationID
+		local = local || in.Operands[2] == spirv.BuiltInLocalInvocationID
+		linear = linear || in.Operands[2] == spirv.BuiltInLocalInvocationIndex
+	}
+	if !global || local || !linear {
+		t.Fatalf("SPIR-V coordinate inputs: global=%v local=%v linear=%v, want true false true", global, local, linear)
+	}
+}
+
 func TestWorkgroupAggregatesHaveNoExplicitLayout(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -64,21 +95,21 @@ func TestWorkgroupAggregatesHaveNoExplicitLayout(t *testing.T) {
 		{
 			name: "array",
 			source: `
-@workgroupSize(1)
-export compute arrayMemory(out: storage<u32, read_write>) {
+@workgroup(1)
+export compute arrayMemory[i](out: buffer<u32>) {
   workgroup scratch: u32[4];
-  scratch[0u] = 7u;
-  out = scratch[0u];
+  scratch[0] = 7;
+  out = scratch[0];
 }`,
 		},
 		{
 			name: "struct",
 			source: `
 type Pair = { x: u32, y: u32 };
-@workgroupSize(1)
-export compute structMemory(out: storage<u32, read_write>) {
+@workgroup(1)
+export compute structMemory[i](out: buffer<u32>) {
   workgroup pair: Pair;
-  pair = { x: 7u, y: 9u };
+  pair = { x: 7, y: 9 };
   workgroupBarrier();
   const copy: Pair = pair;
   out = copy.x + copy.y;
@@ -182,8 +213,8 @@ func TestHostResourceAggregatesKeepExplicitLayout(t *testing.T) {
 func TestSameStructCrossesHostAndWorkgroupRepresentations(t *testing.T) {
 	bin := emitSource(t, "shared-struct.tach", `
 type Pair = { x: u32, y: u32 };
-@workgroupSize(1)
-export compute sharedStruct(io: storage<Pair, read_write>) {
+@workgroup(1)
+export compute sharedStruct[i](io: buffer<Pair>) {
   workgroup pair: Pair;
   pair = io;
   io = pair;
@@ -246,8 +277,8 @@ export compute sharedStruct(io: storage<Pair, read_write>) {
 
 func TestWorkgroupMemoryIsZeroInitialized(t *testing.T) {
 	bin := emitSource(t, "zero-workgroup.tach", `
-@workgroupSize(1)
-export compute zeroWorkgroup(out: storage<u32, read_write>) {
+@workgroup(1)
+export compute zeroWorkgroup[i](out: buffer<u32>) {
   workgroup scratch: u32;
   out = scratch;
 }`)
@@ -283,5 +314,27 @@ export compute zeroWorkgroup(out: storage<u32, read_write>) {
 	}
 	if len(workgroupVars) != 1 || !hasZeroStore || !hasBarrier || !hasLocalIndex {
 		t.Fatalf("zero prologue: WorkgroupVars=%d nullStore=%v barrier=%v localIndex=%v", len(workgroupVars), hasZeroStore, hasBarrier, hasLocalIndex)
+	}
+}
+
+func TestHelpersRequestConstInlining(t *testing.T) {
+	bin := emitSource(t, "inline.tach", `
+fn twice(x: f32): f32 { return x + x; }
+@workgroup(1)
+export compute useHelper[i](out: buffer<f32>) { out = twice(2.0); }
+`)
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var controls []uint32
+	for _, in := range m.Instructions {
+		if in.Op == spirv.OpFunction {
+			controls = append(controls, in.Operands[2])
+		}
+	}
+	want := []uint32{spirv.FunctionControlInline | spirv.FunctionControlConst, spirv.FunctionControlNone}
+	if !reflect.DeepEqual(controls, want) {
+		t.Fatalf("function controls %v, want %v", controls, want)
 	}
 }

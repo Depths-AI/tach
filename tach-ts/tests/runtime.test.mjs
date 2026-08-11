@@ -110,27 +110,42 @@ function fakeWebGPU({
   };
 }
 
+const scalarBuffer = {
+  name: "data",
+  group: 0,
+  binding: 0,
+  kind: "storage",
+  access: "read_write",
+  minimumByteSize: 4,
+  runtime: true,
+  layout: {
+    kind: "runtime",
+    stride: 4,
+    runtime: true,
+    elem: { kind: "u32", size: 4 },
+  },
+};
+
 const clear = defineModule({
   source: "",
-  resources: [{
-    name: "data",
-    group: 0,
-    binding: 0,
-    kind: "storage",
-    access: "read_write",
-    minimumByteSize: 4,
-    runtime: true,
-    layout: {
-      kind: "runtime",
-      stride: 4,
-      runtime: true,
-      elem: { kind: "u32", size: 4 },
-    },
-  }],
+  resources: [scalarBuffer],
   kernels: [{
     name: "clear",
     entryPoint: "clear",
+    dimensions: 1,
     workgroupSize: [1, 1, 1],
+    resources: [{ name: "data", resource: 0 }],
+  }],
+});
+
+const plane = defineModule({
+  source: "",
+  resources: [scalarBuffer],
+  kernels: [{
+    name: "plane",
+    entryPoint: "plane",
+    dimensions: 2,
+    workgroupSize: [8, 8, 1],
     resources: [{ name: "data", resource: 0 }],
   }],
 });
@@ -165,8 +180,69 @@ const fill = defineModule({
   kernels: [{
     name: "fill",
     entryPoint: "fill",
+    dimensions: 1,
     workgroupSize: [1, 1, 1],
     resources: [{ name: "data", resource: 0 }, { name: "value", resource: 1 }],
+  }],
+});
+
+const vectors = defineModule({
+  source: "",
+  resources: [{
+    name: "values",
+    group: 0,
+    binding: 0,
+    kind: "storage",
+    access: "read_write",
+    minimumByteSize: 16,
+    runtime: true,
+    layout: {
+      kind: "runtime",
+      stride: 16,
+      runtime: true,
+      elem: {
+        kind: "vector",
+        count: 4,
+        size: 16,
+        elem: { kind: "f32", size: 4 },
+      },
+    },
+  }],
+  kernels: [{
+    name: "vectors",
+    entryPoint: "vectors",
+    dimensions: 1,
+    workgroupSize: [1, 1, 1],
+    resources: [{ name: "values", resource: 0 }],
+  }],
+});
+
+const combine = defineModule({
+  source: "",
+  resources: [0, 1].map((binding) => ({
+    name: `data${binding}`,
+    group: 0,
+    binding,
+    kind: "storage",
+    access: binding === 0 ? "read" : "read_write",
+    minimumByteSize: 4,
+    runtime: true,
+    layout: {
+      kind: "runtime",
+      stride: 4,
+      runtime: true,
+      elem: { kind: "u32", size: 4 },
+    },
+  })),
+  kernels: [{
+    name: "combine",
+    entryPoint: "combine",
+    dimensions: 1,
+    workgroupSize: [1, 1, 1],
+    resources: [
+      { name: "input", resource: 0 },
+      { name: "output", resource: 1 },
+    ],
   }],
 });
 
@@ -309,6 +385,40 @@ test("one submission batches dispatches without waiting for the queue", async ()
   }
 });
 
+test("packed vector arrays stay flat typed arrays across upload and readback", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const values = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const buffer = opened.value.buffer(values);
+    await opened.value.submit(vectors.dispatch(0, [buffer], { size: 2 }));
+    assert.deepEqual(await buffer.read(), values);
+
+    const partial = opened.value.buffer(new Float32Array([1, 2, 3]));
+    await assert.rejects(
+      opened.value.submit(vectors.dispatch(0, [partial])),
+      /complete 4-component elements/u,
+    );
+  } finally {
+    opened.value.close();
+  }
+});
+
+test("kernel resource parameters cannot alias the same compute buffer", async () => {
+  const opened = await openTach({ gpu: fakeWebGPU().gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const data = opened.value.buffer(new Uint32Array([1]));
+    assert.throws(
+      () => combine.dispatch(0, [data, data]),
+      /resource parameters require distinct compute buffers/u,
+    );
+  } finally {
+    opened.value.close();
+  }
+});
+
 test("one pass carries multiple kernels and reuses resident uniforms and bind groups", async () => {
   const fake = fakeWebGPU();
   const opened = await openTach({ gpu: fake.gpu });
@@ -356,6 +466,38 @@ test("dispatch count must be a positive integer", async () => {
         return true;
       },
     );
+  } finally {
+    opened.value.close();
+  }
+});
+
+test("dispatch size must match the kernel's logical rank", async () => {
+  const opened = await openTach({ gpu: fakeWebGPU().gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const data = opened.value.buffer(new Uint32Array([1]));
+    await assert.rejects(
+      opened.value.submit(clear.dispatch(0, [data], { size: [1, 1] })),
+      /exact 1D dispatch size/u,
+    );
+  } finally {
+    opened.value.close();
+  }
+});
+
+test("multidimensional dispatch does not infer a shape from flat storage", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const data = opened.value.buffer(new Uint32Array(64));
+    await opened.value.submit(plane.dispatch(0, [data]));
+    await opened.value.submit(plane.dispatch(0, [data], { size: [16, 8] }));
+    await assert.rejects(
+      opened.value.submit(plane.dispatch(0, [data], { size: 64 })),
+      /exact 2D dispatch size/u,
+    );
+    assert.equal(fake.calls.dispatches, 2);
   } finally {
     opened.value.close();
   }

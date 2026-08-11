@@ -7,7 +7,7 @@ import (
 // Tach owns barrier legality at the semantic IR layer. The analysis is scoped
 // to a workgroup: a value is uniform when every invocation in a workgroup is
 // guaranteed to observe the same value. This is deliberately conservative for
-// mutable storage/workgroup reads while remaining compositional for SSA values.
+// mutable buffer/workgroup reads while remaining compositional for SSA values.
 type uniformPlace struct {
 	addr     bool
 	resource int // -1 for workgroup memory
@@ -35,6 +35,9 @@ func (e uniformEnv) clone() uniformEnv {
 
 func verifyUniformity(m *Module, f *Function, fmap map[string]*Function) error {
 	e := newUniformEnv()
+	for _, index := range f.Indices {
+		e.values[index.ID] = false
+	}
 	_, _, err := analyzeUniformBlock(m, f, f.Body, e, fmap, true, true)
 	return err
 }
@@ -48,8 +51,6 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 		switch x := in.(type) {
 		case *Const:
 			e.values[x.Result] = true
-		case *Builtin:
-			e.values[x.Result] = x.Kind == WorkgroupID || x.Kind == NumWorkgroups
 		case *Unary:
 			e.values[x.Result] = value(x.X)
 		case *Binary:
@@ -75,7 +76,7 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 			for _, id := range x.Args {
 				u = u && value(id)
 			}
-			// Tach helpers are value-only and cannot observe compute builtins,
+			// Tach helpers are value-only and cannot observe kernel indices,
 			// resources, workgroup memory, atomics, or barriers. Therefore equal
 			// arguments imply equal results across the workgroup.
 			if callee := fmap[x.Function]; callee == nil || callee.Compute {
@@ -115,8 +116,8 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 		case *Barrier:
 			if checkBarriers && !control {
 				name := "workgroupBarrier"
-				if x.Kind == BarrierStorage {
-					name = "storageBarrier"
+				if x.Kind == BarrierBuffer {
+					name = "bufferBarrier"
 				}
 				return e, control, fmt.Errorf("%s is reached through non-uniform control flow", name)
 			}

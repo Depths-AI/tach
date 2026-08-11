@@ -201,9 +201,11 @@ const (
 )
 
 const (
-	FunctionControlNone  uint32 = 0
-	SelectionControlNone uint32 = 0
-	LoopControlNone      uint32 = 0
+	FunctionControlNone   uint32 = 0
+	FunctionControlInline uint32 = 0x1
+	FunctionControlConst  uint32 = 0x8
+	SelectionControlNone  uint32 = 0
+	LoopControlNone       uint32 = 0
 )
 
 var opNames = map[Op]string{

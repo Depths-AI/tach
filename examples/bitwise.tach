@@ -1,14 +1,13 @@
-@workgroupSize(32)
-export compute bitwise(out: storage<u32[], read_write>) {
-  let u: u32 = 0xff00u;
-  let s: i32 = -64i;
-  const left = u << 40u;
-  const logical = u >> 36u;
-  const arithmetic = s >> 35u;
+export compute bitwise[i](out: buffer<u32[]>) {
+  let u: u32 = 0xff00;
+  let s: i32 = -64;
+  const left = u << 40;
+  const logical = u >> 36;
+  const arithmetic = s >> 35;
   let mixed = (left | logical) ^ ~u;
-  mixed &= 0xffffu;
-  mixed <<= 33u;
-  if (globalId.x < out.length) {
-    out[globalId.x] = mixed | u32(arithmetic);
+  mixed &= 0xffff;
+  mixed <<= 33;
+  if (i < out.length) {
+    out[i] = mixed | u32(arithmetic);
   }
 }

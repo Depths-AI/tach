@@ -58,6 +58,7 @@ type ResourceMeta struct {
 type KernelMeta struct {
 	Name          string               `json:"name"`
 	EntryPoint    string               `json:"entryPoint"`
+	Dimensions    uint32               `json:"dimensions"`
 	WorkgroupSize [3]uint32            `json:"workgroupSize"`
 	Resources     []KernelResourceMeta `json:"resources"`
 }
@@ -128,15 +129,15 @@ func buildMetadata(m *ir.Module) (*Metadata, error) {
 		}
 		out.Types = append(out.Types, item)
 	}
-	for _, resource := range m.Resources {
+	for resourceIndex, resource := range m.Resources {
 		l, err := layout.Of(resource.Type)
 		if err != nil {
 			return nil, fmt.Errorf("resource %s: %w", resource.Name, err)
 		}
 		item := ResourceMeta{
 			Name:      resource.Name,
-			Group:     resource.Group,
-			Binding:   resource.Binding,
+			Group:     0,
+			Binding:   uint32(resourceIndex),
 			Type:      resource.Type.String(),
 			Alignment: l.Align,
 			Runtime:   l.Runtime,
@@ -146,7 +147,7 @@ func buildMetadata(m *ir.Module) (*Metadata, error) {
 		} else {
 			item.Kind = "storage"
 		}
-		if resource.Access == ir.ReadWrite {
+		if resource.Access == ir.Mutable || types.ContainsAtomic(resource.Type) {
 			item.Access = "read_write"
 		} else {
 			item.Access = "read"
@@ -173,27 +174,14 @@ func buildMetadata(m *ir.Module) (*Metadata, error) {
 		item := KernelMeta{
 			Name:          function.Name,
 			EntryPoint:    abi.KernelEntry(function.Name),
+			Dimensions:    uint32(len(function.Indices)),
 			WorkgroupSize: function.Workgroup,
 			Resources:     []KernelResourceMeta{},
 		}
-		seen := map[[2]uint32]string{}
 		for _, parameter := range function.ResourceParams {
 			if parameter.Resource < 0 || parameter.Resource >= len(m.Resources) {
 				return nil, fmt.Errorf("kernel %s resource index out of range", function.Name)
 			}
-			resource := m.Resources[parameter.Resource]
-			key := [2]uint32{resource.Group, resource.Binding}
-			if previous, ok := seen[key]; ok {
-				return nil, fmt.Errorf(
-					"kernel %s parameters %s and %s alias group=%d binding=%d",
-					function.Name,
-					previous,
-					parameter.Name,
-					resource.Group,
-					resource.Binding,
-				)
-			}
-			seen[key] = parameter.Name
 			item.Resources = append(item.Resources, KernelResourceMeta{
 				Name:     parameter.Name,
 				Resource: parameter.Resource,
@@ -360,7 +348,7 @@ func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, er
 		if err := validateKernelExportName(kernel.Name); err != nil {
 			return "", err
 		}
-		hasStorage := false
+		hasBuffer := false
 		for _, parameter := range kernel.Resources {
 			if !isASCIIIdentifier(parameter.Name) || typeScriptKeywords[parameter.Name] {
 				return "", fmt.Errorf(
@@ -368,12 +356,12 @@ func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, er
 					parameter.Name,
 				)
 			}
-			if m.Resources[parameter.Resource].Kind == ir.Storage {
-				hasStorage = true
+			if m.Resources[parameter.Resource].Kind == ir.Buffer {
+				hasBuffer = true
 			}
 		}
-		if !hasStorage {
-			return "", fmt.Errorf("Tach kernel %q has no storage parameter to carry its GPUDevice", kernel.Name)
+		if !hasBuffer {
+			return "", fmt.Errorf("Tach kernel %q has no buffer parameter to carry its GPUDevice", kernel.Name)
 		}
 	}
 
@@ -490,12 +478,13 @@ func emitDeclarations(m *ir.Module, meta *Metadata) (string, error) {
 		for _, parameter := range kernel.Resources {
 			resource := m.Resources[parameter.Resource]
 			parameterType := tsType(resource.Type)
-			if resource.Kind == ir.Storage {
+			if resource.Kind == ir.Buffer {
 				parameterType = "ComputeBuffer<" + parameterType + ">"
 			}
 			fmt.Fprintf(&b, "  %s: %s,\n", parameter.Name, parameterType)
 		}
-		b.WriteString("  $dispatch?: DispatchOptions,\n")
+		dispatchSize := []string{"", "number", "readonly [x: number, y: number]", "readonly [x: number, y: number, z: number]"}[kernel.Dimensions]
+		fmt.Fprintf(&b, "  $dispatch?: DispatchOptions<%s>,\n", dispatchSize)
 		b.WriteString("): ComputeDispatch;\n\n")
 	}
 	return b.String(), nil
@@ -517,7 +506,13 @@ func tsType(t *types.Type) string {
 		return "readonly " + tsType(t.Elem) + "[]"
 	case types.RuntimeArray:
 		if typed := tsTypedArray(t.Elem); typed != "" {
+			if t.Elem.Kind == types.Vector {
+				return typed + " | ReadonlyArray<" + tsType(t.Elem) + ">"
+			}
 			return typed + " | readonly " + tsType(t.Elem) + "[]"
+		}
+		if t.Elem.Kind == types.Vector {
+			return "ReadonlyArray<" + tsType(t.Elem) + ">"
 		}
 		return "readonly " + tsType(t.Elem) + "[]"
 	}
@@ -526,6 +521,12 @@ func tsType(t *types.Type) string {
 
 func tsTypedArray(t *types.Type) string {
 	if t.Kind == types.Atomic {
+		t = t.Elem
+	}
+	if t.Kind == types.Vector {
+		if t.Lanes == 3 {
+			return ""
+		}
 		t = t.Elem
 	}
 	switch t.Kind {
@@ -579,6 +580,9 @@ func ValidateGenerated(js, dts string, metaJSON []byte) error {
 		}
 	}
 	for index, kernel := range metadata.Kernels {
+		if kernel.Dimensions < 1 || kernel.Dimensions > 3 {
+			return fmt.Errorf("kernel %s has invalid logical dimension count %d", kernel.Name, kernel.Dimensions)
+		}
 		if kernel.EntryPoint != kernel.Name {
 			return fmt.Errorf("kernel %s has mangled entry point %q", kernel.Name, kernel.EntryPoint)
 		}

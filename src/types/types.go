@@ -2,7 +2,6 @@ package types
 
 import (
 	"fmt"
-	"strings"
 )
 
 type Kind uint8
@@ -56,13 +55,13 @@ func (t *Type) String() string {
 	case Void, Bool, I32, U32, F32:
 		return t.Name
 	case Vector:
-		return fmt.Sprintf("vec%d<%s>", t.Lanes, t.Elem)
+		return fmt.Sprintf("%sx%d", t.Elem, t.Lanes)
 	case Struct:
 		return t.Name
 	case Atomic:
-		return fmt.Sprintf("atomic<%s>", WGSL(t.Elem))
+		return fmt.Sprintf("atomic<%s>", t.Elem)
 	case FixedArray:
-		return fmt.Sprintf("array<%s, %d>", WGSL(t.Elem), t.Count)
+		return fmt.Sprintf("%s[%d]", t.Elem, t.Count)
 	case RuntimeArray:
 		return fmt.Sprintf("%s[]", t.Elem)
 	default:
@@ -133,7 +132,7 @@ func IsSignedNumeric(t *Type) bool {
 }
 
 // ContainsRuntimeArray is true when the type has a runtime-sized tail, directly
-// or through a nested structure. Such values can be addressed in storage but
+// or through a nested structure. Such values can be addressed in buffers but
 // cannot be loaded, constructed, passed by value, or used in uniform buffers.
 func ContainsRuntimeArray(t *Type) bool {
 	if t == nil {
@@ -223,55 +222,26 @@ func ParseBuiltin(name string) *Type {
 		return TU32
 	case "f32":
 		return TF32
-	case "vec2f":
+	case "f32x2":
 		return Vec(TF32, 2)
-	case "vec3f":
+	case "f32x3":
 		return Vec(TF32, 3)
-	case "vec4f":
+	case "f32x4":
 		return Vec(TF32, 4)
-	case "vec2u":
+	case "u32x2":
 		return Vec(TU32, 2)
-	case "vec3u":
+	case "u32x3":
 		return Vec(TU32, 3)
-	case "vec4u":
+	case "u32x4":
 		return Vec(TU32, 4)
-	case "vec2i":
+	case "i32x2":
 		return Vec(TI32, 2)
-	case "vec3i":
+	case "i32x3":
 		return Vec(TI32, 3)
-	case "vec4i":
+	case "i32x4":
 		return Vec(TI32, 4)
 	}
 	return nil
-}
-
-func WGSL(t *Type) string {
-	if t == nil {
-		return "<nil>"
-	}
-	switch t.Kind {
-	case Void:
-		return "void"
-	case Bool:
-		return "bool"
-	case I32:
-		return "i32"
-	case U32:
-		return "u32"
-	case F32:
-		return "f32"
-	case Vector:
-		return fmt.Sprintf("vec%d<%s>", t.Lanes, WGSL(t.Elem))
-	case Struct:
-		return t.Name
-	case Atomic:
-		return fmt.Sprintf("atomic<%s>", t.Elem)
-	case FixedArray:
-		return fmt.Sprintf("array<%s, %d>", WGSL(t.Elem), t.Count)
-	case RuntimeArray:
-		return fmt.Sprintf("array<%s>", WGSL(t.Elem))
-	}
-	return "<invalid>"
 }
 
 func ContainsAtomic(t *Type) bool {
@@ -315,12 +285,4 @@ func IsWorkgroupStorable(t *Type) bool {
 		return true
 	}
 	return false
-}
-
-func Friendly(t *Type) string {
-	s := WGSL(t)
-	s = strings.ReplaceAll(s, "vec2<f32>", "vec2f")
-	s = strings.ReplaceAll(s, "vec3<f32>", "vec3f")
-	s = strings.ReplaceAll(s, "vec4<f32>", "vec4f")
-	return s
 }

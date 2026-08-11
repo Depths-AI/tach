@@ -53,9 +53,9 @@ func TestValidatorRejectsReservedDoubleUnderscoreIdentifier(t *testing.T) {
 
 func TestRuntimeArrayWrapperKeepsNaturalAlignment(t *testing.T) {
 	a, err := parser.Parse("runtime.tach", `
-@workgroupSize(1)
-export compute clear(data: storage<u32[], read_write>) {
-  if (globalId.x < data.length) { data[globalId.x] = 0u; }
+@workgroup(1)
+export compute clear[i](data: buffer<u32[]>) {
+  if (i < data.length) { data[i] = 0; }
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -70,5 +70,35 @@ export compute clear(data: storage<u32[], read_write>) {
 	}
 	if !strings.Contains(out, "data: array<u32>,") || strings.Contains(out, "@align(16) data: array<u32>,") {
 		t.Fatalf("runtime array wrapper has a synthetic fixed-resource alignment:\n%s", out)
+	}
+}
+
+func TestLogicalIndicesAreOptimizedAfterWGSLBackendLowering(t *testing.T) {
+	a, err := parser.Parse("coordinates.tach", `
+@workgroup(16, 8)
+export compute coordinates[x, y](out: buffer<u32[]>) {
+  const localX = x % 16;
+  const localY = y % 8;
+  const local = localY * 16 + localX;
+  out[local] = local + x + y;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := wgsl.Emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"@builtin(global_invocation_id)", "@builtin(local_invocation_index)", "_tach_local_linear"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("WGSL backend lowering missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "@builtin(local_invocation_id)") || strings.Contains(out, " % ") || strings.Contains(out, " * ") {
+		t.Fatalf("WGSL backend left local-coordinate arithmetic in emitted code:\n%s", out)
 	}
 }
