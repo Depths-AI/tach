@@ -16,9 +16,9 @@ The suite covers five different compute shapes:
   scene from gradients, signed-distance shapes, stars, terrain, and a
   perspective grid.
 
-Each generated kernel constructs a `ComputeDispatch` command and accepts one
-optional `DispatchOptions` object. `size` sets the logical invocation
-dimensions; `dispatches` records repeated executions of that command inside
+Each generated kernel constructs a `ComputeCommand` and accepts one optional
+`LaunchOptions` object. `size` sets the logical invocation dimensions;
+`repeat` records repeated executions of that command inside
 one compute pass and queue submission:
 
 ```ts
@@ -41,7 +41,7 @@ the first executed iteration, carries them and the already-resident `dt` value
 as SSA values, and commits the position once after the loop. A zero-iteration
 loop performs no memory access. The loop itself remains source-visible because replacing ordered
 dispatches with an invocation-local loop is invalid for kernels with
-cross-invocation reads, atomics, or barriers; `dispatches` retains its literal
+cross-invocation reads, atomics, or barriers; `repeat` retains its literal
 ordered-dispatch meaning.
 
 `submit()` itself stops at queue submission. The explicit `idle()` is part of

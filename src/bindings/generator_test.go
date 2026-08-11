@@ -104,13 +104,13 @@ export function scale[i](data: buffer<float32[]>, factor: float32) {
 	for _, want := range []string{
 		"import { defineModule as $defineModule } from \"@depths/tach/internal\"",
 		"const $tach = $defineModule({",
-		"export function scale(data, factor, $dispatch)",
-		"return $tach.dispatch(0",
-		"import type { ComputeBuffer, ComputeDispatch, DispatchOptions } from \"@depths/tach\"",
+		"export function scale(data, factor, $launch)",
+		"return $tach.command(0",
+		"import type { ComputeBuffer, ComputeCommand, LaunchOptions } from \"@depths/tach\"",
 		"data: ComputeBuffer<Float32Array | readonly number[]>",
 		"factor: number",
-		"$dispatch?: DispatchOptions<number>",
-		"): ComputeDispatch",
+		"$launch?: LaunchOptions<number>",
+		"): ComputeCommand",
 	} {
 		if !strings.Contains(out.JavaScript+out.Declarations, want) {
 			t.Fatalf("generated bindings missing %q", want)
@@ -124,7 +124,7 @@ func TestKernelMayBeNamedBuffer(t *testing.T) {
 export function buffer[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
-	if !strings.Contains(out.JavaScript, "export function buffer(data, $dispatch)") ||
+	if !strings.Contains(out.JavaScript, "export function buffer(data, $launch)") ||
 		!strings.Contains(out.Declarations, "export function buffer(") {
 		t.Fatal("source kernel named buffer was not preserved")
 	}

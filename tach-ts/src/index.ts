@@ -1,11 +1,10 @@
-export type { Result, TachError, TachErrorCode } from "./result.js";
+export { TachError, type TachErrorCode } from "./error.js";
 export {
-  openTach,
   tach,
   type ComputeBuffer,
-  type ComputeDispatch,
-  type DispatchOptions,
-  type DispatchSize,
+  type ComputeCommand,
+  type LaunchOptions,
+  type LaunchSize,
   type Tach,
   type TachOptions,
 } from "./runtime.js";

@@ -1,4 +1,4 @@
-import type { ComputeDispatch, Tach } from "@depths/tach";
+import type { ComputeCommand, Tach } from "@depths/tach";
 import {
   integrateParticles,
   mandelbrot,
@@ -110,8 +110,8 @@ async function measureGPU(samples: number, work: () => Promise<void>): Promise<n
   return times;
 }
 
-async function complete(gpu: Tach, dispatch: ComputeDispatch): Promise<void> {
-  await gpu.submit(dispatch);
+async function complete(gpu: Tach, command: ComputeCommand): Promise<void> {
+  await gpu.submit(command);
   await gpu.idle();
 }
 
@@ -240,7 +240,7 @@ async function fractal(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> 
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, mandelbrot(
     output,
     params,
-    { size: [width, height], dispatches: profile.fractalDispatches },
+    { size: [width, height], repeat: profile.fractalDispatches },
   )));
   const identity = {
     id: "fractal",
@@ -316,7 +316,7 @@ async function matrices(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark>
     gpuRight,
     gpuOutput,
     { size },
-    { size: [size, size], dispatches: profile.matrixDispatches },
+    { size: [size, size], repeat: profile.matrixDispatches },
   )));
   const identity = {
     id: "matrix",
@@ -382,7 +382,7 @@ async function options(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> 
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, priceOptions(
     output,
     { count },
-    { size: count, dispatches: profile.optionDispatches },
+    { size: count, repeat: profile.optionDispatches },
   )));
   const identity = {
     id: "options",
@@ -543,7 +543,7 @@ async function rendering(
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, proceduralScene(
     output,
     params,
-    { size: [width, height], dispatches: profile.renderDispatches },
+    { size: [width, height], repeat: profile.renderDispatches },
   )));
   const actual = await output.read();
   const identity = {

@@ -1,4 +1,4 @@
-import { openTach } from "@depths/tach";
+import { tach } from "@depths/tach";
 import { runBenchmarks, type BenchmarkResult, type RenderedFrame } from "./benchmarks.js";
 import "./style.css";
 
@@ -69,11 +69,7 @@ function paint(frame: RenderedFrame): void {
 }
 
 async function main(): Promise<readonly BenchmarkResult[]> {
-  const opened = await openTach({ adapter: { powerPreference: "high-performance" } });
-  if (!opened.ok) {
-    throw new Error(`[${opened.error.code}] ${opened.error.message}`);
-  }
-  const gpu = opened.value;
+  const gpu = await tach({ adapter: { powerPreference: "high-performance" } });
   const info = gpu.adapter.info;
   adapter.textContent = [info.description, info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter";
   const search = new URLSearchParams(location.search);

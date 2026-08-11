@@ -540,11 +540,11 @@ export function volume[x, y, z](three: buffer<uint32[]>) {
 	if len(metadata.Kernels) != 3 || metadata.Kernels[0].Dimensions != 1 || metadata.Kernels[1].Dimensions != 2 || metadata.Kernels[2].Dimensions != 3 {
 		t.Fatalf("kernel logical dimensions = %+v", metadata.Kernels)
 	}
-	if !strings.Contains(r.TypeScript, "DispatchOptions<readonly [x: number, y: number]>") {
-		t.Fatalf("generated declarations lost the planar dispatch type:\n%s", r.TypeScript)
+	if !strings.Contains(r.TypeScript, "LaunchOptions<readonly [x: number, y: number]>") {
+		t.Fatalf("generated declarations lost the planar launch type:\n%s", r.TypeScript)
 	}
-	if !strings.Contains(r.TypeScript, "DispatchOptions<readonly [x: number, y: number, z: number]>") {
-		t.Fatalf("generated declarations lost the volume dispatch type:\n%s", r.TypeScript)
+	if !strings.Contains(r.TypeScript, "LaunchOptions<readonly [x: number, y: number, z: number]>") {
+		t.Fatalf("generated declarations lost the volume launch type:\n%s", r.TypeScript)
 	}
 }
 

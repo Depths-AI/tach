@@ -116,7 +116,7 @@ mkdir "$install_test_dir"
   npm init --yes >/dev/null
   TACH_BIN="$host_compiler" npm install "$package_archive" >/dev/null
   TACH_BIN="$host_compiler" node_modules/.bin/tach version >/dev/null
-  node --input-type=module -e 'const m = await import("@depths/tach"); if (Object.keys(m).sort().join() !== "openTach,tach") process.exit(1)'
+  node --input-type=module -e 'const m = await import("@depths/tach"); if (Object.keys(m).sort().join() !== "TachError,tach") process.exit(1)'
 )
 
 (

@@ -109,77 +109,77 @@ const cases = [
 
 async function executeCase(testCase) {
   if (!("gpu" in navigator)) return { available: false, reason: "navigator.gpu is unavailable" };
-  const { tach } = await import("@depths/tach");
+  const { TachError, tach } = await import("@depths/tach");
   const uncapturedErrors = [];
-  const executed = await tach(async (gpu) => {
-    const onUncaptured = (event) => uncapturedErrors.push(event.error.message);
-    gpu.device.addEventListener("uncapturederror", onUncaptured);
-    try {
-      const generated = await import(`/build/${testCase.name}.js`);
-      const metadata = await (await fetch(`/build/${testCase.name}.tach.json`)).json();
-      const wgsl = await (await fetch(`/build/${testCase.name}.wgsl`)).text();
-      const diagnosticModule = gpu.device.createShaderModule({
-        label: `Tach ${testCase.name} diagnostics`,
-        code: wgsl,
-      });
-      const compilation = await diagnosticModule.getCompilationInfo();
-      const compilationErrors = compilation.messages
-        .filter((message) => message.type === "error")
-        .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`);
+  try {
+    const executed = await tach(async (gpu) => {
+      const onUncaptured = (event) => uncapturedErrors.push(event.error.message);
+      gpu.device.addEventListener("uncapturederror", onUncaptured);
+      try {
+        const generated = await import(`/build/${testCase.name}.js`);
+        const metadata = await (await fetch(`/build/${testCase.name}.tach.json`)).json();
+        const wgsl = await (await fetch(`/build/${testCase.name}.wgsl`)).text();
+        const diagnosticModule = gpu.device.createShaderModule({
+          label: `Tach ${testCase.name} diagnostics`,
+          code: wgsl,
+        });
+        const compilation = await diagnosticModule.getCompilationInfo();
+        const compilationErrors = compilation.messages
+          .filter((message) => message.type === "error")
+          .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`);
 
-      const kernel = metadata.kernels.find((item) => item.name === testCase.kernel);
-      if (!kernel) throw new Error(`kernel ${testCase.kernel} is missing`);
-      const args = [];
-      const computeBuffers = new Map();
-      for (const parameter of kernel.parameters) {
-        const value = testCase.resources[parameter.name];
-        if (parameter.kind === "buffer") {
-          const computeBuffer = gpu.buffer(value);
-          computeBuffers.set(parameter.name, computeBuffer);
-          args.push(computeBuffer);
-        } else {
-          args.push(value);
+        const kernel = metadata.kernels.find((item) => item.name === testCase.kernel);
+        if (!kernel) throw new Error(`kernel ${testCase.kernel} is missing`);
+        const args = [];
+        const computeBuffers = new Map();
+        for (const parameter of kernel.parameters) {
+          const value = testCase.resources[parameter.name];
+          if (parameter.kind === "buffer") {
+            const computeBuffer = gpu.buffer(value);
+            computeBuffers.set(parameter.name, computeBuffer);
+            args.push(computeBuffer);
+          } else {
+            args.push(value);
+          }
         }
+
+        const output = computeBuffers.get(testCase.readParam);
+        if (!output) throw new Error(`readback resource ${testCase.readParam} is missing`);
+        await gpu.submit(generated[testCase.kernel](...args));
+        const value = await output.read();
+
+        const info = gpu.adapter.info ?? {};
+        const identityLooksSoftware = /swiftshader|software|llvmpipe|lavapipe|softpipe|warp|basic render/i.test(
+          [info.description, info.vendor, info.architecture, info.device].filter(Boolean).join(" "),
+        );
+        const software = info.isFallbackAdapter === true || identityLooksSoftware;
+        return {
+          adapter: {
+            architecture: info.architecture ?? "",
+            description: info.description ?? "",
+            device: info.device ?? "",
+            isFallbackAdapter: info.isFallbackAdapter ?? null,
+            mode: software ? "software-emulated" : "hardware-accelerated",
+            vendor: info.vendor ?? "",
+          },
+          value,
+          compilationErrors,
+        };
+      } finally {
+        gpu.device.removeEventListener("uncapturederror", onUncaptured);
       }
-
-      const output = computeBuffers.get(testCase.readParam);
-      if (!output) throw new Error(`readback resource ${testCase.readParam} is missing`);
-      await gpu.submit(generated[testCase.kernel](...args));
-      const value = await output.read();
-
-      const info = gpu.adapter.info ?? {};
-      const identityLooksSoftware = /swiftshader|software|llvmpipe|lavapipe|softpipe|warp|basic render/i.test(
-        [info.description, info.vendor, info.architecture, info.device].filter(Boolean).join(" "),
-      );
-      const software = info.isFallbackAdapter === true || identityLooksSoftware;
-      return {
-        adapter: {
-          architecture: info.architecture ?? "",
-          description: info.description ?? "",
-          device: info.device ?? "",
-          isFallbackAdapter: info.isFallbackAdapter ?? null,
-          mode: software ? "software-emulated" : "hardware-accelerated",
-          vendor: info.vendor ?? "",
-        },
-        value,
-        compilationErrors,
-      };
-    } finally {
-      gpu.device.removeEventListener("uncapturederror", onUncaptured);
-    }
-  });
-
-  if (!executed.ok) {
-    if (executed.error.code === "webgpu-unavailable" || executed.error.code === "adapter-unavailable") {
-      return { available: false, reason: executed.error.message };
+    });
+    return { available: true, ...executed, uncapturedErrors };
+  } catch (error) {
+    if (error instanceof TachError && (error.code === "webgpu-unavailable" || error.code === "adapter-unavailable")) {
+      return { available: false, reason: error.message };
     }
     return {
       available: true,
-      error: `[${executed.error.code}] ${executed.error.message}`,
+      error: error instanceof TachError ? `[${error.code}] ${error.message}` : String(error),
       uncapturedErrors,
     };
   }
-  return { available: true, ...executed.value, uncapturedErrors };
 }
 
 test.describe.configure({ mode: "serial" });
@@ -222,6 +222,5 @@ test("parameter commands remain distinct within a submission and across frames",
     });
   });
 
-  expect(result.ok).toBe(true);
-  expect(Array.from(result.value)).toEqual([24, 48, 72, 96]);
+  expect(Array.from(result)).toEqual([24, 48, 72, 96]);
 });

@@ -8,12 +8,10 @@ import { build, compilerPath, runCompiler } from "../dist/compiler.js";
 
 test("the package resolves and runs the repository compiler", async () => {
   const path = await compilerPath();
-  assert.equal(path.ok, true);
-  await access(path.value);
+  await access(path);
 
   const version = await runCompiler(["version"]);
-  assert.equal(version.ok, true);
-  assert.match(version.value.stdout, /^tach /u);
+  assert.match(version.stdout, /^tach /u);
 });
 
 test("build defaults to web artifacts and can select SPIR-V", async () => {
@@ -26,44 +24,43 @@ export function scale[i](data: buffer<float32[]>, factor: float32) {
   if (i < data.length) { data[i] *= factor; }
 }
 `);
-    const result = await build(source, { cwd: directory });
-    assert.equal(result.ok, true);
+    await build(source, { cwd: directory });
     const generated = await readFile(join(directory, "build", "scale.js"), "utf8");
     assert.match(generated, /from "@depths\/tach\/internal"/u);
-    assert.match(generated, /export function scale\(data, factor, \$dispatch\)/u);
+    assert.match(generated, /export function scale\(data, factor, \$launch\)/u);
     assert.doesNotMatch(generated, /export const buffer/u);
     assert.deepEqual((await readdir(join(directory, "build"))).sort(), ["scale.d.ts", "scale.js", "scale.wgsl"]);
 
     const spirv = await build(source, { cwd: directory, target: "spirv" });
-    assert.equal(spirv.ok, true);
+    assert.equal(spirv.stderr, "");
     assert.deepEqual(await readdir(join(directory, "build")), ["scale.spv"]);
 
     const checked = await runCompiler(["check", source], { cwd: directory });
-    assert.equal(checked.ok, true);
-    assert.match(checked.value.stdout, /WGSL:.*bindings:/su);
-    assert.doesNotMatch(checked.value.stdout, /SPIR-V:/u);
+    assert.match(checked.stdout, /WGSL:.*bindings:/su);
+    assert.doesNotMatch(checked.stdout, /SPIR-V:/u);
 
     const checkedSPIRV = await runCompiler(["check", "--target", "spirv", source], { cwd: directory });
-    assert.equal(checkedSPIRV.ok, true);
-    assert.match(checkedSPIRV.value.stdout, /SPIR-V:/u);
-    assert.doesNotMatch(checkedSPIRV.value.stdout, /WGSL:|bindings:/u);
+    assert.match(checkedSPIRV.stdout, /SPIR-V:/u);
+    assert.doesNotMatch(checkedSPIRV.stdout, /WGSL:|bindings:/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("compiler process failures are returned as data", async () => {
-  const result = await runCompiler(["definitely-not-a-command"]);
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "compiler-execution");
-  assert.match(result.error.message, /exit code/u);
+test("compiler process failures reject with a typed error", async () => {
+  await assert.rejects(runCompiler(["definitely-not-a-command"]), (error) => {
+    assert.equal(error.code, "compiler-execution");
+    assert.match(error.message, /exit code/u);
+    return true;
+  });
 });
 
-test("compiler setup failures are returned as data", async () => {
-  const result = await runCompiler(["version"], { cwd: 42 });
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "compiler-execution");
-  assert.equal(result.error.operation, "compiler");
+test("compiler setup failures reject with a typed error", async () => {
+  await assert.rejects(runCompiler(["version"], { cwd: 42 }), (error) => {
+    assert.equal(error.code, "compiler-execution");
+    assert.equal(error.operation, "compiler");
+    return true;
+  });
 });
 
 test("TACH_BIN must name an executable file", async () => {
@@ -71,10 +68,11 @@ test("TACH_BIN must name an executable file", async () => {
   const previous = process.env.TACH_BIN;
   process.env.TACH_BIN = directory;
   try {
-    const result = await compilerPath();
-    assert.equal(result.ok, false);
-    assert.equal(result.error.code, "compiler-install");
-    assert.match(result.error.message, /does not point to an executable/u);
+    await assert.rejects(compilerPath(), (error) => {
+      assert.equal(error.code, "compiler-install");
+      assert.match(error.message, /does not point to an executable/u);
+      return true;
+    });
   } finally {
     if (previous === undefined) delete process.env.TACH_BIN;
     else process.env.TACH_BIN = previous;

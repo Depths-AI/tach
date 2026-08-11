@@ -162,7 +162,7 @@ test("@depths/tach owns sessions and generated modules expose only direct comman
           generated[kernel.name](...args),
           generated[kernel.name](...args, {
             size: kernel.workgroupSize[0] + 1,
-            dispatches: 2,
+            repeat: 2,
           }),
         );
         const firstBuffer = kernel.parameters.find((parameter) => parameter.kind === "buffer");
@@ -177,10 +177,7 @@ test("@depths/tach owns sessions and generated modules expose only direct comman
           initialRead,
         };
       }, { gpu: gpuApi });
-      if (!executed.ok) {
-        throw new Error(`[${executed.error.code}] ${executed.error.message}`);
-      }
-      summaries.push({ ...executed.value, calls });
+      summaries.push({ ...executed, calls });
     }
     return summaries;
   }, values);
@@ -193,7 +190,7 @@ test("@depths/tach owns sessions and generated modules expose only direct comman
     expect(summary.calls.shaders).toBe(1);
     expect(summary.calls.pipelines).toBe(1);
     expect(summary.calls.buffers).toBe(summary.storageCount + (summary.hasParameterBlock ? 1 : 0));
-    expect(summary.calls.bindGroups).toBe(summary.hasParameterBlock ? 2 : 1);
+    expect(summary.calls.bindGroups).toBe(1);
     expect(summary.calls.dispatches).toEqual([[1, 1, 1], [2, 1, 1], [2, 1, 1]]);
     expect(summary.calls.passes).toBe(1);
     expect(summary.calls.submits).toBe(1);

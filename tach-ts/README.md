@@ -47,11 +47,7 @@ const result = await tach(async (gpu) => {
   return values.read();
 });
 
-if (!result.ok) {
-  throw new Error(`${result.error.code}: ${result.error.message}`);
-}
-
-console.log(result.value); // Float32Array [2, 4, 6, 8]
+console.log(result); // Float32Array [2, 4, 6, 8]
 ```
 
 The generated declaration is equivalent to:
@@ -60,12 +56,12 @@ The generated declaration is equivalent to:
 function scale(
   values: ComputeBuffer<Float32Array | readonly number[]>,
   factor: number,
-  $dispatch?: DispatchOptions<number>,
-): ComputeDispatch;
+  $launch?: LaunchOptions<number>,
+): ComputeCommand;
 ```
 
-Source parameter order becomes host parameter order. The final dispatch object
-is generated automatically.
+Source parameter order becomes host parameter order. The final launch-options
+parameter is generated automatically.
 
 ## The whole mental model
 
@@ -73,8 +69,8 @@ There are only three application-facing concepts:
 
 ```text
 gpu.buffer(hostValue)     -> ComputeBuffer
-generatedKernel(...)     -> ComputeDispatch
-gpu.submit(dispatches)   -> ordered WebGPU work
+generatedKernel(...)     -> ComputeCommand
+gpu.submit(commands)     -> ordered WebGPU work
 ```
 
 A kernel call does not execute. It builds an opaque command. `submit` is the
@@ -94,7 +90,7 @@ submission.
 
 ## Choose a lifetime
 
-Both APIs create the same `Tach` session. The difference is who closes it.
+Both overloads create the same `Tach` session. The difference is who closes it.
 
 ### A scoped job: `tach(...)`
 
@@ -113,26 +109,23 @@ It:
 1. requests an adapter and device;
 2. runs the callback;
 3. waits for queued work;
-4. returns success or failure as a `Result`; and
+4. returns the callback value or rejects with `TachError`; and
 5. closes the session and destroys its buffers.
 
 Return host data from the callback. A returned `ComputeBuffer` is already
 closed with its session.
 
-### Resident state: `openTach()`
+### Resident state: `tach(options?)`
 
-Use `openTach` for a frame loop, simulation, solver, or service:
+Call `tach` without a callback for a frame loop, simulation, solver, or service:
 
 ```ts
-import { openTach } from "@depths/tach";
+import { tach } from "@depths/tach";
 import { step } from "./build/simulation.js";
 
-const opened = await openTach({
+const gpu = await tach({
   adapter: { powerPreference: "high-performance" },
 });
-if (!opened.ok) throw new Error(opened.error.message);
-
-const gpu = opened.value;
 const state = gpu.buffer(initialState);
 
 try {
@@ -187,7 +180,7 @@ parameter.
 ## Commands, submission, and synchronization
 
 A generated kernel call validates its arguments, snapshots plain values, and
-returns a `ComputeDispatch`:
+returns a `ComputeCommand`:
 
 ```ts
 const command = scale(values, 2);
@@ -213,9 +206,9 @@ Wait only where the CPU actually needs a result:
 Generated kernels accept an optional final object:
 
 ```ts
-interface DispatchOptions<Size extends DispatchSize = DispatchSize> {
+interface LaunchOptions<Size extends LaunchSize = LaunchSize> {
   readonly size?: Size;
-  readonly dispatches?: number;
+  readonly repeat?: number;
 }
 ```
 
@@ -240,12 +233,12 @@ A one-dimensional kernel can omit `size` when its first runtime-sized storage
 buffer gives the obvious length. Otherwise omission means exactly one
 workgroup. Two- and three-dimensional shapes normally need an explicit size.
 
-`dispatches` repeats one prepared command inside the same compute pass:
+`repeat` repeats one prepared command inside the same compute pass:
 
 ```ts
 await gpu.submit(step(state, params, {
   size: particleCount,
-  dispatches: 100,
+  repeat: 100,
 }));
 ```
 
@@ -285,7 +278,9 @@ module, compile a pipeline, create a bind group, and grow the parameter arena.
 
 After warm-up, generated modules cache shader modules and pipelines per device;
 the session keeps buffers resident, reuses stable bind groups, and shares an
-aligned compiler-owned parameter buffer.
+aligned compiler-owned parameter buffer. Dynamic parameter offsets let commands
+with the same storage buffers share one bind group even when their plain values
+differ.
 
 For a hot loop:
 
@@ -301,7 +296,7 @@ policy belongs in the runtime rather than application code.
 
 ## Options and the public session
 
-Both lifetime APIs accept:
+Both `tach` overloads accept:
 
 ```ts
 interface TachOptions {
@@ -321,7 +316,7 @@ interface Tach {
   readonly adapter: GPUAdapter;
   readonly device: GPUDevice;
   buffer<T>(value: T): ComputeBuffer<T>;
-  submit(first: ComputeDispatch, ...rest: readonly ComputeDispatch[]): Promise<void>;
+  submit(first: ComputeCommand, ...rest: readonly ComputeCommand[]): Promise<void>;
   idle(): Promise<void>;
   close(): void;
 }
@@ -330,20 +325,15 @@ interface Tach {
 `ComputeBuffer` intentionally hides its `GPUBuffer`; Tach owns its layout and
 lifetime.
 
-## Results and failures
+## Failures
 
-Opening and scoped work use error-as-data:
+Every async operation follows ordinary TypeScript promise semantics: it returns
+its value on success and rejects with `TachError` on failure.
 
 ```ts
-type Result<T, E = TachError> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: E };
-
-interface TachError {
+class TachError extends Error {
   readonly code: TachErrorCode;
-  readonly message: string;
-  readonly operation?: string;
-  readonly cause?: unknown;
+  readonly operation: string | undefined;
 }
 ```
 
@@ -351,9 +341,9 @@ Categories distinguish WebGPU availability, adapter/device acquisition and
 loss, GPU validation/out-of-memory/internal errors, buffers, kernels,
 lifecycle misuse, callback failures, and compiler setup/execution.
 
-Operations on a persistent session throw or reject on failure, so use
-`try`/`finally`. Inside `tach(...)`, failures and callback exceptions become
-the returned `Result`.
+Use `try`/`finally` to close a persistent session. Scoped `tach(callback)` also
+normalizes callback exceptions as `TachError` with code `"user"` and preserves
+the original exception as its cause.
 
 The runtime uses WebGPU error scopes and retains asynchronous errors. Device
 loss, uncaptured errors, and scoped errors surface at a later submission or
@@ -396,25 +386,20 @@ Node-only tools may import `@depths/tach/compiler`:
 import { build, compilerPath, runCompiler } from "@depths/tach/compiler";
 
 const compiler = await compilerPath();
-if (!compiler.ok) throw new Error(compiler.error.message);
-
 const checked = await runCompiler(["check", "kernels/scale.tach"]);
-if (!checked.ok) throw new Error(checked.error.message);
-
 const built = await build("kernels/scale.tach", { cwd: process.cwd() });
-if (!built.ok) throw new Error(built.error.message);
-
 const spirv = await build("kernels/scale.tach", {
   cwd: process.cwd(),
   target: "spirv",
 });
-if (!spirv.ok) throw new Error(spirv.error.message);
 ```
 
-These APIs return `Result` values. They capture output and the resolved binary.
-`build` accepts `target: "web" | "spirv" | "all"`; omitting it uses the native
-compiler's `web` default. `cwd` selects the child directory and `env` overlays
-environment variables. Do not import this entry point into a browser bundle.
+`compilerPath` resolves to a path. `runCompiler` and `build` resolve to the
+compiler path plus captured standard output and error; failures reject with
+`TachError`. `build` accepts `target: "web" | "spirv" | "all"`; omitting it uses
+the native compiler's `web` default. `cwd` selects the child directory and
+`env` overlays environment variables. Do not import this entry point into a
+browser bundle.
 
 ## Generated code boundary
 

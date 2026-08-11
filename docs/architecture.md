@@ -309,7 +309,7 @@ layout. It emits three synchronized artifacts:
 - plain JSON reflection metadata.
 
 Named Tach structs become readonly TypeScript object aliases. Each exported
-kernel becomes a same-named function returning an opaque `ComputeDispatch`.
+kernel becomes a same-named function returning an opaque `ComputeCommand`.
 Buffer parameters use `ComputeBuffer<T>`; plain parameters stay ordinary typed
 values.
 
@@ -326,7 +326,7 @@ forms:
 
 ```text
 tach(callback)       scoped ownership; wait and close on callback exit
-openTach()           caller ownership; explicit idle and close
+tach(options?)       caller ownership; explicit idle and close
 ```
 
 Both return or expose the same `Tach` session contract:
@@ -351,10 +351,15 @@ resolves after recording/submission, not after the GPU becomes idle. Submission
 calls are serialized through a session tail so JavaScript concurrency cannot
 reorder them.
 
-The optional `dispatches` count repeats a command in the same pass. One-
+The optional `repeat` count repeats a command in the same pass. One-
 dimensional launch size can be inferred from the first runtime-sized storage
 buffer; otherwise the default is exactly one workgroup. Explicit sizes must
 match the kernel rank and contain positive safe integers.
+
+Batching commands into one pass removes host submission boundaries but does not
+fuse shader bodies. The runtime preserves every dispatch boundary because it
+cannot prove cross-invocation memory independence. True fusion belongs in the
+compiler after Core IR dependence analysis, never in a host option that guesses.
 
 ### Residency and caching
 
@@ -365,8 +370,10 @@ the physical GPU buffer. From then on, `write` must keep the same byte length.
 Generated modules cache one shader module and each compute pipeline per device.
 Sessions cache bind groups by layout and resident buffer ranges. Parameter
 blocks use a session-owned aligned upload buffer that grows geometrically and
-is reused under WebGPU queue ordering. Persistent sessions therefore retain the
-device, buffers, pipelines, layouts, and stable binding sets across frames.
+is reused under WebGPU queue ordering. Dynamic offsets let different parameter
+snapshots reuse one bind group for the same resident buffers. Persistent
+sessions therefore retain the device, buffers, pipelines, layouts, and stable
+binding sets across frames.
 
 ### Synchronization and errors
 
@@ -375,9 +382,8 @@ buffer's `read()`, and the end of `tach(...)` are synchronization boundaries.
 
 WebGPU error scopes, uncaptured errors, device loss, packing failures,
 lifecycle errors, and application exceptions are normalized to `TachError`.
-`openTach()` and `tach(...)` return discriminated `Result` values. Methods on a
-live persistent session throw `TachFailure`; an enclosing `tach(...)` scope
-converts those failures back to its result boundary.
+Both `tach(...)` overloads and live-session methods return values on success and
+throw or reject with `TachError` on failure.
 
 `close()` is idempotent. It destroys every live session buffer, the parameter
 arena, caches, and the WebGPU device. Buffer `destroy()` is also idempotent and

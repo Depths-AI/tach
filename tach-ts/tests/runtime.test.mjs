@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { openTach, tach } from "../dist/index.js";
+import * as tachAPI from "../dist/index.js";
 import { defineModule } from "../dist/internal.js";
+
+const { tach } = tachAPI;
 
 function fakeWebGPU({
   failCopy = false,
   failCopyUndefined = false,
+  failReadbackCleanup = false,
   failWork = false,
   scopeErrors = [],
   shaderError,
@@ -18,6 +21,7 @@ function fakeWebGPU({
     buffersDestroyed: 0,
     deviceDestroyed: 0,
     dispatches: 0,
+    dynamicOffsets: [],
     passes: 0,
     pipelines: 0,
     scopesPopped: 0,
@@ -75,7 +79,10 @@ function fakeWebGPU({
         descriptor,
         size: descriptor.size,
         storage,
-        destroy() { calls.buffersDestroyed++; },
+        destroy() {
+          calls.buffersDestroyed++;
+          if (failReadbackCleanup && descriptor.label === "Tach readback") throw new Error("cleanup failed");
+        },
         getMappedRange() { return storage.buffer; },
         async mapAsync() {},
         unmap() {},
@@ -86,7 +93,7 @@ function fakeWebGPU({
     createCommandEncoder() {
       const pass = {
         setPipeline() {},
-        setBindGroup() {},
+        setBindGroup(_index, _group, offsets = []) { calls.dynamicOffsets.push([...offsets]); },
         dispatchWorkgroups() { calls.dispatches++; },
         end() {},
       };
@@ -273,15 +280,19 @@ const combine = defineModule({
   }],
 });
 
-test("openTach reports unavailable adapters as data", async () => {
-  const result = await openTach({ gpu: { async requestAdapter() { return null; } } });
-  assert.deepEqual(result, {
-    ok: false,
-    error: {
-      code: "adapter-unavailable",
-      message: "WebGPU did not provide an adapter",
-      operation: "requestAdapter",
-    },
+test("the public runtime has one entry point and one error type", () => {
+  assert.deepEqual(Object.keys(tachAPI).sort(), ["TachError", "tach"]);
+});
+
+test("tach reports unavailable adapters as a typed failure", async () => {
+  await assert.rejects(tach({
+    gpu: { async requestAdapter() { return null; } },
+  }), (error) => {
+    assert.equal(error instanceof tachAPI.TachError, true);
+    assert.equal(error.code, "adapter-unavailable");
+    assert.equal(error.message, "WebGPU did not provide an adapter");
+    assert.equal(error.operation, "requestAdapter");
+    return true;
   });
 });
 
@@ -297,35 +308,35 @@ test("tach owns the device and every buffer through success", async () => {
     return buffer.read();
   }, { gpu: fake.gpu });
 
-  assert.deepEqual(result, { ok: true, value: { values: [3, 4] } });
+  assert.deepEqual(result, { values: [3, 4] });
   assert.equal(fake.calls.deviceDestroyed, 1);
   assert.equal(fake.calls.workDone, 1);
   await assert.rejects(buffer.read(), /Tach session is closed/);
   buffer.destroy();
 });
 
-test("tach converts callback failures to data and still closes", async () => {
+test("tach preserves callback failures and still closes", async () => {
   const fake = fakeWebGPU();
-  const result = await tach(() => {
+  await assert.rejects(tach(() => {
     throw new Error("application exploded");
-  }, { gpu: fake.gpu });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "user");
-  assert.equal(result.error.message, "application exploded");
-  assert.equal(result.error.operation, "tach");
+  }, { gpu: fake.gpu }), (error) => {
+    assert.equal(error.code, "user");
+    assert.equal(error.message, "application exploded");
+    assert.equal(error.operation, "tach");
+    return true;
+  });
   assert.equal(fake.calls.deviceDestroyed, 1);
 });
 
 test("tach normalizes non-stringifiable failures", async () => {
   const fake = fakeWebGPU();
   const cause = Object.create(null);
-  const result = await tach(() => { throw cause; }, { gpu: fake.gpu });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "user");
-  assert.equal(result.error.message, "Unknown error");
-  assert.equal(result.error.cause, cause);
+  await assert.rejects(tach(() => { throw cause; }, { gpu: fake.gpu }), (error) => {
+    assert.equal(error.code, "user");
+    assert.equal(error.message, "Unknown error");
+    assert.equal(error.cause, cause);
+    return true;
+  });
   assert.equal(fake.calls.deviceDestroyed, 1);
 });
 
@@ -335,14 +346,14 @@ test("kernel validation failures retain their typed GPU code", async () => {
     scopeErrors: [null, null, null, new GPUValidationError("invalid binding")],
   });
 
-  const result = await tach(async (gpu) => {
-    await gpu.submit(clear.dispatch(0, [gpu.buffer([1])]));
-  }, { gpu: fake.gpu });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "gpu-validation");
-  assert.equal(result.error.message, "invalid binding");
-  assert.equal(result.error.operation, "submit");
+  await assert.rejects(tach(async (gpu) => {
+    await gpu.submit(clear.command(0, [gpu.buffer([1])]));
+  }, { gpu: fake.gpu }), (error) => {
+    assert.equal(error.code, "gpu-validation");
+    assert.equal(error.message, "invalid binding");
+    assert.equal(error.operation, "submit");
+    return true;
+  });
   assert.equal(fake.calls.scopesPushed, 6);
   assert.equal(fake.calls.scopesPopped, 6);
   assert.equal(fake.calls.buffersDestroyed, 1);
@@ -351,56 +362,54 @@ test("kernel validation failures retain their typed GPU code", async () => {
 
 test("synchronous shader failures retain their kernel error", async () => {
   const fake = fakeWebGPU({ shaderError: new Error("shader failed") });
-  const result = await tach(async (gpu) => {
-    await gpu.submit(clear.dispatch(0, [gpu.buffer([1])]));
-  }, { gpu: fake.gpu });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "kernel");
-  assert.equal(result.error.message, "shader failed");
-  assert.equal(result.error.operation, "clear");
+  await assert.rejects(tach(async (gpu) => {
+    await gpu.submit(clear.command(0, [gpu.buffer([1])]));
+  }, { gpu: fake.gpu }), (error) => {
+    assert.equal(error.code, "kernel");
+    assert.equal(error.message, "shader failed");
+    assert.equal(error.operation, "clear");
+    return true;
+  });
   assert.equal(fake.calls.deviceDestroyed, 1);
 });
 
 test("undefined GPU work failures cannot be mistaken for success", async () => {
   const fake = fakeWebGPU({ failWork: true });
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    await opened.value.submit(clear.dispatch(0, [opened.value.buffer([1])]));
-    await assert.rejects(opened.value.idle(), (failure) => {
-      assert.equal(failure.data.code, "device-lost");
-      assert.equal(failure.data.message, "undefined");
+    await gpu.submit(clear.command(0, [gpu.buffer([1])]));
+    await assert.rejects(gpu.idle(), (failure) => {
+      assert.equal(failure.code, "device-lost");
+      assert.equal(failure.message, "undefined");
       return true;
     });
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
 test("storage encoding failures retain their buffer error", async () => {
   const fake = fakeWebGPU();
-  const result = await tach(async (gpu) => {
-    await gpu.submit(clear.dispatch(0, [gpu.buffer(["bad"])]));
-  }, { gpu: fake.gpu });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "buffer");
-  assert.match(result.error.message, /must be a number/u);
-  assert.equal(result.error.operation, "data");
+  await assert.rejects(tach(async (gpu) => {
+    await gpu.submit(clear.command(0, [gpu.buffer(["bad"])]));
+  }, { gpu: fake.gpu }), (error) => {
+    assert.equal(error.code, "buffer");
+    assert.match(error.message, /must be a number/u);
+    assert.equal(error.operation, "data");
+    return true;
+  });
   assert.equal(fake.calls.deviceDestroyed, 1);
 });
 
 test("one submission batches dispatches without waiting for the queue", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    const data = opened.value.buffer(new Uint32Array([1, 2, 3]));
-    await opened.value.submit(clear.dispatch(0, [data], { size: 3, dispatches: 4 }));
+    const data = gpu.buffer(new Uint32Array([1, 2, 3]));
+    await gpu.submit(clear.command(0, [data], { size: 3, repeat: 4 }));
     assert.equal(fake.calls.submitted, 1);
     assert.equal(fake.calls.workDone, 0);
-    await opened.value.idle();
+    await gpu.idle();
     const result = await data.read();
     assert.equal(result instanceof Uint32Array, true);
     assert.deepEqual(result, new Uint32Array([1, 2, 3]));
@@ -408,220 +417,223 @@ test("one submission batches dispatches without waiting for the queue", async ()
     assert.equal(fake.calls.submitted, 2);
     assert.equal(fake.calls.workDone, 1);
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
 test("packed vector arrays stay flat typed arrays across upload and readback", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
     const values = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]);
-    const buffer = opened.value.buffer(values);
-    await opened.value.submit(vectors.dispatch(0, [buffer], { size: 2 }));
+    const buffer = gpu.buffer(values);
+    await gpu.submit(vectors.command(0, [buffer], { size: 2 }));
     assert.deepEqual(await buffer.read(), values);
 
-    const partial = opened.value.buffer(new Float32Array([1, 2, 3]));
+    const partial = gpu.buffer(new Float32Array([1, 2, 3]));
     await assert.rejects(
-      opened.value.submit(vectors.dispatch(0, [partial])),
+      gpu.submit(vectors.command(0, [partial])),
       /complete 4-component elements/u,
     );
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
 test("kernel buffer parameters cannot alias the same compute buffer", async () => {
-  const opened = await openTach({ gpu: fakeWebGPU().gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fakeWebGPU().gpu });
   try {
-    const data = opened.value.buffer(new Uint32Array([1]));
+    const data = gpu.buffer(new Uint32Array([1]));
     assert.throws(
-      () => combine.dispatch(0, [data, data]),
+      () => combine.command(0, [data, data]),
       /buffer parameters require distinct compute buffers/u,
     );
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
 test("one pass carries multiple kernels and reuses resident parameters and bind groups", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    const data = opened.value.buffer(new Uint32Array([0]));
-    await opened.value.submit(
-      fill.dispatch(0, [data, 1]),
-      fill.dispatch(0, [data, 2]),
+    const data = gpu.buffer(new Uint32Array([0]));
+    await gpu.submit(
+      fill.command(0, [data, 1]),
+      fill.command(0, [data, 2]),
     );
     assert.equal(fake.calls.submitted, 1);
     assert.equal(fake.calls.passes, 1);
     assert.equal(fake.calls.dispatches, 2);
     assert.equal(fake.calls.buffers, 2);
     assert.equal(fake.calls.writes, 1);
-    assert.equal(fake.calls.bindGroups, 2);
+    assert.equal(fake.calls.bindGroups, 1);
+    assert.deepEqual(fake.calls.dynamicOffsets, [[0], [256]]);
 
-    await opened.value.submit(fill.dispatch(0, [data, 3]));
+    await gpu.submit(fill.command(0, [data, 3]));
     assert.equal(fake.calls.submitted, 2);
     assert.equal(fake.calls.passes, 2);
     assert.equal(fake.calls.dispatches, 3);
     assert.equal(fake.calls.buffers, 2);
     assert.equal(fake.calls.writes, 2);
-    assert.equal(fake.calls.bindGroups, 2);
+    assert.equal(fake.calls.bindGroups, 1);
+    assert.deepEqual(fake.calls.dynamicOffsets, [[0], [256], [0]]);
     assert.equal(fake.calls.shaders, 1);
     assert.equal(fake.calls.pipelines, 1);
     assert.equal(fake.calls.workDone, 0);
-    await opened.value.idle();
+    await gpu.idle();
     assert.equal(fake.calls.workDone, 1);
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
 test("parameter blocks pack nested values and bools into compiler-planned offsets", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    const data = opened.value.buffer(new Uint32Array([0]));
-    await opened.value.submit(configure.dispatch(0, [data, { enabled: true, scale: 2.5 }]));
+    const data = gpu.buffer(new Uint32Array([0]));
+    await gpu.submit(configure.command(0, [data, { enabled: true, scale: 2.5 }]));
     const arena = fake.buffers.find((buffer) => buffer.descriptor.label === "Tach parameter arena");
     assert.ok(arena);
     const view = new DataView(arena.storage.buffer);
     assert.equal(view.getUint32(0, true), 1);
     assert.equal(view.getFloat32(4, true), 2.5);
-    await opened.value.submit(configure.dispatch(0, [data, { enabled: false, scale: 1.5 }]));
+    await gpu.submit(configure.command(0, [data, { enabled: false, scale: 1.5 }]));
     assert.equal(view.getUint32(0, true), 0);
     assert.equal(view.getFloat32(4, true), 1.5);
     assert.throws(
-      () => configure.dispatch(0, [data, { enabled: 1, scale: 2.5 }]),
+      () => configure.command(0, [data, { enabled: 1, scale: 2.5 }]),
       /configure\.settings\.enabled must be a boolean/u,
     );
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
-test("dispatch count must be a positive integer", async () => {
+test("repeat count must be a positive integer", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
     assert.throws(
-      () => clear.dispatch(0, [opened.value.buffer(new Uint32Array([1]))], { dispatches: 0 }),
+      () => clear.command(0, [gpu.buffer(new Uint32Array([1]))], { repeat: 0 }),
       (failure) => {
-        assert.equal(failure.data.code, "kernel");
-        assert.match(failure.data.message, /positive integer/u);
+        assert.equal(failure.code, "kernel");
+        assert.match(failure.message, /positive integer/u);
         return true;
       },
     );
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
-test("dispatch size must match the kernel's logical rank", async () => {
-  const opened = await openTach({ gpu: fakeWebGPU().gpu });
-  assert.equal(opened.ok, true);
+test("launch size must match the kernel's logical rank", async () => {
+  const gpu = await tach({ gpu: fakeWebGPU().gpu });
   try {
-    const data = opened.value.buffer(new Uint32Array([1]));
+    const data = gpu.buffer(new Uint32Array([1]));
     await assert.rejects(
-      opened.value.submit(clear.dispatch(0, [data], { size: [1, 1] })),
-      /exact 1D dispatch size/u,
+      gpu.submit(clear.command(0, [data], { size: [1, 1] })),
+      /exact 1D launch size/u,
     );
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
 test("multidimensional dispatch does not infer a shape from flat storage", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    const data = opened.value.buffer(new Uint32Array(64));
-    await opened.value.submit(plane.dispatch(0, [data]));
-    await opened.value.submit(plane.dispatch(0, [data], { size: [16, 8] }));
+    const data = gpu.buffer(new Uint32Array(64));
+    await gpu.submit(plane.command(0, [data]));
+    await gpu.submit(plane.command(0, [data], { size: [16, 8] }));
     await assert.rejects(
-      opened.value.submit(plane.dispatch(0, [data], { size: 64 })),
-      /exact 2D dispatch size/u,
+      gpu.submit(plane.command(0, [data], { size: 64 })),
+      /exact 2D launch size/u,
     );
     assert.equal(fake.calls.dispatches, 2);
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
-test("awaiting a dispatch without submitting it fails loudly", async () => {
+test("awaiting a command without submitting it fails loudly", async () => {
   const fake = fakeWebGPU();
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    const dispatch = clear.dispatch(0, [opened.value.buffer([1])]);
-    await assert.rejects(async () => await dispatch, (failure) => {
-      assert.equal(failure.data.code, "kernel");
-      assert.match(failure.data.message, /Tach\.submit/u);
+    const command = clear.command(0, [gpu.buffer([1])]);
+    await assert.rejects(async () => await command, (failure) => {
+      assert.equal(failure.code, "kernel");
+      assert.match(failure.message, /Tach\.submit/u);
       return true;
     });
     assert.equal(fake.calls.submitted, 0);
   } finally {
-    opened.value.close();
+    gpu.close();
   }
 });
 
-test("dispatch ownership and resident-buffer lifetime are enforced", async () => {
-  const first = await openTach({ gpu: fakeWebGPU().gpu });
-  const second = await openTach({ gpu: fakeWebGPU().gpu });
-  assert.equal(first.ok, true);
-  assert.equal(second.ok, true);
+test("command ownership and resident-buffer lifetime are enforced", async () => {
+  const first = await tach({ gpu: fakeWebGPU().gpu });
+  const second = await tach({ gpu: fakeWebGPU().gpu });
   try {
-    const data = first.value.buffer([1]);
-    const dispatch = clear.dispatch(0, [data]);
-    assert.throws(() => second.value.submit(dispatch), /different Tach session/u);
+    const data = first.buffer([1]);
+    const command = clear.command(0, [data]);
+    assert.throws(() => second.submit(command), /different Tach session/u);
 
     data.destroy();
-    await assert.rejects(first.value.submit(dispatch), (failure) => {
-      assert.equal(failure.data.code, "lifecycle");
-      assert.match(failure.data.message, /destroyed/u);
+    await assert.rejects(first.submit(command), (failure) => {
+      assert.equal(failure.code, "lifecycle");
+      assert.match(failure.message, /destroyed/u);
       return true;
     });
   } finally {
-    first.value.close();
-    second.value.close();
+    first.close();
+    second.close();
   }
 });
 
 test("readback setup failures destroy temporary buffers", async () => {
   const fake = fakeWebGPU({ failCopy: true });
 
-  const result = await tach(async (gpu) => {
+  await assert.rejects(tach(async (gpu) => {
     const data = gpu.buffer([1]);
-    await gpu.submit(clear.dispatch(0, [data]));
+    await gpu.submit(clear.command(0, [data]));
     return data.read();
-  }, { gpu: fake.gpu });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "buffer");
+  }, { gpu: fake.gpu }), (error) => {
+    assert.equal(error.code, "buffer");
+    return true;
+  });
   assert.equal(fake.calls.buffersDestroyed, 2);
   assert.equal(fake.calls.deviceDestroyed, 1);
 });
 
+test("readback cleanup failures are not discarded", async () => {
+  const fake = fakeWebGPU({ failReadbackCleanup: true });
+  const gpu = await tach({ gpu: fake.gpu });
+  try {
+    const data = gpu.buffer([1]);
+    await gpu.submit(clear.command(0, [data]));
+    await assert.rejects(data.read(), /cleanup failed/u);
+  } finally {
+    gpu.close();
+  }
+});
+
 test("undefined readback setup failures cannot be mistaken for success", async () => {
   const fake = fakeWebGPU({ failCopyUndefined: true });
-  const opened = await openTach({ gpu: fake.gpu });
-  assert.equal(opened.ok, true);
+  const gpu = await tach({ gpu: fake.gpu });
   try {
-    const data = opened.value.buffer([1]);
-    await opened.value.submit(clear.dispatch(0, [data]));
+    const data = gpu.buffer([1]);
+    await gpu.submit(clear.command(0, [data]));
     await assert.rejects(data.read(), (failure) => {
-      assert.equal(failure.data.code, "buffer");
-      assert.equal(failure.data.message, "undefined");
+      assert.equal(failure.code, "buffer");
+      assert.equal(failure.message, "undefined");
       return true;
     });
   } finally {
-    opened.value.close();
+    gpu.close();
   }
   assert.equal(fake.calls.buffersDestroyed, 2);
 });

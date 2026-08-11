@@ -10,19 +10,14 @@ const projectRoot = resolve(dirname(scriptPath), "..");
 const repositoryRoot = resolve(projectRoot, "..");
 const examplesDir = join(repositoryRoot, "examples");
 const outputDir = join(projectRoot, "build");
-function unwrap(result) {
-  if (result.ok) {
-    if (result.value.stdout) process.stdout.write(result.value.stdout);
-    if (result.value.stderr) process.stderr.write(result.value.stderr);
-    return result.value;
-  }
-  throw new Error(`[${result.error.code}] ${result.error.message}`, {
-    cause: result.error.cause,
-  });
+function print(result) {
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  return result;
 }
 
 export default async function buildExamples() {
-  const cliVersion = unwrap(await runCompiler(["version"], { cwd: projectRoot })).stdout.trim();
+  const cliVersion = print(await runCompiler(["version"], { cwd: projectRoot })).stdout.trim();
   const sources = (await readdir(examplesDir)).filter((name) => name.endsWith(".tach")).sort();
   if (sources.length === 0) throw new Error(`no Tach examples found in ${examplesDir}`);
 
@@ -36,7 +31,7 @@ export default async function buildExamples() {
     const sourcePath = join(examplesDir, sourceName);
     const name = sourceName.slice(0, -".tach".length);
     console.log(`Compiling ${relative(repositoryRoot, sourcePath)}`);
-    unwrap(await build(sourcePath, { cwd: projectRoot, target: "all" }));
+    print(await build(sourcePath, { cwd: projectRoot, target: "all" }));
 
     for (const suffix of artifactSuffixes) await access(join(outputDir, name + suffix), constants.R_OK);
     const metadata = JSON.parse(await readFile(join(outputDir, `${name}.tach.json`), "utf8"));

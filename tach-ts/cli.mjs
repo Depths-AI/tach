@@ -3,14 +3,18 @@
 import { spawnSync } from "node:child_process";
 
 import { compilerPath } from "./dist/compiler.js";
+import { TachError } from "./dist/error.js";
 
-const resolved = await compilerPath();
-if (!resolved.ok) {
-  console.error(`tach: [${resolved.error.code}] ${resolved.error.message}`);
+let resolved;
+try {
+  resolved = await compilerPath();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`tach: ${error instanceof TachError ? `[${error.code}] ` : ""}${message}`);
   process.exit(1);
 }
 
-const child = spawnSync(resolved.value, process.argv.slice(2), {
+const child = spawnSync(resolved, process.argv.slice(2), {
   stdio: "inherit",
 });
 if (child.error) {

@@ -53,11 +53,7 @@ const result = await tach(async (gpu) => {
   return values.read();
 });
 
-if (!result.ok) {
-  throw new Error(`${result.error.code}: ${result.error.message}`);
-}
-
-console.log(result.value); // Float32Array [2, 4, 6, 8]
+console.log(result); // Float32Array [2, 4, 6, 8]
 ```
 
 That example contains the whole everyday model:
@@ -180,7 +176,7 @@ is the compiler's job.
 ## Batch jobs and long-running loops
 
 `tach(...)` owns a complete scoped job. It opens a device, runs the callback,
-waits for submitted work, returns a `Result`, and closes everything:
+waits for submitted work, returns the callback value, and closes everything:
 
 ```ts
 const result = await tach(async (gpu) => {
@@ -190,17 +186,14 @@ const result = await tach(async (gpu) => {
 });
 ```
 
-`openTach()` gives the caller the same session without automatic shutdown.
-Use it for animation, simulation, services, or any loop that should keep the
+Calling `tach()` without a callback gives the caller the same session without
+automatic shutdown. Use it for animation, simulation, services, or any loop that should keep the
 device, pipelines, bind groups, and buffers resident:
 
 ```ts
-import { openTach } from "@depths/tach";
+import { tach } from "@depths/tach";
 
-const opened = await openTach();
-if (!opened.ok) throw new Error(opened.error.message);
-
-const gpu = opened.value;
+const gpu = await tach();
 const state = gpu.buffer(initialState);
 
 try {

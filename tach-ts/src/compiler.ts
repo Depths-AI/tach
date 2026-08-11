@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-import { err, normalizeError, ok, tachError, type Result } from "./result.js";
+import { normalizeError, TachError } from "./error.js";
 
 export interface CompilerRunOptions {
   readonly cwd?: string;
@@ -43,7 +43,7 @@ async function readableExecutable(path: string): Promise<boolean> {
   }
 }
 
-function target(): Result<NativeTarget> {
+function target(): NativeTarget {
   const os = process.platform === "win32"
     ? "windows"
     : process.platform === "darwin" || process.platform === "linux"
@@ -55,17 +55,17 @@ function target(): Result<NativeTarget> {
       ? "arm64"
       : undefined;
   if (!os || !arch) {
-    return err(tachError(
+    throw new TachError(
       "compiler-platform",
       `Tach does not publish a compiler for ${process.platform}/${process.arch}`,
       { operation: "compilerPath" },
-    ));
+    );
   }
   const executable = os === "windows" ? "tach.exe" : "tach";
-  return ok({
+  return {
     executable,
     asset: `tach-${os}-${arch}${os === "windows" ? ".exe" : ""}`,
-  });
+  };
 }
 
 async function packageVersion(): Promise<string> {
@@ -119,13 +119,13 @@ function expectedHash(checksums: string, asset: string): string | undefined {
   return undefined;
 }
 
-async function installCompiler(native: NativeTarget, version: string): Promise<Result<string>> {
+async function installCompiler(native: NativeTarget, version: string): Promise<string> {
   if (version === "0.0.0") {
-    return err(tachError(
+    throw new TachError(
       "compiler-install",
       "development compiler is missing; run `npm run compiler` at the Tach repository root",
       { operation: "compilerPath" },
-    ));
+    );
   }
   const repository = process.env.TACH_GITHUB_REPOSITORY ?? "Depths-AI/tach";
   const releaseBase = `https://github.com/${repository}/releases/download/v${version}`;
@@ -158,46 +158,42 @@ async function installCompiler(native: NativeTarget, version: string): Promise<R
     } finally {
       await rm(temporary, { force: true });
     }
-    return ok(destination);
+    return destination;
   } catch (cause) {
-    return err(normalizeError(cause, "compiler-install", "compilerPath"));
+    throw normalizeError(cause, "compiler-install", "compilerPath");
   }
 }
 
-export async function compilerPath(): Promise<Result<string>> {
+export async function compilerPath(): Promise<string> {
   const override = process.env.TACH_BIN;
   if (override) {
     const path = isAbsolute(override) ? override : resolve(process.cwd(), override);
-    if (await readableExecutable(path)) return ok(path);
-    return err(tachError(
+    if (await readableExecutable(path)) return path;
+    throw new TachError(
       "compiler-install",
       `TACH_BIN does not point to an executable: ${path}`,
       { operation: "compilerPath" },
-    ));
+    );
   }
 
-  const selected = target();
-  if (!selected.ok) return selected;
-  const native = selected.value;
+  const native = target();
 
   const installed = join(nativeDirectory, native.executable);
-  if (await readableExecutable(installed)) return ok(installed);
+  if (await readableExecutable(installed)) return installed;
   const development = await developmentCompiler(native);
-  if (development) return ok(development);
+  if (development) return development;
   try {
     return await installCompiler(native, await packageVersion());
   } catch (cause) {
-    return err(normalizeError(cause, "compiler-install", "compilerPath"));
+    throw normalizeError(cause, "compiler-install", "compilerPath");
   }
 }
 
 export async function runCompiler(
   args: readonly string[],
   options: CompilerRunOptions = {},
-): Promise<Result<CompilerRun>> {
-  const resolved = await compilerPath();
-  if (!resolved.ok) return resolved;
-  const path = resolved.value;
+): Promise<CompilerRun> {
+  const path = await compilerPath();
 
   let child;
   try {
@@ -207,15 +203,15 @@ export async function runCompiler(
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (cause) {
-    return err(normalizeError(cause, "compiler-execution", "compiler"));
+    throw normalizeError(cause, "compiler-execution", "compiler");
   }
-  return new Promise((resolveResult) => {
+  return new Promise((resolveRun, rejectRun) => {
     const stdout: Uint8Array[] = [];
     const stderr: Uint8Array[] = [];
     child.stdout.on("data", (chunk: Uint8Array) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Uint8Array) => stderr.push(chunk));
     child.once("error", (cause) => {
-      resolveResult(err(normalizeError(cause, "compiler-execution", "compiler")));
+      rejectRun(normalizeError(cause, "compiler-execution", "compiler"));
     });
     child.once("close", (code, signal) => {
       const output = {
@@ -224,18 +220,18 @@ export async function runCompiler(
         stderr: Buffer.concat(stderr).toString("utf8"),
       };
       if (code === 0) {
-        resolveResult(ok(output));
+        resolveRun(output);
         return;
       }
       const reason = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
-      resolveResult(err(tachError(
+      rejectRun(new TachError(
         "compiler-execution",
         `tach ${args.join(" ")} failed with ${reason}`,
         {
           operation: "compiler",
           cause: { ...output, exitCode: code, signal },
         },
-      )));
+      ));
     });
   });
 }
@@ -243,7 +239,7 @@ export async function runCompiler(
 export async function build(
   source: string,
   options: BuildOptions = {},
-): Promise<Result<CompilerRun>> {
+): Promise<CompilerRun> {
   const { target, ...runOptions } = options;
   return runCompiler(target === undefined ? ["build", source] : ["build", "--target", target, source], runOptions);
 }

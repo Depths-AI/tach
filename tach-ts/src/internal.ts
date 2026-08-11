@@ -1,17 +1,17 @@
 import {
-  createComputeDispatch,
+  createComputeCommand,
   getBufferState,
   type BufferBindGroupEntry,
   type BufferCodec,
   type BufferState,
   type ComputeBuffer,
-  type ComputeDispatch,
-  type DispatchOptions,
-  type DispatchSize,
-  type PreparedDispatch,
+  type ComputeCommand,
+  type LaunchOptions,
+  type LaunchSize,
+  type PreparedCommand,
   type RuntimeOwner,
 } from "./runtime.js";
-import { normalizeError, TachFailure, tachError } from "./result.js";
+import { normalizeError, TachError } from "./error.js";
 
 const bufferUsage = {
   copySrc: 0x0004,
@@ -96,11 +96,11 @@ interface DeviceCache {
 }
 
 export interface DefinedModule {
-  dispatch(
+  command(
     kernel: number,
     values: readonly unknown[],
-    options?: DispatchOptions,
-  ): ComputeDispatch;
+    options?: LaunchOptions,
+  ): ComputeCommand;
 }
 
 function sequence(value: unknown, path: string): ArrayLike<unknown> {
@@ -398,11 +398,11 @@ function materialize<T>(state: BufferState<T>, resource: ResourceDefinition): GP
   try {
     state.owner.assertHealthy(resource.name);
     if (state.destroyed) {
-      throw new TachFailure(tachError(
+      throw new TachError(
         "lifecycle",
         "compute buffer has been destroyed",
         { operation: resource.name },
-      ));
+      );
     }
     const key = layoutKey(resource);
     if (state.gpu) {
@@ -429,7 +429,7 @@ function materialize<T>(state: BufferState<T>, resource: ResourceDefinition): GP
     state.gpu = gpu;
     return gpu;
   } catch (cause) {
-    throw new TachFailure(normalizeError(cause, "buffer", resource.name));
+    throw normalizeError(cause, "buffer", resource.name);
   }
 }
 
@@ -444,12 +444,12 @@ function runtimeLength(resource: ResourceDefinition, state: BufferState<unknown>
 }
 
 function workgroups(
-  invocations: DispatchSize,
+  invocations: LaunchSize,
   workgroupSize: readonly [number, number, number],
   rank: 1 | 2 | 3,
 ): readonly [number, number, number] {
   if (typeof invocations === "number" ? rank !== 1 : !Array.isArray(invocations) || invocations.length !== rank) {
-    throw new TypeError(`kernel requires an exact ${rank}D dispatch size`);
+    throw new TypeError(`kernel requires an exact ${rank}D launch size`);
   }
   const size = typeof invocations === "number" ? [invocations, 1, 1] : invocations;
   const dimensions = [size[0] ?? Number.NaN, size[1] ?? 1, size[2] ?? 1] as const;
@@ -465,25 +465,25 @@ function workgroups(
   ];
 }
 
-function defaultDispatchSize(info: KernelDefinition): DispatchSize {
+function defaultLaunchSize(info: KernelDefinition): LaunchSize {
   if (info.dimensions === 1) return info.workgroupSize[0];
   if (info.dimensions === 2) return [info.workgroupSize[0], info.workgroupSize[1]];
   return info.workgroupSize;
 }
 
-function dispatchOptions(value: DispatchOptions | undefined): {
-  readonly size: DispatchSize | undefined;
-  readonly dispatches: number;
+function launchOptions(value: LaunchOptions | undefined): {
+  readonly size: LaunchSize | undefined;
+  readonly repeat: number;
 } {
-  if (value === undefined) return { size: undefined, dispatches: 1 };
+  if (value === undefined) return { size: undefined, repeat: 1 };
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError("dispatch options must be an object");
+    throw new TypeError("launch options must be an object");
   }
-  const dispatches = value.dispatches ?? 1;
-  if (!Number.isSafeInteger(dispatches) || dispatches <= 0) {
-    throw new RangeError("dispatches must be a positive integer");
+  const repeat = value.repeat ?? 1;
+  if (!Number.isSafeInteger(repeat) || repeat <= 0) {
+    throw new RangeError("repeat must be a positive integer");
   }
-  return { size: value.size, dispatches };
+  return { size: value.size, repeat };
 }
 
 function packParameters(
@@ -540,7 +540,7 @@ async function compileKernel(
     entries.push({
       binding: block.binding,
       visibility: shaderStage.compute,
-      buffer: { type: "uniform", minBindingSize: block.byteSize },
+      buffer: { type: "uniform", minBindingSize: block.byteSize, hasDynamicOffset: true },
     });
   }
 
@@ -594,27 +594,27 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
       return await pipeline;
     } catch (cause) {
       state.pipelines.delete(kernelIndex);
-      throw new TachFailure(normalizeError(cause, "kernel", info.name));
+      throw normalizeError(cause, "kernel", info.name);
     }
   }
 
-  function dispatch(
+  function command(
     kernelIndex: number,
     values: readonly unknown[],
-    options?: DispatchOptions,
-  ): ComputeDispatch {
+    options?: LaunchOptions,
+  ): ComputeCommand {
     const info = definition.kernels[kernelIndex];
     if (!info) {
-      throw new TachFailure(tachError("kernel", `unknown Tach kernel ${kernelIndex}`, {
+      throw new TachError("kernel", `unknown Tach kernel ${kernelIndex}`, {
         operation: "kernel",
-      }));
+      });
     }
     if (values.length !== info.parameters.length) {
-      throw new TachFailure(tachError(
+      throw new TachError(
         "kernel",
         `${info.name} received the wrong number of parameters`,
         { operation: info.name },
-      ));
+      );
     }
 
     let owner: RuntimeOwner | undefined;
@@ -629,44 +629,44 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
         `${info.name}.${parameter.name}`,
       );
       if (owner && state.owner !== owner) {
-        throw new TachFailure(tachError(
+        throw new TachError(
           "buffer",
           `${info.name} compute buffers belong to different Tach sessions`,
           { operation: info.name },
-        ));
+        );
       }
       const previous = parametersByBuffer.get(state);
       if (previous) {
-        throw new TachFailure(tachError(
+        throw new TachError(
           "buffer",
           `${info.name}.${parameter.name} aliases ${info.name}.${previous}; buffer parameters require distinct compute buffers`,
           { operation: info.name },
-        ));
+        );
       }
       owner = state.owner;
       parametersByBuffer.set(state, parameter.name);
       storage.set(index, state);
     }
     if (!owner) {
-      throw new TachFailure(tachError(
+      throw new TachError(
         "kernel",
         `${info.name} has no compute buffer`,
         { operation: info.name },
-      ));
+      );
     }
     owner.assertHealthy(info.name);
-    let configured: ReturnType<typeof dispatchOptions>;
+    let configured: ReturnType<typeof launchOptions>;
     const parameters: Uint8Array[] = [];
     try {
-      configured = dispatchOptions(options);
+      configured = launchOptions(options);
       if (info.parameterBlock) parameters.push(packParameters(info, info.parameterBlock, values));
     } catch (cause) {
-      throw new TachFailure(normalizeError(cause, "kernel", info.name));
+      throw normalizeError(cause, "kernel", info.name);
     }
 
-    return createComputeDispatch({
+    return createComputeCommand({
       owner,
-      async prepare(): Promise<PreparedDispatch> {
+      async prepare(): Promise<PreparedCommand> {
         const kernel = await compiled(owner, kernelIndex, info);
         return {
           parameters,
@@ -674,6 +674,7 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
             owner.assertHealthy(info.name);
             const entriesByGroup = new Map<number, BufferBindGroupEntry[]>();
             let inferredSize: number | undefined;
+            let parameterOffset = 0;
             for (let index = 0; index < info.parameters.length; index++) {
               const parameter = required(
                 info.parameters[index],
@@ -690,30 +691,38 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
             }
             if (info.parameterBlock) {
               const block = info.parameterBlock;
+              const parameter = required(parameterBindings[0], `${info.name} parameter block`);
               let entries = entriesByGroup.get(block.group);
               if (!entries) entriesByGroup.set(block.group, entries = []);
               entries.push({
                 binding: block.binding,
-                resource: required(parameterBindings[0], `${info.name} parameter block`),
+                resource: { buffer: parameter.buffer, size: block.byteSize },
               });
+              parameterOffset = parameter.offset ?? 0;
             }
 
             pass.setPipeline(kernel.pipeline);
             for (let group = 0; group < kernel.bindGroupLayouts.length; group++) {
               const entries = entriesByGroup.get(group) ?? [];
               entries.sort((left, right) => left.binding - right.binding);
-              pass.setBindGroup(group, owner.bindGroup(
-                `Tach ${info.name} group ${group}`,
-                required(kernel.bindGroupLayouts[group], `${info.name} group ${group}`),
-                entries,
-              ));
+              pass.setBindGroup(
+                group,
+                owner.bindGroup(
+                  `Tach ${info.name} group ${group}`,
+                  required(kernel.bindGroupLayouts[group], `${info.name} group ${group}`),
+                  entries,
+                ),
+                group === info.parameterBlock?.group ? [parameterOffset] : [],
+              );
             }
             const groups = workgroups(
-              configured.size ?? inferredSize ?? defaultDispatchSize(info),
+              configured.size ?? inferredSize ?? defaultLaunchSize(info),
               info.workgroupSize,
               info.dimensions,
             );
-            for (let index = 0; index < configured.dispatches; index++) {
+            // DECISION: Preserve global dispatch boundaries until Core IR can
+            // prove that an invocation-local repeat has no cross-invocation effects.
+            for (let index = 0; index < configured.repeat; index++) {
               pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
             }
           },
@@ -722,7 +731,7 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
     });
   }
 
-  return Object.freeze({ dispatch });
+  return Object.freeze({ command });
 }
 
 function align4(value: number): number {

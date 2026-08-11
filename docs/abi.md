@@ -377,18 +377,18 @@ tuples. A kernel becomes a positional function in source parameter order:
 ```ts
 import type {
   ComputeBuffer,
-  ComputeDispatch,
-  DispatchOptions,
+  ComputeCommand,
+  LaunchOptions,
 } from "@depths/tach";
 
 export function scale(
   values: ComputeBuffer<Float32Array | readonly number[]>,
   factor: number,
-  $dispatch?: DispatchOptions<number>,
-): ComputeDispatch;
+  $launch?: LaunchOptions<number>,
+): ComputeCommand;
 ```
 
-The optional final `$dispatch` parameter is generated, not part of Tach source.
+The optional final `$launch` parameter is generated, not part of Tach source.
 Its `size` type is tied to kernel rank:
 
 ```text
@@ -453,7 +453,7 @@ buffer, decodes the bytes, destroys the temporary, and returns a clone.
 ## 12. Commands and launch geometry
 
 A generated kernel call validates its arguments and returns an opaque
-`ComputeDispatch`. It does not submit. Accidentally awaiting the command throws
+`ComputeCommand`. It does not submit. Accidentally awaiting the command throws
 a targeted error; the only execution boundary is:
 
 ```ts
@@ -465,11 +465,11 @@ constructed. Buffer arguments remain live resident handles. All command
 buffers must belong to the same Tach session.
 
 `submit` records its commands in order into one compute pass and one command
-buffer, then performs one queue submission. `dispatches` repeats that command's
+buffer, then performs one queue submission. `repeat` repeats that command's
 `dispatchWorkgroups` call inside the same pass:
 
 ```ts
-step(state, params, { size: count, dispatches: 100 })
+step(state, params, { size: count, repeat: 100 })
 ```
 
 Every explicit size component must be a positive safe integer and the value's
@@ -505,17 +505,14 @@ const result = await tach(async (gpu) => {
 ```
 
 `tach(work, options?)` opens a session, calls `work`, waits for submitted GPU
-work, converts any failure to `Result`, and closes the session. Every buffer
-created by that session is destroyed on exit. A returned `ComputeBuffer` is
-therefore not usable after the scope.
+work, returns the callback value, and closes the session. Failures reject with
+`TachError`. Every buffer created by that session is destroyed on exit. A
+returned `ComputeBuffer` is therefore not usable after the scope.
 
 ### Persistent lifetime
 
 ```ts
-const opened = await openTach();
-if (!opened.ok) throw new Error(opened.error.message);
-
-const gpu = opened.value;
+const gpu = await tach();
 try {
   // Reuse resident buffers and cached pipelines across many submissions.
   await gpu.idle();
@@ -524,7 +521,7 @@ try {
 }
 ```
 
-`openTach(options?)` returns the same session without automatic shutdown. The
+`tach(options?)` returns the same session without automatic shutdown. The
 caller owns synchronization and `close()`. This form supports frame loops and
 long iterative jobs without reacquiring an adapter/device or recreating
 resident state.
@@ -545,34 +542,33 @@ The explicit completion boundaries are:
 - successful or failed exit from `tach(...)`.
 
 Generated modules cache a shader module and compute pipelines per WebGPU
-device. Sessions cache bind groups by layout and exact buffer range. Parameter
+device. Sessions cache bind groups by layout and storage-buffer range. Parameter
 blocks share an aligned session buffer sized against WebGPU's
-`minUniformBufferOffsetAlignment`; it grows geometrically and is reused under
-queue ordering. Destroying a buffer or growing the parameter arena clears
-affected bind-group cache entries.
+`minUniformBufferOffsetAlignment`; dynamic offsets select each command's
+snapshot, so commands with the same storage buffers reuse one bind group. The
+arena grows geometrically and is reused under queue ordering. Destroying a
+buffer or growing the parameter arena clears affected bind-group cache entries.
 
 `gpu.close()` is idempotent. It destroys all owned GPU buffers, the parameter
 arena, bind-group state, event handling, and the WebGPU device.
 
 ## 15. Error contract
 
-`openTach()` returns `Promise<Result<Tach>>`. `tach(...)` returns
-`Promise<Result<T>>`:
+Both `tach(...)` overloads and all session operations use ordinary TypeScript
+success and failure semantics:
 
 ```ts
-type Result<T, E = TachError> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: E };
+tach(options?): Promise<Tach>;
+tach<T>(work: (gpu: Tach) => T | Promise<T>, options?): Promise<T>;
 ```
 
-`TachError` contains a stable category, message, optional operation, and
-optional cause. Current categories cover WebGPU availability, adapter/device
-acquisition and loss, GPU validation/out-of-memory/internal errors, buffers,
-kernels, lifecycle, user callback failures, and compiler delivery/execution.
-
-Operations on an open session throw `TachFailure` carrying that structured
-error. An enclosing `tach(...)` catches and normalizes it. Asynchronous WebGPU
-errors are retained by the session and surface at a later submission or
+Success returns or resolves to the value. Failure throws or rejects with
+`TachError`, which extends `Error` and carries a stable `code`, an optional
+operation, and the original cause. Current categories cover WebGPU
+availability, adapter/device acquisition and loss, GPU
+validation/out-of-memory/internal errors, buffers, kernels, lifecycle, user
+callback failures, and compiler delivery/execution. Asynchronous WebGPU errors
+are retained by the session and surface at a later submission or
 synchronization boundary rather than being silently discarded.
 
 ## 16. Native Vulkan caller obligations
