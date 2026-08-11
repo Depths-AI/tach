@@ -39,6 +39,9 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 				}
 			case *Extract:
 				useValue(x.Base)
+			case *VectorIndex:
+				useValue(x.Base)
+				useValue(x.Index)
 			case *Call:
 				for _, id := range x.Args {
 					useValue(id)

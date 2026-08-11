@@ -343,6 +343,9 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		}
 		e.line("let %s: %s = %s.%s;", v(x.Result), e.typeName(x.Type), v(x.Base), sel)
 		s.def(x.Result, x.Type)
+	case *ir.VectorIndex:
+		e.line("let %s: %s = %s[%s];", v(x.Result), e.typeName(x.Type), v(x.Base), v(x.Index))
+		s.def(x.Result, x.Type)
 	case *ir.Call:
 		args := make([]string, len(x.Args))
 		for i, id := range x.Args {

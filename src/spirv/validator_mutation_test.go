@@ -30,7 +30,7 @@ func compileSPVForMutation(t *testing.T) []byte {
 	t.Helper()
 	return compileSourceForMutation(t, `
 @workgroup(1)
-export compute math[i](out: buffer<f32[]>) {
+export function math[i](out: buffer<f32[]>) {
   if (i < out.length) { out[i] = sin(f32(i)); }
 }`)
 }
@@ -126,11 +126,35 @@ func TestValidatorRejectsUnsupportedGLSL450Instruction(t *testing.T) {
 	}
 }
 
+func TestValidatorRejectsNonScalarDynamicVectorIndex(t *testing.T) {
+	bin := compileSourceForMutation(t, `
+function lane(value: u32x4, index: u32): u32 { return value[index]; }
+@workgroup(1)
+export function readLane[i](out: buffer<u32>) { out = lane(u32x4(1, 2, 3, 4), i); }
+`)
+	m, err := Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range m.Instructions {
+		if in.Op != OpVectorExtractDynamic {
+			continue
+		}
+		binary.LittleEndian.PutUint32(bin[(in.Offset+4)*4:], in.Operands[2])
+		err = Validate(bin)
+		if err == nil || !strings.Contains(err.Error(), "index is not an integer scalar") {
+			t.Fatalf("Validate error = %v, want dynamic-vector-index type rejection", err)
+		}
+		return
+	}
+	t.Fatal("test module emitted no OpVectorExtractDynamic")
+}
+
 func TestValidatorRejectsFunctionControlOutsideEmittedProfile(t *testing.T) {
 	bin := compileSourceForMutation(t, `
-fn twice(x: f32): f32 { return x + x; }
+function twice(x: f32): f32 { return x + x; }
 @workgroup(1)
-export compute useHelper[i](out: buffer<f32>) { out = twice(2.0); }
+export function useHelper[i](out: buffer<f32>) { out = twice(2.0); }
 `)
 	m, err := Decode(bin)
 	if err != nil {
@@ -203,7 +227,7 @@ func TestValidatorRequiresDescriptorArrayStride(t *testing.T) {
 func TestValidatorRejectsWorkgroupArrayStride(t *testing.T) {
 	bin := compileSourceForMutation(t, `
 @workgroup(1)
-export compute arrayMemory[i](out: buffer<u32>) {
+export function arrayMemory[i](out: buffer<u32>) {
   workgroup scratch: u32[4];
   scratch[0] = 7;
   out = scratch[0];
@@ -220,7 +244,7 @@ func TestValidatorRejectsWorkgroupMemberOffsets(t *testing.T) {
 	bin := compileSourceForMutation(t, `
 type Pair = { x: u32, y: u32 };
 @workgroup(1)
-export compute structMemory[i](out: buffer<u32>) {
+export function structMemory[i](out: buffer<u32>) {
   workgroup pair: Pair;
   pair = { x: 7, y: 9 };
   const copy: Pair = pair;

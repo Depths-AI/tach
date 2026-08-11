@@ -3,7 +3,7 @@ type Counters = {
 };
 
 @workgroup(64)
-export compute accumulate[i](counters: buffer<Counters>) {
+export function accumulate[i](counters: buffer<Counters>) {
   workgroup scratch: atomic<u32>[64];
   const lane = i % 64;
 

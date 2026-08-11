@@ -8,6 +8,11 @@ lifetime, synchronization, and errors.
 The source language is described in [the language reference](language.md).
 Core IR and optimization are described in [the IR reference](ir.md).
 
+Normal TypeScript applications do not implement this contract: generated
+modules and `@depths/tach` do it. Read the early sections when debugging data
+shape or launch size. Read the complete document when building another host
+runtime or consuming SPIR-V directly.
+
 ## 1. What the ABI covers
 
 The ABI has four connected parts:
@@ -44,8 +49,8 @@ on private names.
 
 ## 3. Resource identity and bindings
 
-Every compute parameter becomes one module resource in deterministic
-declaration traversal order. A compute function records the positional mapping
+Every kernel parameter becomes one module resource in deterministic
+declaration traversal order. A kernel records the positional mapping
 from its source parameters to those module resources.
 
 For module resource index `N`, both current targets use:
@@ -113,7 +118,7 @@ computes a separate physical layout with 32-bit checked size arithmetic.
 | `i32x3`, `u32x3`, `f32x3` | 12 | 16 |
 | `i32x4`, `u32x4`, `f32x4` | 16 | 16 |
 
-`bool` is a control/value type and has no host ABI representation.
+`boolean` is a control/value type and has no host ABI representation.
 
 ### Structs
 

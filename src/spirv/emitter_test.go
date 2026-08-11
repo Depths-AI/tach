@@ -60,7 +60,7 @@ func TestParticlesSPIRV(t *testing.T) {
 func TestLogicalIndicesAreOptimizedAfterSPIRVBackendLowering(t *testing.T) {
 	bin := emitSource(t, "coordinates.tach", `
 @workgroup(16, 8)
-export compute coordinates[x, y](out: buffer<u32[]>) {
+export function coordinates[x, y](out: buffer<u32[]>) {
   const localX = x % 16;
   const localY = y % 8;
   const local = localY * 16 + localX;
@@ -96,7 +96,7 @@ func TestWorkgroupAggregatesHaveNoExplicitLayout(t *testing.T) {
 			name: "array",
 			source: `
 @workgroup(1)
-export compute arrayMemory[i](out: buffer<u32>) {
+export function arrayMemory[i](out: buffer<u32>) {
   workgroup scratch: u32[4];
   scratch[0] = 7;
   out = scratch[0];
@@ -107,7 +107,7 @@ export compute arrayMemory[i](out: buffer<u32>) {
 			source: `
 type Pair = { x: u32, y: u32 };
 @workgroup(1)
-export compute structMemory[i](out: buffer<u32>) {
+export function structMemory[i](out: buffer<u32>) {
   workgroup pair: Pair;
   pair = { x: 7, y: 9 };
   workgroupBarrier();
@@ -214,7 +214,7 @@ func TestSameStructCrossesHostAndWorkgroupRepresentations(t *testing.T) {
 	bin := emitSource(t, "shared-struct.tach", `
 type Pair = { x: u32, y: u32 };
 @workgroup(1)
-export compute sharedStruct[i](io: buffer<Pair>) {
+export function sharedStruct[i](io: buffer<Pair>) {
   workgroup pair: Pair;
   pair = io;
   io = pair;
@@ -278,7 +278,7 @@ export compute sharedStruct[i](io: buffer<Pair>) {
 func TestWorkgroupMemoryIsZeroInitialized(t *testing.T) {
 	bin := emitSource(t, "zero-workgroup.tach", `
 @workgroup(1)
-export compute zeroWorkgroup[i](out: buffer<u32>) {
+export function zeroWorkgroup[i](out: buffer<u32>) {
   workgroup scratch: u32;
   out = scratch;
 }`)
@@ -319,9 +319,9 @@ export compute zeroWorkgroup[i](out: buffer<u32>) {
 
 func TestHelpersRequestConstInlining(t *testing.T) {
 	bin := emitSource(t, "inline.tach", `
-fn twice(x: f32): f32 { return x + x; }
+function twice(x: f32): f32 { return x + x; }
 @workgroup(1)
-export compute useHelper[i](out: buffer<f32>) { out = twice(2.0); }
+export function useHelper[i](out: buffer<f32>) { out = twice(2.0); }
 `)
 	m, err := spirv.Decode(bin)
 	if err != nil {

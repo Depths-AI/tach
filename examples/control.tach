@@ -4,7 +4,7 @@ type Params = {
 };
 
 @workgroup(64)
-export compute transform[start](
+export function transform[start](
   data: buffer<f32[]>,
   params: uniform<Params>,
 ) {

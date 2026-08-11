@@ -484,7 +484,7 @@ func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
 		} else if raw == "false" {
 			emit(&b.typesGlobals, OpConstantFalse, tid, id)
 		} else {
-			return 0, fmt.Errorf("invalid bool constant %q", raw)
+			return 0, fmt.Errorf("invalid boolean constant %q", raw)
 		}
 	case types.I32:
 		v, err := strconv.ParseInt(raw, 10, 32)
@@ -963,6 +963,19 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		tid, _ := s.b.typeID(x.Type, typeLogical)
 		id := s.b.id()
 		emit(&s.b.functions, OpCompositeExtract, tid, id, base, uint32(x.Index))
+		s.def(x.Result, id, x.Type)
+	case *ir.VectorIndex:
+		base, err := s.value(x.Base)
+		if err != nil {
+			return err
+		}
+		index, err := s.value(x.Index)
+		if err != nil {
+			return err
+		}
+		tid, _ := s.b.typeID(x.Type, typeLogical)
+		id := s.b.id()
+		emit(&s.b.functions, OpVectorExtractDynamic, tid, id, base, index)
 		s.def(x.Result, id, x.Type)
 	case *ir.Call:
 		fid := s.b.funcIDs[x.Function]
@@ -1629,7 +1642,7 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 		return err
 	}
 	if !ce.falls || len(ce.vals) != 1 {
-		return fmt.Errorf("loop condition must yield one bool")
+		return fmt.Errorf("loop condition must yield one boolean")
 	}
 	emit(&s.b.functions, OpBranchConditional, ce.vals[0], body, merge)
 	s.terminated = true

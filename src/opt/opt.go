@@ -172,6 +172,8 @@ func loopInvariant(m *ir.Module, in ir.Instr, values map[ir.ValueID]bool, places
 		return all(x.Values)
 	case *ir.Extract:
 		return value(x.Base)
+	case *ir.VectorIndex:
+		return value(x.Base) && value(x.Index)
 	case *ir.Call:
 		return x.Result != 0 && all(x.Args)
 	case *ir.PlaceField:
@@ -607,6 +609,8 @@ func rewriteOperands(in ir.Instr, resolve func(ir.ValueID) ir.ValueID, resolvePl
 		}
 	case *ir.Extract:
 		x.Base = resolve(x.Base)
+	case *ir.VectorIndex:
+		x.Base, x.Index = resolve(x.Base), resolve(x.Index)
 	case *ir.Call:
 		for i := range x.Args {
 			x.Args[i] = resolve(x.Args[i])
@@ -681,6 +685,8 @@ func pureValueKey(m *ir.Module, in ir.Instr, resources map[ir.PlaceID]int) (valu
 		key, _ = set(8, x.Type.String(), "", x.Base)
 		key.aux = x.Index
 		return key, true
+	case *ir.VectorIndex:
+		return set(12, x.Type.String(), "", x.Base, x.Index)
 	case *ir.Call:
 		return set(9, x.Type.String(), x.Function, x.Args...)
 	case *ir.Load:
@@ -753,7 +759,7 @@ func pruneBlock(b *ir.Block, values map[ir.ValueID]int, places map[ir.PlaceID]in
 
 func isDeadRemovable(in ir.Instr) bool {
 	switch in.(type) {
-	case *ir.Const, *ir.Unary, *ir.Binary, *ir.Intrinsic, *ir.Convert, *ir.Composite, *ir.Extract, *ir.Call, *ir.Load, *ir.ArrayLength:
+	case *ir.Const, *ir.Unary, *ir.Binary, *ir.Intrinsic, *ir.Convert, *ir.Composite, *ir.Extract, *ir.VectorIndex, *ir.Call, *ir.Load, *ir.ArrayLength:
 		return true
 	default:
 		return false

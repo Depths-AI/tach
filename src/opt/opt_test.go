@@ -13,7 +13,7 @@ import (
 func TestDeadExpressionTreeIsRemoved(t *testing.T) {
 	a, err := parser.Parse("dead.tach", `
 @workgroup(1)
-export compute dead[i](out: buffer<f32[]>) {
+export function dead[i](out: buffer<f32[]>) {
   const unused = sin(2.0) * cos(3.0);
   if (i < out.length) { out[i] = 1.0; }
 }`)
@@ -40,7 +40,7 @@ export compute dead[i](out: buffer<f32[]>) {
 func TestRepeatedPureValuesAreCanonicalized(t *testing.T) {
 	a, err := parser.Parse("common.tach", `
 @workgroup(64)
-export compute common[i](out: buffer<u32[]>) {
+export function common[i](out: buffer<u32[]>) {
   const a = i + 1;
   const b = i + 1;
   if (i < out.length) { out[i] = a + b; }
@@ -68,7 +68,7 @@ func TestImmutableMemoryValuesAreCanonicalized(t *testing.T) {
 	a, err := parser.Parse("memory.tach", `
 type Params = { scale: f32 };
 @workgroup(1)
-export compute memory[i](values: buffer<f32[]>, source: buffer<f32[]>, params: uniform<Params>) {
+export function memory[i](values: buffer<f32[]>, source: buffer<f32[]>, params: uniform<Params>) {
   const scale = params.scale + params.scale;
   const length = values.length + values.length;
   const immutable = source[0] + source[0];
@@ -98,9 +98,9 @@ export compute memory[i](values: buffer<f32[]>, source: buffer<f32[]>, params: u
 
 func TestUnusedPureMemoryAndCallResultsAreRemoved(t *testing.T) {
 	a, err := parser.Parse("dead-memory.tach", `
-fn square(x: f32): f32 { return x * x; }
+function square(x: f32): f32 { return x * x; }
 @workgroup(1)
-export compute dead[i](out: buffer<f32[]>) {
+export function dead[i](out: buffer<f32[]>) {
   const count = out.length;
   const value = out[0];
   square(value);
@@ -128,7 +128,7 @@ func TestLoopBufferValuesAreLazilyPromotedToRegisterCarriers(t *testing.T) {
 	a, err := parser.Parse("loop-memory.tach", `
 type Params = { dt: f32, count: u32, steps: u32 };
 @workgroup(64)
-export compute integrate[i](
+export function integrate[i](
   positions: buffer<f32[]>,
   velocities: buffer<f32[]>,
   params: uniform<Params>,
@@ -192,7 +192,7 @@ export compute integrate[i](
 func TestLoopBufferPromotionStopsAtSynchronization(t *testing.T) {
 	a, err := parser.Parse("synchronized-loop.tach", `
 @workgroup(4)
-export compute synchronized[i](data: buffer<u32[]>, steps: uniform<u32>) {
+export function synchronized[i](data: buffer<u32[]>, steps: uniform<u32>) {
   for (let step = 0; step < steps; step++) {
     data[i % 4] += 1;
     workgroupBarrier();

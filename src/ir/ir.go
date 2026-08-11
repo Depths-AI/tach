@@ -164,6 +164,19 @@ func (x *Extract) SpanOf() source.Span     { return x.Span }
 func (x *Extract) ResultValue() ValueID    { return x.Result }
 func (x *Extract) ResultType() *types.Type { return x.Type }
 
+type VectorIndex struct {
+	Result ValueID
+	Type   *types.Type
+	Base   ValueID
+	Index  ValueID
+	Span   source.Span
+}
+
+func (*VectorIndex) instrNode()                {}
+func (x *VectorIndex) SpanOf() source.Span     { return x.Span }
+func (x *VectorIndex) ResultValue() ValueID    { return x.Result }
+func (x *VectorIndex) ResultType() *types.Type { return x.Type }
+
 type Call struct {
 	Result   ValueID
 	Type     *types.Type
@@ -577,6 +590,8 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 			fmt.Fprintf(b, "%s%%%d = composite %s %v\n", ind, x.Result, x.Type, x.Values)
 		case *Extract:
 			fmt.Fprintf(b, "%s%%%d = extract %%%d[%d] : %s\n", ind, x.Result, x.Base, x.Index, x.Type)
+		case *VectorIndex:
+			fmt.Fprintf(b, "%s%%%d = vector_index %%%d, %%%d : %s\n", ind, x.Result, x.Base, x.Index, x.Type)
 		case *Call:
 			fmt.Fprintf(b, "%s%%%d = call @%s%v : %s\n", ind, x.Result, x.Function, x.Args, x.Type)
 		case *Intrinsic:

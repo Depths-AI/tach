@@ -300,7 +300,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("unary %s type mismatch %s -> %s", x.Op, t, x.Type)
 			}
 			if x.Op == "!" && !types.Equal(t, types.TBool) {
-				return e, fmt.Errorf("! requires bool")
+				return e, fmt.Errorf("! requires boolean")
 			}
 			if x.Op == "-" && !types.IsSignedNumeric(t) {
 				return e, fmt.Errorf("unary - requires signed/float numeric")
@@ -397,6 +397,27 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			if !types.Equal(et, x.Type) {
 				return e, fmt.Errorf("extract type %s, want %s", x.Type, et)
+			}
+			if err := defVal(x.Result, x.Type); err != nil {
+				return e, err
+			}
+		case *VectorIndex:
+			bt, err := val(x.Base)
+			if err != nil {
+				return e, err
+			}
+			it, err := val(x.Index)
+			if err != nil {
+				return e, err
+			}
+			if bt.Kind != types.Vector {
+				return e, fmt.Errorf("vector index base is %s", bt)
+			}
+			if !types.IsInteger(it) {
+				return e, fmt.Errorf("vector index is %s, want i32 or u32", it)
+			}
+			if !types.Equal(x.Type, bt.Elem) {
+				return e, fmt.Errorf("vector index type %s, want %s", x.Type, bt.Elem)
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
 				return e, err
@@ -673,7 +694,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			cy, ok := x.Cond.Term.(*Yield)
 			if !ok || len(cy.Values) != 1 || !types.Equal(ce.values[cy.Values[0]], types.TBool) {
-				return e, fmt.Errorf("loop condition must yield one bool")
+				return e, fmt.Errorf("loop condition must yield one boolean")
 			}
 			be, err := verifyBlock(m, f, x.Body, le.clone(), fmap, "continue")
 			if err != nil {
@@ -876,7 +897,7 @@ func verifyBinary(x *Binary, l, r *types.Type) error {
 		}
 	case "&&", "||":
 		if !types.Equal(l, types.TBool) || !types.Equal(r, types.TBool) || !types.Equal(x.Type, types.TBool) {
-			return fmt.Errorf("logical op requires bools")
+			return fmt.Errorf("logical op requires booleans")
 		}
 	case "&", "|", "^":
 		if !types.Equal(l, r) || !types.Equal(x.Type, l) || !types.IsIntegerLike(l) {

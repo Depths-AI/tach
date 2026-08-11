@@ -54,7 +54,7 @@ func TestValidatorRejectsReservedDoubleUnderscoreIdentifier(t *testing.T) {
 func TestRuntimeArrayWrapperKeepsNaturalAlignment(t *testing.T) {
 	a, err := parser.Parse("runtime.tach", `
 @workgroup(1)
-export compute clear[i](data: buffer<u32[]>) {
+export function clear[i](data: buffer<u32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if err != nil {
@@ -76,7 +76,7 @@ export compute clear[i](data: buffer<u32[]>) {
 func TestLogicalIndicesAreOptimizedAfterWGSLBackendLowering(t *testing.T) {
 	a, err := parser.Parse("coordinates.tach", `
 @workgroup(16, 8)
-export compute coordinates[x, y](out: buffer<u32[]>) {
+export function coordinates[x, y](out: buffer<u32[]>) {
   const localX = x % 16;
   const localY = y % 8;
   const local = localY * 16 + localX;

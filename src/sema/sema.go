@@ -80,7 +80,7 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 
 func CheckAndLower(m *ast.Module) (*ir.Module, error) {
 	c := &Checker{ast: m, mod: &ir.Module{}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}}
-	for _, n := range []string{"void", "bool", "i32", "u32", "f32", "f32x2", "f32x3", "f32x4", "u32x2", "u32x3", "u32x4", "i32x2", "i32x3", "i32x4"} {
+	for _, n := range []string{"void", "boolean", "i32", "u32", "f32", "f32x2", "f32x3", "f32x4", "u32x2", "u32x3", "u32x4", "i32x2", "i32x3", "i32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
 	if err := c.collectTypes(); err != nil {
@@ -245,7 +245,7 @@ func (c *Checker) collectFunctions() error {
 			c.funcs[x.Name] = sig
 		case *ast.ComputeDecl:
 			if isReservedCallable(x.Name) {
-				return diag(x.Span, "compute name %q is reserved by Tach", x.Name)
+				return diag(x.Span, "kernel name %q is reserved by Tach", x.Name)
 			}
 			if _, ok := c.funcs[x.Name]; ok {
 				return diag(x.Span, "function %q is already defined", x.Name)
@@ -288,7 +288,7 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 		return types.Array(e, uint32(n)), nil
 	case *ast.GenericType:
 		if t.Name == "uniform" || t.Name == "buffer" {
-			return nil, diag(t.Span, "resource wrapper %s is only valid in compute parameter position", t.Name)
+			return nil, diag(t.Span, "resource wrapper %s is only valid in kernel parameter position", t.Name)
 		}
 		if t.Name == "atomic" {
 			if len(t.Args) != 1 {
@@ -392,7 +392,7 @@ func (c *Checker) lowerHelper(d *ast.FuncDecl) error {
 }
 func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	if len(d.Indices) < 1 || len(d.Indices) > 3 {
-		return diag(d.Span, "compute kernel %s requires 1 to 3 logical indices", d.Name)
+		return diag(d.Span, "kernel %s requires 1 to 3 logical indices", d.Name)
 	}
 	wg, err := workgroup(d.Attrs, len(d.Indices))
 	if err != nil {
@@ -427,7 +427,7 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 		f.ResourceParams = append(f.ResourceParams, ir.ResourceParam{Name: p.Name, Resource: idx})
 	}
 	if !hasBuffer {
-		return diag(d.Span, "compute kernel %s requires at least one buffer parameter", d.Name)
+		return diag(d.Span, "kernel %s requires at least one buffer parameter", d.Name)
 	}
 	if err := c.lowerBlock(b, d.Body, e, "function"); err != nil {
 		return err
@@ -441,7 +441,7 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 func (c *Checker) resourceType(te ast.TypeExpr) (ir.ResourceKind, *types.Type, ir.Access, error) {
 	g, ok := te.(*ast.GenericType)
 	if !ok || (g.Name != "uniform" && g.Name != "buffer") {
-		return 0, nil, 0, diag(te.GetSpan(), "compute parameters must be uniform<T> or buffer<T>")
+		return 0, nil, 0, diag(te.GetSpan(), "kernel parameters must be uniform<T> or buffer<T>")
 	}
 	if len(g.Args) != 1 {
 		return 0, nil, 0, diag(g.Span, "%s<T> takes exactly one type argument", g.Name)
@@ -477,7 +477,7 @@ func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
 	found := false
 	for _, a := range attrs {
 		if a.Name != "workgroup" {
-			return out, diag(a.Span, "unknown compute attribute @%s", a.Name)
+			return out, diag(a.Span, "unknown kernel attribute @%s", a.Name)
 		}
 		if found {
 			return out, diag(a.Span, "duplicate @workgroup")
@@ -548,7 +548,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 	switch x := s.(type) {
 	case *ast.WorkgroupStmt:
 		if !b.fn.Compute {
-			return diag(x.Span, "workgroup variables are only valid inside compute functions")
+			return diag(x.Span, "workgroup variables are only valid inside kernels")
 		}
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
@@ -760,7 +760,7 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "if condition is %s, want bool", ct)
+		return diag(x.Cond.GetSpan(), "if condition is %s, want boolean", ct)
 	}
 	names := carriedNames([]*ast.BlockStmt{x.Then, x.Else}, e)
 	thenBlock := &ir.Block{}
@@ -835,7 +835,7 @@ func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "while condition is %s, want bool", ct)
+		return diag(x.Cond.GetSpan(), "while condition is %s, want boolean", ct)
 	}
 	condBlock.Term = &ir.Yield{Values: []ir.ValueID{cv}}
 	bodyBlock := &ir.Block{}
@@ -899,7 +899,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		return c.lowerNumber(b, v, expected)
 	case *ast.BoolExpr:
 		if expected != nil && !types.Equal(expected, types.TBool) {
-			return 0, nil, diag(v.Span, "bool literal cannot be used as %s", expected)
+			return 0, nil, diag(v.Span, "boolean literal cannot be used as %s", expected)
 		}
 		id := b.value()
 		raw := "false"
@@ -980,13 +980,28 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		}
 		return 0, nil, diag(v.Span, "member access on %s", bt)
 	case *ast.IndexExpr:
-		p, pt, err := c.lowerPlace(b, e, v)
+		if p, pt, err := c.lowerPlace(b, e, v); err == nil {
+			id := b.value()
+			b.emit(&ir.Load{Result: id, Type: pt, Place: p, Span: v.Span})
+			return id, pt, nil
+		}
+		base, bt, err := c.lowerExpr(b, e, v.Base, nil)
 		if err != nil {
 			return 0, nil, err
 		}
-		id := b.value()
-		b.emit(&ir.Load{Result: id, Type: pt, Place: p, Span: v.Span})
-		return id, pt, nil
+		if bt.Kind != types.Vector {
+			return 0, nil, diag(v.Span, "indexing a value requires a vector, got %s", bt)
+		}
+		index, it, err := c.lowerExpr(b, e, v.Index, types.TU32)
+		if err != nil {
+			return 0, nil, err
+		}
+		if !types.IsInteger(it) {
+			return 0, nil, diag(v.Index.GetSpan(), "vector index must be i32 or u32, got %s", it)
+		}
+		result := b.value()
+		b.emit(&ir.VectorIndex{Result: result, Type: bt.Elem, Base: base, Index: index, Span: v.Span})
+		return result, bt.Elem, nil
 	case *ast.StructLiteralExpr:
 		if expected == nil || expected.Kind != types.Struct {
 			return 0, nil, diag(v.Span, "struct literal requires a contextual struct type")
@@ -1041,7 +1056,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return 0, nil, err
 		}
 		if v.Op == "!" && !types.Equal(t, types.TBool) {
-			return 0, nil, diag(v.Span, "! requires bool")
+			return 0, nil, diag(v.Span, "! requires boolean")
 		}
 		if v.Op == "-" && !types.IsSignedNumeric(t) {
 			return 0, nil, diag(v.Span, "unary - requires i32/f32 or a vector of them")
@@ -1063,7 +1078,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return 0, nil, err
 		}
 		if !types.Equal(ct, types.TBool) {
-			return 0, nil, diag(v.Cond.GetSpan(), "conditional expression requires bool condition, got %s", ct)
+			return 0, nil, diag(v.Cond.GetSpan(), "conditional expression requires boolean condition, got %s", ct)
 		}
 		thenBlock := &ir.Block{}
 		tb := b.child(thenBlock)
@@ -1169,7 +1184,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 		return 0, nil, err
 	}
 	if !types.Equal(lt, types.TBool) {
-		return 0, nil, diag(x.Left.GetSpan(), "logical operand is %s, want bool", lt)
+		return 0, nil, diag(x.Left.GetSpan(), "logical operand is %s, want boolean", lt)
 	}
 	then := &ir.Block{}
 	tb := b.child(then)
@@ -1181,7 +1196,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, err
 		}
 		if !types.Equal(rt, types.TBool) {
-			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
+			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want boolean", rt)
 		}
 		then.Term = &ir.Yield{Values: []ir.ValueID{rv}}
 		id, _, err := c.lowerExpr(eb, e.clone(), &ast.BoolExpr{Value: false, Span: x.Span}, types.TBool)
@@ -1200,7 +1215,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, err
 		}
 		if !types.Equal(rt, types.TBool) {
-			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
+			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want boolean", rt)
 		}
 		els.Term = &ir.Yield{Values: []ir.ValueID{rv}}
 	}
@@ -1607,7 +1622,7 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 			return 0, nil, diag(x.Span, "%s expects no arguments", id.Name)
 		}
 		if !b.fn.Compute {
-			return 0, nil, diag(x.Span, "%s is only valid in compute functions", id.Name)
+			return 0, nil, diag(x.Span, "%s is only valid inside kernels", id.Name)
 		}
 		kind := ir.BarrierWorkgroup
 		if id.Name == "bufferBarrier" {

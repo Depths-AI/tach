@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 
 test("the showcase runs five repeated GPU workloads", async ({ page }, testInfo) => {
   const pageErrors = [];
@@ -41,8 +42,13 @@ test("the showcase runs five repeated GPU workloads", async ({ page }, testInfo)
   }
   await expect(page.locator("#benchmarks .benchmark")).toHaveCount(5);
   await expect(page.locator(gpuOnly ? ".check.gpu" : ".check.pass")).toHaveCount(5);
-  await expect(page.locator("#render-preview")).toHaveJSProperty("width", 1920);
-  await expect(page.locator("#render-preview")).toHaveJSProperty("height", 1080);
+  const preview = page.locator("#render-preview");
+  await expect(preview).toHaveJSProperty("width", 1920);
+  await expect(preview).toHaveJSProperty("height", 1080);
+  const screenshot = testInfo.outputPath("procedural-scene.png");
+  const png = await preview.evaluate((canvas) => canvas.toDataURL("image/png"));
+  await writeFile(screenshot, png.slice(png.indexOf(",") + 1), "base64");
+  await testInfo.attach("procedural-scene", { path: screenshot, contentType: "image/png" });
   await expect(page.locator("#status")).toContainText(`${gpuOnly ? "Measured" : "Verified"} 5 benchmarks`);
   expect(pageErrors).toEqual([]);
   if (full) console.table(results.map(({ name, gpuMs, gpuSamplesMs, cpuMs, speedup, gpuRate, rateUnit }) => ({

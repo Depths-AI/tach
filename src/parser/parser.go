@@ -67,7 +67,7 @@ func (p *Parser) module() (*ast.Module, error) {
 				return nil, err
 			}
 			m.Decls = append(m.Decls, d)
-		case p.text("fn"):
+		case p.text("function"):
 			if len(attrs) > 0 {
 				return nil, p.err(p.cur(), "attributes are not supported on helper functions")
 			}
@@ -83,7 +83,7 @@ func (p *Parser) module() (*ast.Module, error) {
 			}
 			m.Decls = append(m.Decls, d)
 		default:
-			return nil, p.err(p.cur(), "expected type, fn, or export compute declaration")
+			return nil, p.err(p.cur(), "expected type, function, or export function declaration")
 		}
 	}
 	return m, nil
@@ -219,7 +219,7 @@ func (p *Parser) funcDecl() (*ast.FuncDecl, error) {
 }
 func (p *Parser) computeDecl(attrs []ast.Attribute) (*ast.ComputeDecl, error) {
 	start := p.take().Span
-	if _, err := p.expectText("compute"); err != nil {
+	if _, err := p.expectText("function"); err != nil {
 		return nil, err
 	}
 	n, err := p.expect(lexer.Ident)

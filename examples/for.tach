@@ -1,10 +1,12 @@
-export compute reduceLanes[i](data: buffer<u32[]>) {
+export function reduceLanes[i](data: buffer<u32[]>) {
   const base = i * 4;
+  if (base + 3 >= data.length) {
+    return;
+  }
+  const values = u32x4(data[base], data[base + 1], data[base + 2], data[base + 3]);
   let sum = 0;
   for (let lane = 0; lane < 4; lane++) {
-    sum += data[base + lane];
+    sum += values[lane];
   }
-  if (i < data.length) {
-    data[i] = sum;
-  }
+  data[i] = sum;
 }

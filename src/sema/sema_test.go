@@ -36,9 +36,9 @@ func TestParticlesEndToIR(t *testing.T) {
 func TestDuplicateComputeParameterNameRejected(t *testing.T) {
 	m, err := parser.Parse("dup-param.tach", `
 @workgroup(1)
-export compute first[i](shared: buffer<u32[]>) { }
+export function first[i](shared: buffer<u32[]>) { }
 @workgroup(1)
-export compute second[i](
+export function second[i](
   shared: buffer<u32[]>,
   shared: buffer<u32[]>
 ) { }
@@ -55,7 +55,7 @@ export compute second[i](
 func TestComputeKernelRequiresBuffer(t *testing.T) {
 	m, err := parser.Parse("uniform-only.tach", `
 @workgroup(1)
-export compute invisible[i](params: uniform<u32>) { }
+export function invisible[i](params: uniform<u32>) { }
 `)
 	if err != nil {
 		t.Fatal(err)

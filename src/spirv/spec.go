@@ -44,6 +44,7 @@ const (
 	OpArrayLength          Op = 68
 	OpDecorate             Op = 71
 	OpMemberDecorate       Op = 72
+	OpVectorExtractDynamic Op = 77
 	OpCompositeConstruct   Op = 80
 	OpCompositeExtract     Op = 81
 	OpConvertFToU          Op = 109
@@ -221,7 +222,8 @@ var opNames = map[Op]string{
 	OpFunctionCall: "OpFunctionCall", OpVariable: "OpVariable", OpLoad: "OpLoad", OpStore: "OpStore",
 	OpAccessChain: "OpAccessChain", OpArrayLength: "OpArrayLength", OpDecorate: "OpDecorate",
 	OpMemberDecorate: "OpMemberDecorate", OpCompositeConstruct: "OpCompositeConstruct",
-	OpCompositeExtract: "OpCompositeExtract", OpConvertFToU: "OpConvertFToU", OpConvertFToS: "OpConvertFToS",
+	OpVectorExtractDynamic: "OpVectorExtractDynamic", OpCompositeExtract: "OpCompositeExtract",
+	OpConvertFToU: "OpConvertFToU", OpConvertFToS: "OpConvertFToS",
 	OpConvertSToF: "OpConvertSToF", OpConvertUToF: "OpConvertUToF", OpBitcast: "OpBitcast",
 	OpSNegate: "OpSNegate", OpFNegate: "OpFNegate", OpIAdd: "OpIAdd", OpFAdd: "OpFAdd",
 	OpISub: "OpISub", OpFSub: "OpFSub", OpIMul: "OpIMul", OpFMul: "OpFMul", OpUDiv: "OpUDiv",

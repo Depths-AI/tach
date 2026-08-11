@@ -8,12 +8,17 @@ WGSL syntax, SPIR-V opcodes, or backend binding coordinates.
 The `.tir` artifact and `tach ir` command print this IR for inspection. Textual
 IR is diagnostic output, not another accepted input language.
 
+Kernel authors do not need to learn this notation. When debugging a dump,
+remember two marks: `%3` is an immutable value and `&p3` is a path to memory.
+The rest of this guide explains why that distinction makes control flow,
+optimization, and two very different shader backends fit one semantic model.
+
 ## 1. From source to Core IR
 
 Consider a complete kernel:
 
 ```tach
-export compute scale[i](
+export function scale[i](
   data: buffer<f32[]>,
   factor: uniform<f32>,
 ) {
@@ -32,7 +37,7 @@ resource @1 factor: uniform<f32>
 compute @scale[i=%1] workgroup(256,1,1) {
   &p1 = place.resource @0 : f32[]
   %2 = array_length &p1
-  %3 = < %1, %2 : bool
+  %3 = < %1, %2 : boolean
   if %3 -> [] {
     &p3 = place.index &p1, %1 : f32
     %4 = load &p3 : f32
@@ -84,7 +89,7 @@ access     read | mutable
 source span
 ```
 
-Resource order is module-global and deterministic. A compute function keeps a
+Resource order is module-global and deterministic. A kernel keeps a
 `ResourceParams` list mapping each source parameter name and position to that
 module resource. Physical bindings and byte layout are derived later by the
 ABI layer; neither is encoded in the logical IR type.
@@ -95,7 +100,7 @@ effects. The verifier rejects stores through read-only roots.
 ### Functions
 
 A helper function records typed value parameters, a result type, and a body.
-A compute function instead records:
+A kernel instead records:
 
 - one to three logical index parameters;
 - its three-axis workgroup size;
@@ -128,6 +133,7 @@ Value-producing instructions are:
 | `Convert` | explicit numeric conversion |
 | `Composite` | vector or struct assembly |
 | `Extract` | constant field or lane extraction from a value |
+| `VectorIndex` | dynamic lane extraction from a vector value |
 | `Call` | direct pure helper call |
 | `Intrinsic` | backend-independent math operation |
 | `Load` | read a value from a place |
@@ -170,7 +176,7 @@ A block is an instruction list followed by exactly one terminator:
 |---|---|
 | `Yield` | return values from an `if` branch or loop condition region |
 | `Continue` | supply the next values of all loop-carried parameters |
-| `Return` | leave a helper or compute function |
+| `Return` | leave a helper or kernel |
 | `Unreachable` | compiler-owned terminal state |
 
 Child regions cannot fall through accidentally; their terminator states how
@@ -215,7 +221,7 @@ loop params=[(%index <- %initialIndex), (%sum <- %initialSum)] {
 }
 ```
 
-The condition yields one `bool`. The body's `Continue` supplies one next value
+The condition yields one `boolean`. The body's `Continue` supplies one next value
 for every parameter. When the condition is false, the current parameters
 become the loop results. Source `while` and `for` both lower to this single
 form.
@@ -236,7 +242,7 @@ source statements and loops without a continuing path.
 Core IR uses resolved logical Tach types:
 
 ```text
-bool, i32, u32, f32
+boolean, i32, u32, f32
 numeric vectors with 2, 3, or 4 lanes
 named structs
 atomic<i32>, atomic<u32>
@@ -376,7 +382,7 @@ After Core optimization, each backend creates a private lowered program. The
 current shared backend analysis begins with every logical index as a global
 coordinate and then recognizes two exact Tach expressions:
 
-```tach
+```text
 const localX = x % workgroupWidth;
 const local = localX + localY * workgroupWidth
             + localZ * workgroupWidth * workgroupHeight;

@@ -1,6 +1,6 @@
 # Tach TypeScript showcase benchmark report
 
-Generated: 2026-08-11T02:37:34.471Z
+Generated: 2026-08-11T09:35:26.287Z
 
 ## Summary
 
@@ -8,8 +8,8 @@ Generated: 2026-08-11T02:37:34.471Z
 - Profile: **full**
 - Workloads: 5/5
 - Correctness: **VERIFIED**
-- Geometric-mean acceleration: **175.14x**
-- Harness duration: 63.45 s
+- Geometric-mean acceleration: **188.72x**
+- Harness duration: 76.42 s
 - Adapter: `amd · rdna-2`
 - Host: `win32/x64`, Node `v24.14.1`
 
@@ -25,8 +25,8 @@ Generated: 2026-08-11T02:37:34.471Z
 
 | Workload | Problem | Samples | Dispatches/batch | WebGPU median | TypeScript median | Acceleration | WebGPU throughput | Correctness |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Particle integration | 262,144 particles × 128 fused steps | 5 | 1 | 4.5 ms | 384.5 ms | **85.44x** | 29826.16 million component updates/s | PASS: maximum absolute error 1.63e-9 |
-| Mandelbrot escape | 768 × 768, limit 192 × 4 renders | 5 | 4 | 7.5 ms | 1.15 s | **153.96x** | 314.57 million pixel-dispatches/s | PASS: 99.925% within one iteration; maximum difference 160 |
-| Tiled matrix multiply | 256 × 256 matrices × 4 products | 5 | 4 | 5.7 ms | 400.7 ms | **70.30x** | 23.55 GFLOP/s | PASS: maximum absolute error 0.00e+0 |
-| Black–Scholes pricing | 1,048,576 options × 8 valuations | 5 | 8 | 6.4 ms | 1.50 s | **234.91x** | 1310.72 million option valuations/s | PASS: maximum absolute error 3.39e-5 |
-| Procedural RGBA composition | 1920 × 1080 RGBA × 3 frames | 5 | 3 | 8.6 ms | 6.52 s | **758.50x** | 723.35 million RGBA pixels/s | PASS: mean RGB error 0.000; 100.000% of pixels within 8; maximum 1 |
+| Particle integration | 262,144 particles × 128 fused steps | 5 | 1 | 4.9 ms | 607.3 ms | **123.94x** | 27391.37 million component updates/s | PASS: maximum absolute error 1.86e-9 |
+| Mandelbrot escape | 768 × 768, limit 192 × 4 renders | 5 | 4 | 8.8 ms | 1.43 s | **161.97x** | 268.10 million pixel-dispatches/s | PASS: 99.925% within one iteration; maximum difference 160 |
+| Tiled matrix multiply | 256 × 256 matrices × 4 products | 5 | 4 | 5.9 ms | 530.8 ms | **89.97x** | 22.75 GFLOP/s | PASS: maximum absolute error 0.00e+0 |
+| Black–Scholes pricing | 1,048,576 options × 8 valuations | 5 | 8 | 8.4 ms | 1.87 s | **222.57x** | 998.64 million option valuations/s | PASS: maximum absolute error 3.39e-5 |
+| Procedural RGBA composition | 1920 × 1080 RGBA × 3 frames | 5 | 3 | 13.4 ms | 7.98 s | **595.59x** | 464.24 million RGBA pixels/s | PASS: mean RGB error 0.000; 100.000% of pixels within 8; maximum 1 |

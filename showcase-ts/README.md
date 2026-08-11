@@ -101,6 +101,12 @@ Markdown report records the adapter, workload sizes, dispatch counts, medians,
 speedups, throughput, and correctness results. The full report is tracked as a
 hardware baseline so later optimization work can be compared directly.
 
+Every Playwright run also exports the procedural canvas from its exact
+1920-by-1080 backing store as `procedural-scene.png` and attaches it to the
+Playwright result. The PNG and HTML report are ignored local artifacts: use
+them for qualitative inspection, while the per-pixel comparison remains the
+correctness assertion.
+
 `npm test --workspace=@tach/showcase-ts` runs a smaller three-sample profile for
 regression testing and writes the same report shape to the ignored
 `showcase-ts/test-report.md`, leaving the tracked full benchmark untouched.

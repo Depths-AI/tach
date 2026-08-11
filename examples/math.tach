@@ -1,4 +1,4 @@
-export compute math[i](out: buffer<f32x4[]>) {
+export function math[i](out: buffer<f32x4[]>) {
   if (i < out.length) {
     const a = f32x3(f32(i) + 1.0, 2.0, 3.0);
     const b = normalize(a);

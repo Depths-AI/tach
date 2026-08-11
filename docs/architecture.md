@@ -10,6 +10,18 @@ stage. For exact source rules, read [the language reference](language.md). For
 the internal representation, read [the Core IR reference](ir.md). For byte and
 host contracts, read [the ABI reference](abi.md).
 
+You do not need this document to write a kernel. Its shortest useful model is:
+
+```text
+front end owns meaning -> Core IR owns portable semantics
+                       -> each backend owns target representation
+                       -> layout and bindings own the host boundary
+                       -> the runtime owns WebGPU lifetime and submission
+```
+
+When a behavior appears in two targets or two host paths, move upward to the
+first shared owner rather than patching both consumers.
+
 ## 1. Design goals
 
 Tach is organized around eight invariants:
@@ -220,7 +232,7 @@ That one calculation drives:
 spelling in WGSL, SPIR-V, metadata, JavaScript, and TypeScript. Only private
 compiler symbols are mangled.
 
-Every compute parameter becomes one deterministic module resource. Its module
+Every kernel parameter becomes one deterministic module resource. Its module
 index maps to group/descriptor set `0` and to the same binding number in both
 backends. Source has no binding annotation and host code does not allocate
 bindings itself.
@@ -412,8 +424,7 @@ Tests are layered to match ownership:
   tests cover local contracts and rejection cases;
 - mutation tests corrupt emitted SPIR-V and require the validator to reject it;
 - compiler tests assert cross-artifact results;
-- compiler tests compile every complete exported-kernel `tach` fence in these
-  six maintained guides;
+- compiler tests compile every `tach` fence in these six maintained guides;
 - `browser-test` compiles and runs the example corpus through generated
   TypeScript/WebGPU bindings;
 - `spirv-test` compiles the same corpus, validates it externally, creates a

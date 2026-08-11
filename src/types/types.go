@@ -36,7 +36,7 @@ type Field struct {
 
 var (
 	TVoid = &Type{Kind: Void, Name: "void"}
-	TBool = &Type{Kind: Bool, Name: "bool"}
+	TBool = &Type{Kind: Bool, Name: "boolean"}
 	TI32  = &Type{Kind: I32, Name: "i32"}
 	TU32  = &Type{Kind: U32, Name: "u32"}
 	TF32  = &Type{Kind: F32, Name: "f32"}
@@ -214,7 +214,7 @@ func ParseBuiltin(name string) *Type {
 	switch name {
 	case "void":
 		return TVoid
-	case "bool":
+	case "boolean":
 		return TBool
 	case "i32":
 		return TI32

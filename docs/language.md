@@ -1,10 +1,16 @@
-# Tach language reference
+# The Tach language
 
-This document is the source-language contract implemented by the current Tach
-compiler. It is written for kernel authors; target encodings and host byte
-layout are covered separately in [the ABI reference](abi.md).
+This guide teaches the complete Tach source language. The first half is for
+writing normal kernels. The second half is a reference for advanced parallel
+memory, exact operator rules, and grammar.
 
-## 1. A complete kernel
+Tach deliberately resembles TypeScript, but it is not TypeScript executed on a
+GPU. It is a small GPU language with TypeScript-shaped declarations, control
+flow, objects, and expressions. Its compiler owns the hardware mapping.
+
+## 1. One useful program
+
+Start with a particle update:
 
 ```tach
 type Params = {
@@ -17,193 +23,182 @@ type Particle = {
   velocity: f32x4,
 };
 
-fn integrateParticle(p: Particle, dt: f32): Particle {
+function advance(particle: Particle, dt: f32): Particle {
   return {
-    position: p.position + p.velocity * dt,
-    velocity: p.velocity,
+    position: particle.position + particle.velocity * dt,
+    velocity: particle.velocity,
   };
 }
 
-export compute integrate[i](
+export function integrate[i](
   particles: buffer<Particle[]>,
   params: uniform<Params>,
 ) {
-  if (i >= params.count) {
+  if (i >= params.count || i >= particles.length) {
     return;
   }
-  particles[i] = integrateParticle(particles[i], params.dt);
+
+  particles[i] = advance(particles[i], params.dt);
 }
 ```
 
-A module may contain named struct types, value-only helper functions, and
-exported compute kernels. Declaration order does not restrict helper calls or
-type references: semantic analysis first collects declarations, then resolves
-and lowers them. Recursive value types and recursive function call cycles are
-rejected.
+Read it as ordinary typed code:
 
-## 2. Lexical form
+- `type` declares object-shaped value types.
+- `function` declares a private helper.
+- `export function` declares a host-callable GPU kernel.
+- `[i]` names the logical coordinate for one invocation.
+- `buffer<Particle[]>` is an array in GPU storage.
+- `uniform<Params>` is a small read-only input.
+- each invocation checks its coordinate and updates one particle.
 
-Identifiers begin with a Unicode letter or `_` and continue with Unicode
-letters, digits, or `_`. Public type, kernel, and resource-parameter names must
-also be portable JavaScript/TypeScript identifiers because every successful
-compilation emits host bindings. Compiler builtin names are reserved as call
-targets.
+The brackets after a kernel name are Tach's one deliberate extension to a
+normal function declaration. They keep GPU coordinates visible without
+pretending that the host passes them or exposing a target invocation object.
 
-Whitespace is insignificant. Tach supports line comments and nested block
-comments:
+## 2. Modules and functions
 
-```tach
-// One line.
+A `.tach` file may contain three declarations:
 
-/* A block comment.
-   /* Nested blocks are valid. */
-*/
+```text
+type Name = { ... };
+function helper(...) { ... }
+export function kernel[coordinates](...) { ... }
 ```
 
-Statements end in `;`. A trailing comma is accepted in parameter and
-struct-literal lists. Type fields may be separated by `,` or `;`, including a
-trailing separator; the examples use commas consistently.
+Declaration order does not matter. A function may call a helper written later,
+and a type may refer to another type written later. Recursive value types and
+recursive function calls are rejected.
 
-## 3. Module declarations
+### Helpers
 
-### Struct declarations
-
-```tach
-type Pair = {
-  x: f32,
-  y: f32,
-};
-```
-
-Field names must be unique. Structs are value types: recursive structs are not
-allowed. A runtime array may occur only once, as the final field, and its
-element must have a fixed footprint:
+Helpers operate only on values:
 
 ```tach
-type Samples = {
-  count: u32,
-  values: f32[],
-};
-```
-
-Such a runtime-tailed struct can be addressed in a buffer but cannot be loaded,
-constructed, passed, or returned as one value.
-
-### Helper functions
-
-```tach
-fn square(x: f32): f32 {
-  return x * x;
+function square(value: f32): f32 {
+  return value * value;
 }
 
-fn observe(x: f32) {
-  const ignored = x;
+function observe(value: f32) {
+  const ignored = value;
 }
 ```
 
-Parameters and results must be constructible value types. An omitted result
-annotation means `void`. A non-void helper must return on every path; a void
-helper receives an implicit final `return` when needed.
+Parameters are typed. A returned value needs an explicit result type. Omitting
+the result type means `void`. Every path through a non-void helper must return.
 
-Helpers cannot receive resources, declare workgroup memory, use barriers, or
-call a compute entry point. They can call other helpers, but recursion is
-rejected. Those rules make helpers pure with respect to GPU-visible state.
+Helpers may call other helpers and math intrinsics. They cannot receive
+buffers or uniforms, touch workgroup memory, use barriers, or call a kernel.
+That makes a helper a predictable value computation on every backend.
 
-### Compute kernels
+### Kernels
+
+A kernel is always an exported function:
 
 ```tach
-export compute clear[i](values: buffer<u32[]>) {
+export function clear[i](values: buffer<u32[]>) {
   if (i < values.length) {
     values[i] = 0;
   }
 }
 ```
 
-Every compute kernel:
+Every kernel:
 
-- is exported;
-- declares one, two, or three logical coordinate names in `[...]`;
+- has one, two, or three coordinate names in `[...]`;
 - receives only `buffer<T>` and `uniform<T>` parameters;
-- has at least one buffer parameter; and
-- returns `void`.
+- has at least one buffer;
+- returns no value; and
+- is called only by generated host code, never by another Tach function.
 
-Compute entry points cannot be called from Tach code.
+## 3. Coordinates and launch size
 
-## 4. Logical coordinates and workgroups
-
-Coordinates are immutable `u32` values whose names and rank belong to the
-kernel:
+Coordinates are immutable `u32` values. Choose names that fit the problem:
 
 ```tach
-export compute line[i](out: buffer<u32[]>) {
-  if (i < out.length) {
-    out[i] = i;
+export function line[index](out: buffer<u32[]>) {
+  if (index < out.length) {
+    out[index] = index;
   }
 }
 
-export compute image[x, y](out: buffer<f32x4[]>) {
-  const pixel = y * 1920 + x;
+export function image[x, y](out: buffer<u32[]>) {
+  const width = 1920;
+  const pixel = y * width + x;
   if (pixel < out.length) {
-    out[pixel] = f32x4(0, 0, 0, 1);
+    out[pixel] = x ^ y;
   }
 }
 
-export compute volume[x, y, z](out: buffer<f32[]>) {
-  // x, y, and z are ordinary Tach values.
+export function volume[x, y, z](out: buffer<u32[]>) {
+  const index = x + y * 64 + z * 64 * 64;
+  if (index < out.length) {
+    out[index] = x + y + z;
+  }
 }
 ```
 
-The body does not see target invocation objects or provider-specific builtins.
-At dispatch time the host supplies a logical extent of exactly the same rank.
-Workgroup counts are rounded up, so edge invocations can fall outside that
-extent. Kernels must guard buffer and problem-domain bounds themselves.
+The host supplies a logical size with the same rank:
 
-When no attribute is present, rank selects a portable 256-invocation default:
+```ts
+line(out, { size: 1_000_000 })
+image(out, { size: [1920, 1080] })
+volume(out, { size: [64, 64, 64] })
+```
+
+Tach rounds the launch up to whole workgroups. Extra invocations can therefore
+exist at the edge. Check the problem boundary before indexing, as the examples
+do. Tach does not insert dynamic bounds checks.
+
+The compiler chooses these defaults:
 
 | Rank | Default workgroup |
 |---:|---:|
-| 1 | `256, 1, 1` |
-| 2 | `16, 16, 1` |
-| 3 | `8, 8, 4` |
+| 1D | `256 x 1 x 1` |
+| 2D | `16 x 16 x 1` |
+| 3D | `8 x 8 x 4` |
 
-Use `@workgroup(...)` only when an algorithm depends on a tile shape or shared
-memory protocol:
+Most code should accept the default. If an algorithm truly depends on a tile
+shape, place `@workgroup(...)` before the exported function:
 
 ```tach
 @workgroup(16, 16)
-export compute tiled[x, y](out: buffer<f32[]>) {
-  // ...
+export function tiled[x, y](out: buffer<u32[]>) {
+  const width = 1024;
+  const index = y * width + x;
+  if (index < out.length) {
+    out[index] = x + y;
+  }
 }
 ```
 
-The attribute takes one to `rank` positive integer literals. Omitted trailing
-axes become `1`. Tach's portable limits are:
+The attribute accepts one through `rank` positive integer literals. Missing
+axes are `1`. The portable limits are `x <= 256`, `y <= 256`, `z <= 64`, and
+at most 256 invocations in one workgroup.
 
-- `x <= 256`;
-- `y <= 256`;
-- `z <= 64`; and
-- `x * y * z <= 256`.
+Coordinates remain logical Tach values. A backend may internally recognize
+expressions such as `x % 16` and use an efficient target input, but no WGSL or
+SPIR-V name enters source or Core IR.
 
-These are compiler guarantees, not WebGPU spellings. For example, a tiled
-kernel may write `x % 16` and `y % 16`; backend optimization can recognize and
-replace that arithmetic with its target's efficient local-coordinate input.
+## 4. Data types
 
-## 5. Types
-
-### Scalar types
+### Scalars
 
 | Type | Meaning |
 |---|---|
-| `bool` | control-flow boolean |
+| `boolean` | `true` or `false`, used for values and control flow |
 | `i32` | signed 32-bit integer |
 | `u32` | unsigned 32-bit integer |
 | `f32` | 32-bit floating point |
-| `void` | absence of a helper result; not a value or field type |
+| `void` | no helper result; not a storable value |
 
-`bool` is a value/control type but is not host-shareable, so it cannot appear
-in a buffer or uniform layout.
+There is intentionally no `number` type. A GPU buffer and both shader targets
+must agree on exact width and interpretation. `boolean` is a normal value type
+but has no host buffer/uniform representation.
 
-### Vector types
+### Vectors
+
+Tach has two-, three-, and four-lane vectors:
 
 ```text
 f32x2  f32x3  f32x4
@@ -211,29 +206,39 @@ i32x2  i32x3  i32x4
 u32x2  u32x3  u32x4
 ```
 
-Vectors contain two to four lanes of one numeric scalar type. Read a single
-lane, a multi-lane swizzle, or a dynamically indexed lane:
+Construct and read them directly:
 
 ```tach
-const p = f32x4(1, 2, 3, 4);
-const first = p.x;
-const reversed = p.wzyx;
-const lane = p[index];
+function rearrange(): f32x4 {
+  const value = f32x4(1, 2, 3, 4);
+  const first = value.x;
+  const reversed = value.wzyx;
+  return f32x4(first, reversed.xyz);
+}
 ```
 
-Swizzle letters are `x`, `y`, `z`, and `w` and must exist in the source vector.
-Multi-lane swizzles are values. A single lane of an addressable resource or
-workgroup vector is also an assignable place:
+Swizzles use `x`, `y`, `z`, and `w`. A one-lane access produces a scalar; a
+multi-lane access produces a vector. Vectors also support dynamic indexing:
+`value[lane]`.
+
+A constructor accepts scalars and vectors, flattens them in order, converts
+lanes to the destination scalar type, and requires exactly the destination
+lane count:
 
 ```tach
-values[i].x = 1.0;
-values[i][1] = 2.0;
+function vectors(): f32x4 {
+  const splat = f32x4(1);
+  const joined = f32x4(f32x2(1, 2), 3, 4);
+  return splat + joined;
+}
 ```
 
-### Struct types
+One scalar splats to all lanes. Scalar arithmetic with a vector also broadcasts
+where the operator table below allows it.
 
-Struct values contain their declared fields and use contextual object-shaped
-construction:
+### Structs
+
+Named structs use TypeScript-shaped object types and contextual object values:
 
 ```tach
 type Color = {
@@ -241,236 +246,184 @@ type Color = {
   alpha: f32,
 };
 
-const color: Color = {
-  alpha: 1,
-  rgb: f32x3(0.2, 0.4, 0.8),
-};
-```
-
-Field order in a literal is irrelevant. Every field must appear exactly once;
-missing, duplicate, and unknown fields are errors. A struct literal needs an
-expected struct type from an annotation, assignment, argument, or return.
-
-### Atomic types
-
-```text
-atomic<i32>
-atomic<u32>
-```
-
-An atomic is a memory object, not an ordinary value. It may live in a buffer or
-workgroup variable and is accessed only through atomic operations. Whole-value
-construction, load, store, parameters, and return are rejected.
-
-### Arrays
-
-Runtime arrays have no source-level fixed count:
-
-```tach
-values: buffer<f32[]>
-particles: buffer<Particle[]>
-```
-
-They are buffer-only addressable types and expose `.length`:
-
-```tach
-if (i < values.length) {
-  values[i] = 0.0;
+function opaque(rgb: f32x3): Color {
+  return {
+    alpha: 1,
+    rgb: rgb,
+  };
 }
 ```
 
-Fixed arrays carry a positive literal count and are currently workgroup-memory
-types:
+Literal field order does not matter. Every field must appear exactly once. A
+literal gets its struct type from a variable annotation, assignment, argument,
+or return type.
 
-```tach
-workgroup tile: f32[256];
-workgroup counters: atomic<u32>[64];
+Structs are value types, so they cannot contain themselves recursively.
+
+### Arrays
+
+`T[]` is a runtime-sized array:
+
+```text
+buffer<f32[]>
+buffer<Particle[]>
 ```
 
-Array and vector indexing accepts an `i32` or `u32` scalar. Tach does not insert
-dynamic bounds checks.
+It may live only in a buffer, either directly or as the final field of a
+struct. It exposes `.length` and cannot be loaded or constructed as one whole
+value.
 
-### Type domains
+`T[N]` is a fixed array with a positive literal count. Fixed arrays currently
+belong to workgroup memory:
 
-The compiler distinguishes three useful domains:
-
-- **constructible values:** scalars, vectors, and fixed-footprint structs;
-- **host-shareable values:** numeric scalars, numeric vectors, atomics, structs
-  composed from them, and runtime arrays/tails; and
-- **workgroup-storable values:** numeric scalars, vectors, atomics, fixed
-  arrays, and fixed-footprint structs composed from them.
-
-Runtime-sized types are addressable but not constructible. Fixed arrays are
-workgroup-storable but are not currently admitted to host resources.
-
-## 6. Resources
-
-### Buffers
-
-```tach
-values: buffer<f32[]>
-state: buffer<State>
+```text
+f32[256]
+atomic<u32>[64]
 ```
 
-Buffers may be read or mutated. Source does not declare an access qualifier;
-semantic lowering infers read-only versus mutable access from stores and
-non-load atomic operations. The verified access becomes part of generated
-WGSL, SPIR-V, metadata, and host pipeline layout.
+Array and vector indices may be `i32` or `u32`.
 
-Atomic-containing storage is physically read/write even when the only source
-operation is `atomicLoad`, because the target resource class must support
-atomic access.
+### Atomics
 
-### Uniforms
+`atomic<i32>` and `atomic<u32>` describe shared memory objects. They may live
+in a buffer or workgroup variable. They are accessed through atomic operations,
+not ordinary whole-value loads, stores, arguments, or returns.
 
-```tach
-params: uniform<Params>
-factor: uniform<f32>
-```
+## 5. Buffers and uniforms
 
-Uniforms are read-only and fixed-size. They cannot contain runtime arrays or
-atomics.
-
-### Identity and aliasing
-
-Parameters are positional and retain their source names in generated host
-functions. Physical group/set and binding numbers are compiler-owned and do
-not appear in Tach source.
-
-Different resource parameters are non-aliasing. Managed TypeScript bindings
-reject passing one `ComputeBuffer` to two parameters of the same command;
-native callers must honor the same rule. In-place algorithms should use one
-buffer parameter and read and write through it.
-
-## 7. Numeric literals and inference
-
-Numeric literals carry values, not target-language suffixes:
+Kernels receive resources as ordinary named parameters:
 
 ```tach
-const decimal = 42;
-const separated = 1_000_000;
-const hexadecimal = 0xff00_ff00;
-const binary = 0b1010_0001;
-const fraction = 1.25;
-const exponent = 6.022e2;
+type Params = {
+  scale: f32,
+  count: u32,
+};
+
+export function scale[i](
+  values: buffer<f32[]>,
+  params: uniform<Params>,
+) {
+  if (i < params.count && i < values.length) {
+    values[i] *= params.scale;
+  }
+}
 ```
 
-Suffixes such as `0u`, `1i`, and `1.0f` are rejected. Context supplies the type
-whenever an assignment, annotation, argument, constructor, branch, or operator
-already requires one. Without context:
+### `buffer<T>`
 
-- a non-negative whole-number literal is `u32`;
-- a decimal or exponent literal is `f32`; and
-- unary `-` gives an otherwise untyped whole literal `i32` context.
+A buffer is GPU storage. The body may read or write it. Tach infers read-only
+versus mutable access from actual stores and atomic operations, then emits that
+decision consistently in WGSL, SPIR-V, metadata, and WebGPU layout.
 
-Inference is independent of operand order. For example, both `1 + 2.0` and
-`2.0 + 1` are `f32`, and `condition ? 1 : -2` has matching `i32` branches.
+### `uniform<T>`
 
-Use scalar constructors for explicit conversion:
+A uniform is read-only and fixed-size. It is appropriate for parameters shared
+by every invocation. It cannot contain a runtime array or atomic value.
+
+### Resource identity
+
+Parameters are positional and keep their names in generated functions.
+Physical group, set, and binding numbers are compiler-owned and never appear in
+source.
+
+Two different resource parameters mean two non-aliasing memory objects. The
+managed TypeScript runtime rejects passing one `ComputeBuffer` to both. For an
+in-place algorithm, declare one buffer and read and write through it.
+
+## 6. Literals, conversion, and inference
+
+Write numbers the way a TypeScript developer expects:
 
 ```tach
-const signed = i32(unsignedValue);
-const unsigned = u32(signedValue);
-const real = f32(integerValue);
+function literals(): f32x4 {
+  const decimal = 42;
+  const separated = 1_000_000;
+  const hexadecimal = 0xff00_ff00;
+  const binary = 0b1010_0001;
+  const fraction = 1.25;
+  const exponent = 6.022e2;
+  return f32x4(f32(decimal), f32(separated), f32(binary), fraction + exponent);
+}
 ```
 
-There are no general implicit numeric conversions. Contextual typing of a
-literal and defined scalar-to-vector broadcasting are the only conveniences.
-All literals are range-checked and canonicalized before entering Core IR.
+Shader suffixes such as `0u`, `1i`, and `1.0f` are rejected. Context chooses a
+literal type when an annotation, assignment, argument, constructor, branch, or
+operator already requires one. Without context:
 
-## 8. Constructors
+- a non-negative whole number is `u32`;
+- a fraction or exponent is `f32`; and
+- unary `-` gives a whole-number literal `i32` context.
 
-### Scalar conversion
+Inference does not depend on operand order: `1 + 2.0` and `2.0 + 1` are both
+`f32`.
 
-`i32(x)`, `u32(x)`, and `f32(x)` accept one numeric scalar. Converting between
-`i32` and `u32` preserves the 32-bit pattern; integer/float conversions use the
-target-independent operation selected by Tach Core IR.
-
-### Vector construction
-
-A vector constructor accepts numeric scalars and vectors, flattens them in
-order, converts each lane to the destination scalar type, and requires exactly
-the destination lane count:
+Conversions are explicit function-shaped constructors:
 
 ```tach
-const splat = f32x4(1);                  // [1, 1, 1, 1]
-const joined = f32x4(f32x2(1, 2), 3, 4);
-const converted = u32x3(1.0, 2.0, 3.0);
+function convert(unsigned: u32, signed: i32): f32 {
+  const a = i32(unsigned);
+  const b = u32(signed);
+  return f32(a) + f32(b);
+}
 ```
 
-One scalar splats to every lane. Passing one already matching vector is an
-identity operation.
+`i32`/`u32` conversion preserves the 32-bit pattern. Integer/float conversion
+uses Tach's defined target-neutral operation. There are no general implicit
+numeric conversions.
 
-## 9. Variables and scope
+## 7. Variables and expressions
 
-`const` creates an immutable local binding:
+`const` is immutable. `let` may be rebound:
 
 ```tach
-const radius = 4.0;
+function sumFour(values: f32x4): f32 {
+  let total = 0.0;
+  for (let lane = 0; lane < 4; lane++) {
+    total += values[lane];
+  }
+  return total;
+}
 ```
 
-`let` creates a rebindable local binding:
+Both forms may include a type annotation. Names cannot shadow another active
+name. Branch-local names do not escape their branch. A `for` initializer is
+scoped to its loop.
 
-```tach
-let total = 0.0;
-total += sample;
-```
-
-Both may have an explicit type annotation. A `let` does not imply stack or
-private memory: the compiler rewrites local rebinding into SSA values, branch
-results, and loop-carried values.
-
-Names cannot shadow an existing name in the active scope. Branch-local names
-do not escape their branch. A `for` initializer is scoped to that loop;
-mutations of locals that existed before the loop remain visible afterward.
-
-Only resources and workgroup variables are addressable GPU memory. Ordinary
-locals are values.
-
-## 10. Expressions and operators
+Rebinding a `let` does not promise a private memory cell. Tach may represent it
+as an immutable value carried through branches or loops. Buffers and workgroup
+variables are the addressable memory in the language.
 
 ### Postfix expressions
 
-Function/constructor calls, member access, and indexing compose from left to
-right:
+Calls, member access, and indexing compose from left to right:
 
-```tach
+```text
 shape(value)
 particle.position.x
 blocks[i].values[j]
 ```
 
-Call targets are direct function, intrinsic, atomic, barrier, or type names;
-function values and method calls are not part of the language.
+Calls are direct. Tach has no function values or methods.
 
-### Unary operators
+### Unary and binary operators
 
-| Operator | Operand |
-|---|---|
-| `!` | `bool` |
-| `-` | `i32`, `f32`, or a vector of either |
-| `~` | `i32`, `u32`, or an integer vector |
-
-Unsigned negation is deliberately rejected.
-
-### Binary operators
-
-| Family | Operators | Accepted operands |
+| Family | Operators | Operands |
 |---|---|---|
-| arithmetic | `+ -` | matching numeric scalars/vectors; scalar broadcast with a vector |
-| multiplication | `*` | matching numeric values, vector/scalar, or scalar/vector |
-| division | `/` | matching numeric values; scalar broadcast with a vector |
+| unary logic | `!` | `boolean` |
+| unary numeric | `-` | `i32`, `f32`, or matching vectors |
+| unary bitwise | `~` | integer scalar/vector |
+| arithmetic | `+ - * /` | matching numeric values; defined scalar/vector broadcast |
 | remainder | `%` | matching numeric scalars |
-| comparison | `== != < <= > >=` | matching numeric scalars; result is `bool` |
-| boolean | `&& ||` | `bool`; short-circuiting |
-| bitwise | `& \| ^` | matching integer scalars/vectors; scalar broadcast with a vector |
-| shift | `<< >>` | integer scalar/vector shifted by unsigned count of matching shape |
+| comparison | `== != < <= > >=` | matching numeric scalars; yields `boolean` |
+| boolean | `&& ||` | `boolean`, short-circuiting |
+| bitwise | `& \| ^` | matching integer values; defined scalar/vector broadcast |
+| shifts | `<< >>` | integer values with unsigned counts of matching shape |
 
-For vector shifts, a scalar `u32` count is broadcast. Every 32-bit shift masks
-its count to the low five bits, so Tach defines large counts modulo 32 before a
-backend sees them. Right shift is arithmetic for `i32` and logical for `u32`.
+Unsigned negation is rejected. Every 32-bit shift masks its count to the low
+five bits, so large shifts have the same modulo-32 meaning on every backend.
+Right shift is arithmetic for `i32` and logical for `u32`.
 
-Operator precedence, from lowest to highest, is:
+From lowest to highest, precedence is:
 
 ```text
 ?:
@@ -485,99 +438,93 @@ Operator precedence, from lowest to highest, is:
 + -
 * / %
 unary ! - ~
-postfix call, member, index
+call, member, index
 ```
 
-Binary operators are left-associative. The conditional operator is
-right-associative through its expression branches.
+Binary operators associate left. The conditional expression selects only one
+branch.
 
 ### Assignment
 
+Supported forms are:
+
 ```text
-=  +=  -=  *=  /=  %=
-&=  |=  ^=  <<=  >>=
-++  --
+=  +=  -=  *=  /=  %=  &=  |=  ^=  <<=  >>=  ++  --
 ```
 
-Plain `=` and compound assignments work on `let` bindings and addressable
-resource/workgroup places. `++` and `--` add or subtract one using the target's
-existing numeric type. Assigning to `const` is an error.
+Assignments work on `let` bindings and addressable buffer/workgroup places.
+Single vector lanes are assignable through `.x` or `[index]`. A `const` cannot
+be assigned.
 
-## 11. Control flow
+## 8. Control flow
 
-### Conditional statements
+Tach keeps the familiar structured forms.
+
+### Conditions
 
 ```tach
-if (value < 0.0) {
-  value = -value;
-} else if (value > 1.0) {
-  value = 1.0;
-} else {
-  value += 0.5;
+function clampUnit(value: f32): f32 {
+  if (value < 0.0) {
+    return 0.0;
+  } else if (value > 1.0) {
+    return 1.0;
+  } else {
+    return value;
+  }
 }
 ```
 
-Conditions must be `bool`. Locals rebound by either branch become structured
-merge values.
+`if` and `while` conditions must be `boolean`.
 
-### Conditional expressions
-
-```tach
-const sign = value < 0.0 ? -1.0 : 1.0;
-```
-
-Both branches must produce the same concrete type. Evaluation is
-short-circuiting: only the selected branch executes.
-
-### `while`
+The conditional expression is also available:
 
 ```tach
-let i = 0;
-let sum = 0.0;
-while (i < count) {
-  sum += values[i];
-  i++;
+function sign(value: f32): f32 {
+  return value < 0.0 ? -1.0 : 1.0;
 }
 ```
 
-Rebound locals become explicit loop-carried values. A loop body must retain a
-continuing path; an unconditionally returning body is rejected.
+Both result branches must have the same concrete type.
 
-### `for`
+### Loops
 
 ```tach
-for (let lane = 0; lane < 4; lane++) {
-  sum += values[base + lane];
+function accumulated(count: u32): u32 {
+  let index = 0;
+  let total = 0;
+  while (index < count) {
+    total += index;
+    index++;
+  }
+  return total;
 }
 ```
 
-The initializer must be a `let` declaration. The condition must be `bool`. The
-update must be assignment, compound assignment, `++`, or `--`. `for` is source
-sugar and lowers to exactly the same structured loop representation as
-`while`.
+```tach
+function counted(): u32 {
+  let total = 0;
+  for (let index = 0; index < 4; index++) {
+    total += index;
+  }
+  return total;
+}
+```
 
-Source-level `break` and `continue` are not currently part of Tach.
+A `for` initializer must be `let`; its update must be an assignment, compound
+assignment, `++`, or `--`. `for` and `while` share one compiler loop model.
+`break` and `continue` are not currently part of Tach.
 
 ### Return
 
-```tach
-if (i >= values.length) {
-  return;
-}
-```
+A helper returns its declared type. A void helper or kernel uses `return;`.
+Statements after an unconditional return are rejected as unreachable.
 
-Compute kernels use bare `return;`. Helpers return a value matching their
-declared result, or bare `return;` when `void`. Statements after an
-unconditional return are rejected as unreachable.
+## 9. Math intrinsics
 
-## 12. Math intrinsics
+Intrinsics are free functions with Tach-defined type rules. Their names are
+reserved.
 
-Intrinsics are Tach operations with backend-independent type rules. Names are
-reserved and cannot be redefined.
-
-### Floating scalar/vector operations
-
-The following accept `f32` or any `f32xN` and preserve the input type:
+These preserve an `f32` scalar or vector type:
 
 ```text
 floor  ceil  trunc
@@ -586,39 +533,57 @@ exp    exp2  log  log2
 sqrt   rsqrt
 ```
 
-`abs` accepts `i32`, `f32`, `i32xN`, or `f32xN` and preserves its type.
+`abs` accepts signed integer or floating scalar/vector values.
 
-`pow(base, exponent)` accepts two matching `f32` scalar/vector values. When
-the first argument is a vector, a scalar second argument is broadcast.
+`pow(base, exponent)` accepts matching floating values. A scalar exponent may
+broadcast over a vector base.
 
-### Integer bounds
+`min`, `max`, and `clamp` currently accept integer scalars/vectors. Floating
+forms wait for one explicit portable NaN and signed-zero policy.
 
-```text
-min(a, b)
-max(a, b)
-clamp(value, low, high)
-```
+Vector-specific operations are:
 
-These accept matching `i32`/`u32` scalars or integer vectors and preserve the
-type. A scalar bound is broadcast when the first argument is a vector.
-Floating `min`, `max`, and `clamp` are intentionally unavailable until Tach
-defines one portable NaN and signed-zero policy.
-
-### Vector operations
-
-| Intrinsic | Operands | Result |
+| Function | Input | Result |
 |---|---|---|
 | `dot(a, b)` | matching `f32xN` | `f32` |
-| `length(v)` | `f32xN` | `f32` |
+| `length(value)` | `f32xN` | `f32` |
 | `distance(a, b)` | matching `f32xN` | `f32` |
 | `cross(a, b)` | matching `f32x3` | `f32x3` |
-| `normalize(v)` | `f32xN` | same vector type |
+| `normalize(value)` | `f32xN` | same vector type |
 
-## 13. Atomics
+## 10. Workgroup memory, atomics, and barriers
 
-Atomic operations require an addressable `atomic<i32>` or `atomic<u32>` place:
+This section is advanced. You do not need it for independent per-element or
+per-pixel kernels.
 
-| Operation | Meaning | Result |
+### Shared workgroup memory
+
+A workgroup declaration creates memory shared by the invocations in one
+workgroup:
+
+```tach
+@workgroup(64)
+export function reduce[i](out: buffer<u32[]>) {
+  workgroup partial: u32[64];
+  const lane = i % 64;
+
+  partial[lane] = i;
+  workgroupBarrier();
+
+  if (lane == 0 && i < out.length) {
+    out[i] = partial[0];
+  }
+}
+```
+
+Workgroup memory begins at the type's zero value before source instructions
+run. Tach establishes this on both backends.
+
+### Atomic operations
+
+Each operation receives an addressable atomic place:
+
+| Operation | Effect | Result |
 |---|---|---|
 | `atomicLoad(place)` | read | current value |
 | `atomicStore(place, value)` | write | `void` |
@@ -631,62 +596,69 @@ Atomic operations require an addressable `atomic<i32>` or `atomic<u32>` place:
 | `atomicXor(place, value)` | bitwise XOR | previous value |
 | `atomicExchange(place, value)` | replace | previous value |
 
-Storage-buffer atomics use device scope; workgroup-memory atomics use
-workgroup scope. Atomic operations are relaxed. Ordering between invocations
-comes from explicit barriers or the dependency semantics of the atomic
-operation itself.
+Buffer atomics use device scope; workgroup atomics use workgroup scope. Atomic
+operations are relaxed. Use dependencies and barriers for ordering.
 
-## 14. Workgroup memory and barriers
+### Barriers
 
-Workgroup variables are declared inside a compute kernel and are shared by the
-invocations of one workgroup:
+| Operation | Synchronizes |
+|---|---|
+| `workgroupBarrier()` | workgroup memory within one workgroup |
+| `bufferBarrier()` | storage-buffer memory within one workgroup |
 
-```tach
-@workgroup(64)
-export compute reduce[i](out: buffer<u32[]>) {
-  workgroup partial: u32[64];
-  const lane = i % 64;
+Every invocation in a workgroup must reach a barrier together. Tach rejects a
+barrier under control that can differ by coordinate, mutable memory load, or
+atomic result. Constants, uniform-address uniform loads, and helpers derived
+only from uniform values can remain uniform.
 
-  partial[lane] = i;
-  workgroupBarrier();
-  // ...
-}
+## 11. Lexical and scope rules
+
+Identifiers begin with a Unicode letter or `_`, then contain Unicode letters,
+digits, or `_`. Names emitted to JavaScript/TypeScript—public types, kernels,
+and resource parameters—must also be portable ASCII identifiers and avoid
+reserved host-language names.
+
+Whitespace is insignificant. Line comments and nested block comments are
+supported:
+
+```text
+// one line
+
+/* outer
+   /* nested */
+*/
 ```
 
-Every workgroup variable has its type's zero value before source instructions
-execute. Tach establishes this invariant in each backend.
+Statements end with `;`. Parameter and object-literal lists accept a trailing
+comma. Type fields may use commas or semicolons; this guide uses commas.
 
-Two barriers are available:
+The compiler distinguishes these domains:
 
-| Operation | Synchronized memory |
-|---|---|
-| `workgroupBarrier()` | workgroup memory within the workgroup |
-| `bufferBarrier()` | storage-buffer memory within the workgroup |
+- constructible values: scalars, vectors, and fixed-footprint structs;
+- host-shareable values: numeric scalars/vectors, atomics, suitable structs,
+  and runtime arrays/tails; and
+- workgroup-storable values: numeric scalars/vectors, atomics, fixed arrays,
+  and suitable fixed-footprint structs.
 
-Both are execution barriers and take no arguments. Every invocation in the
-workgroup must reach a barrier in uniform control flow. Tach proves this
-conservatively in Core IR. A barrier controlled by a logical coordinate,
-mutable buffer/workgroup load, or atomic result is rejected. Constants,
-uniform-address uniform loads, and helper results derived only from uniform
-arguments can remain uniform.
+Runtime-sized types are addressable but not constructible. Fixed arrays are
+currently workgroup-only. These restrictions prevent a source value from
+claiming a representation that one target cannot honor.
 
-## 15. Compact grammar
+## 12. Compact grammar
 
-This EBNF summarizes the complete grammatical structure. The precedence table
-above and the type/semantic restrictions in the rest of this document remain
-normative:
+This EBNF summarizes syntax. The type and semantic rules above still apply:
 
 ```text
 module        := { declaration }
-declaration   := type-decl | function-decl | compute-decl
+declaration   := type-decl | helper-decl | kernel-decl
 
 type-decl     := "type" IDENT "=" "{" fields "}" [";"]
 fields        := [field {field-separator field} [field-separator]]
 field         := IDENT ":" type
 field-separator := "," | ";"
 
-function-decl := "fn" IDENT parameters [":" type] block
-compute-decl  := {attribute} "export" "compute" IDENT indices parameters block
+helper-decl   := "function" IDENT parameters [":" type] block
+kernel-decl   := {attribute} "export" "function" IDENT indices parameters block
 attribute     := "@" "workgroup" "(" NUMBER {"," NUMBER} ")"
 indices       := "[" IDENT {"," IDENT} "]"
 parameters    := "(" [parameter {"," parameter} [","]] ")"
@@ -733,11 +705,15 @@ struct-literal := "{" [literal-field {"," literal-field} [","]] "}"
 literal-field := IDENT ":" expression
 ```
 
-The parser requires parentheses around `if`, `while`, and `for` headers.
+Parentheses are required around `if`, `while`, and `for` headers.
 
-## 16. Deliberate boundaries
+## 13. Deliberate boundaries
 
-The current language has no pointers, pointer arithmetic, target binding
-annotations, ambient invocation identifiers, recursion, resource aliasing,
-source `break`/`continue`, or provider-specific extensions. These omissions
-keep one semantic program valid for both WGSL/WebGPU and SPIR-V/Vulkan.
+Tach currently has no pointers, pointer arithmetic, binding annotations,
+ambient invocation objects, recursion, resource aliasing, `break`, `continue`,
+or provider-specific extensions.
+
+Those are not missing WGSL conveniences. They keep one source program and one
+Core IR meaning valid for both WebGPU/WGSL and Vulkan/SPIR-V. If a capability
+can be implemented as an optimization, it belongs inside the compiler rather
+than in source syntax.

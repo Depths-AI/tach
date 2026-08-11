@@ -27,7 +27,7 @@ type RenderParams = {
   time: f32,
 };
 
-fn normalCDF(x: f32): f32 {
+function normalCDF(x: f32): f32 {
   const magnitude = abs(x);
   const t = 1.0 / (1.0 + 0.2316419 * magnitude);
   const polynomial = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
@@ -36,27 +36,27 @@ fn normalCDF(x: f32): f32 {
   return x < 0.0 ? 1.0 - positive : positive;
 }
 
-fn saturate(x: f32): f32 {
+function saturate(x: f32): f32 {
   return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
 }
 
-fn smoothRange(edge0: f32, edge1: f32, x: f32): f32 {
+function smoothRange(edge0: f32, edge1: f32, x: f32): f32 {
   const t = saturate((x - edge0) / (edge1 - edge0));
   return t * t * (3.0 - 2.0 * t);
 }
 
-fn blend(base: f32, layer: f32, amount: f32): f32 {
+function blend(base: f32, layer: f32, amount: f32): f32 {
   return base + (layer - base) * saturate(amount);
 }
 
-fn hashPixel(x: u32, y: u32): f32 {
+function hashPixel(x: u32, y: u32): f32 {
   let value = x * 374761393 + y * 668265263;
   value = (value ^ (value >> 13)) * 1274126177;
   value ^= value >> 16;
   return f32(value & 65535) / 65535.0;
 }
 
-export compute integrateParticles[i](
+export function integrateParticles[i](
   positions: buffer<f32[]>,
   velocities: buffer<f32[]>,
   params: uniform<ParticleParams>,
@@ -68,7 +68,7 @@ export compute integrateParticles[i](
   }
 }
 
-export compute mandelbrot[x, y](
+export function mandelbrot[x, y](
   output: buffer<u32[]>,
   params: uniform<FractalParams>,
 ) {
@@ -91,7 +91,7 @@ export compute mandelbrot[x, y](
 }
 
 @workgroup(16, 16)
-export compute multiplyMatrices[column, row](
+export function multiplyMatrices[column, row](
   left: buffer<f32[]>,
   right: buffer<f32[]>,
   output: buffer<f32[]>,
@@ -132,7 +132,7 @@ export compute multiplyMatrices[column, row](
   }
 }
 
-export compute priceOptions[i](
+export function priceOptions[i](
   output: buffer<f32[]>,
   params: uniform<OptionParams>,
 ) {
@@ -151,7 +151,7 @@ export compute priceOptions[i](
   output[i] = spot * normalCDF(d1) - strike * exp(-rate * years) * normalCDF(d2);
 }
 
-export compute proceduralScene[x, y](
+export function proceduralScene[x, y](
   rgba: buffer<u32[]>,
   params: uniform<RenderParams>,
 ) {

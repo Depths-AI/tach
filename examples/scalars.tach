@@ -1,4 +1,4 @@
-export compute scale[i](
+export function scale[i](
   data: buffer<f32[]>,
   factor: uniform<f32>,
 ) {

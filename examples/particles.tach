@@ -8,14 +8,14 @@ type Particle = {
   velocity: f32x4,
 };
 
-fn integrateParticle(p: Particle, dt: f32): Particle {
+function integrateParticle(p: Particle, dt: f32): Particle {
   return {
     position: p.position + p.velocity * dt,
     velocity: p.velocity,
   };
 }
 
-export compute integrate[i](
+export function integrate[i](
   particles: buffer<Particle[]>,
   params: uniform<Params>,
 ) {

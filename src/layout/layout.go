@@ -49,7 +49,7 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 	case types.I32, types.U32, types.F32, types.Atomic:
 		return TypeLayout{Size: 4, Align: 4}, nil
 	case types.Bool:
-		return TypeLayout{}, fmt.Errorf("bool is a control/value type and is not part of Tach's host ABI")
+		return TypeLayout{}, fmt.Errorf("boolean is a control/value type and is not part of Tach's host ABI")
 	case types.Vector:
 		if t.Elem.Kind != types.I32 && t.Elem.Kind != types.U32 && t.Elem.Kind != types.F32 {
 			return TypeLayout{}, fmt.Errorf("vector element %s is not host-shareable", t.Elem)

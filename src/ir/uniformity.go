@@ -65,6 +65,8 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 			e.values[x.Result] = u
 		case *Extract:
 			e.values[x.Result] = value(x.Base)
+		case *VectorIndex:
+			e.values[x.Result] = value(x.Base) && value(x.Index)
 		case *Intrinsic:
 			u := true
 			for _, id := range x.Args {

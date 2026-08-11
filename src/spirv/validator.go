@@ -186,6 +186,8 @@ func validateArity(op Op, a []uint32) error {
 		return exact(a, 4)
 	case OpCompositeConstruct:
 		return atLeast(a, 2)
+	case OpVectorExtractDynamic:
+		return exact(a, 4)
 	case OpCompositeExtract:
 		return atLeast(a, 4)
 	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast,
@@ -396,7 +398,7 @@ func resultID(in Instruction) uint32 {
 	case OpTypeVoid, OpTypeBool, OpTypeInt, OpTypeFloat, OpTypeVector, OpTypeArray, OpTypeRuntimeArray, OpTypeStruct, OpTypePointer, OpTypeFunction, OpLabel:
 		return a[0]
 	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
-		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpCompositeExtract,
+		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
 		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
@@ -415,7 +417,7 @@ func resultTypeID(in Instruction) uint32 {
 	a := in.Operands
 	switch in.Op {
 	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
-		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpCompositeExtract,
+		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
 		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
@@ -950,6 +952,10 @@ func (v *validation) validateReferencesAndTypes() error {
 			if err := v.validateCompositeConstruct(in); err != nil {
 				return err
 			}
+		case OpVectorExtractDynamic:
+			if err := v.validateVectorExtractDynamic(in); err != nil {
+				return err
+			}
 		case OpCompositeExtract:
 			if err := v.validateCompositeExtract(in); err != nil {
 				return err
@@ -1315,6 +1321,32 @@ func (v *validation) validateCompositeExtract(in Instruction) error {
 	}
 	if cur != a[0] {
 		return fmt.Errorf("%s result type mismatch", ctx)
+	}
+	v.valueType[a[1]] = a[0]
+	return nil
+}
+
+func (v *validation) validateVectorExtractDynamic(in Instruction) error {
+	a := in.Operands
+	ctx := fmt.Sprintf("word %d OpVectorExtractDynamic", in.Offset)
+	if _, err := v.requireType(a[0], ctx); err != nil {
+		return err
+	}
+	bt, err := v.requireValue(a[2], ctx)
+	if err != nil {
+		return err
+	}
+	base := v.types[bt]
+	if base == nil || base.kind != typeVector || base.elem != a[0] {
+		return fmt.Errorf("%s base/result type mismatch", ctx)
+	}
+	it, err := v.requireValue(a[3], ctx)
+	if err != nil {
+		return err
+	}
+	index := v.types[it]
+	if index == nil || index.kind != typeInt {
+		return fmt.Errorf("%s index is not an integer scalar", ctx)
 	}
 	v.valueType[a[1]] = a[0]
 	return nil
@@ -2284,6 +2316,8 @@ func valueUses(in Instruction) []uint32 {
 		return []uint32{a[2]}
 	case OpCompositeConstruct:
 		return append([]uint32(nil), a[2:]...)
+	case OpVectorExtractDynamic:
+		return []uint32{a[2], a[3]}
 	case OpCompositeExtract:
 		return []uint32{a[2]}
 	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate, OpLogicalNot, OpNot:

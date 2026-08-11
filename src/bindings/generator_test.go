@@ -38,7 +38,7 @@ func compileBindings(t *testing.T, source string) (*Artifacts, *Metadata) {
 func TestScalarUniformUsesPhysicalWrapperSize(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroup(32)
-export compute scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
+export function scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
   if (i < data.length) { data[i] *= factor; }
 }`)
 	if len(meta.Resources) != 2 {
@@ -56,7 +56,7 @@ export compute scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
 func TestDirectRuntimeResourceCarriesHostLayout(t *testing.T) {
 	out, _ := compileBindings(t, `
 @workgroup(1)
-export compute clear[i](data: buffer<u32[]>) {
+export function clear[i](data: buffer<u32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if !strings.Contains(out.JavaScript, `"kind":"runtime"`) ||
@@ -69,7 +69,7 @@ func TestAtomicResourceUsesUnderlyingHostRepresentation(t *testing.T) {
 	out, _ := compileBindings(t, `
 type Counters = { total: atomic<u32> };
 @workgroup(1)
-export compute increment[i](counters: buffer<Counters>) {
+export function increment[i](counters: buffer<Counters>) {
   atomicAdd(counters.total, 1);
 }`)
 	if !strings.Contains(out.JavaScript, `"name":"total","offset":0,"type":{"kind":"u32"`) {
@@ -80,7 +80,7 @@ export compute increment[i](counters: buffer<Counters>) {
 func TestRuntimeResourceDescriptorRecordsMinimumBindingSize(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroup(1)
-export compute clear[i](data: buffer<u32[]>) {
+export function clear[i](data: buffer<u32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if meta.Resources[0].MinimumByteSize != 4 {
@@ -94,7 +94,7 @@ export compute clear[i](data: buffer<u32[]>) {
 func TestGeneratedSurfaceMirrorsSource(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroup(64)
-export compute scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
+export function scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
   if (i < data.length) { data[i] *= factor; }
 }`)
 	if len(meta.Kernels) != 1 || meta.Kernels[0].Name != "scale" || meta.Kernels[0].EntryPoint != "scale" || meta.Kernels[0].Dimensions != 1 {
@@ -120,7 +120,7 @@ export compute scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
 func TestKernelMayBeNamedBuffer(t *testing.T) {
 	out, _ := compileBindings(t, `
 @workgroup(1)
-export compute buffer[i](data: buffer<u32[]>) {
+export function buffer[i](data: buffer<u32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if !strings.Contains(out.JavaScript, "export function buffer(data, $dispatch)") ||
@@ -132,7 +132,7 @@ export compute buffer[i](data: buffer<u32[]>) {
 func TestPackedRuntimeArraysExposeTypedHostRepresentations(t *testing.T) {
 	out, _ := compileBindings(t, `
 @workgroup(1)
-export compute arrays[i](
+export function arrays[i](
   signed: buffer<i32[]>,
   unsigned: buffer<u32[]>,
   floats: buffer<f32[]>,
@@ -155,7 +155,7 @@ func TestSourceOwnedTachPrefixIsNotReserved(t *testing.T) {
 	out, _ := compileBindings(t, `
 type TachBuffer = { value: u32 };
 @workgroup(1)
-export compute preserve[i](data: buffer<TachBuffer>) { }
+export function preserve[i](data: buffer<TachBuffer>) { }
 `)
 	if !strings.Contains(out.Declarations, "export interface TachBuffer") ||
 		!strings.Contains(out.Declarations, "data: ComputeBuffer<TachBuffer>") {

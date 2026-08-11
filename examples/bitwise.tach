@@ -1,4 +1,4 @@
-export compute bitwise[i](out: buffer<u32[]>) {
+export function bitwise[i](out: buffer<u32[]>) {
   let u: u32 = 0xff00;
   let s: i32 = -64;
   const left = u << 40;

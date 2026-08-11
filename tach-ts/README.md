@@ -1,78 +1,50 @@
 # `@depths/tach`
 
-`@depths/tach` is Tach's browser/WebGPU runtime and native compiler
-distribution. It gives an application three things:
+`@depths/tach` contains the Tach compiler command and the browser/WebGPU
+runtime used by generated kernels. Application code gets typed kernel
+functions, GPU-resident buffers, explicit submission, and two clear lifetime
+choices. It does not manage shader strings or bind groups.
 
-- the `tach` and `openTach` execution APIs;
-- typed host bindings generated directly from `.tach` kernels; and
-- the native `tach` compiler as an npm executable and Node API.
+## Five-minute start
 
-Tach kernels remain provider-neutral. The generated module embeds WGSL and the
-compiler-owned resource/layout contract; this package owns adapter, device,
-buffer, pipeline, submission, readback, and error behavior.
-
-## Requirements and installation
-
-The package requires Node.js 22 or newer for installation and compilation. The
-runtime executes in a browser or injected environment that provides WebGPU.
+Installation and compilation need Node.js 22 or newer. Runtime execution needs
+a browser or injected environment with WebGPU.
 
 ```sh
 npm install @depths/tach
-npx tach version
 ```
 
-Published packages support Linux, macOS, and Windows on x64 and arm64. During
-installation, Tach selects the matching native compiler, downloads it from the
-package version's GitHub release, and verifies it against that release's
-SHA-256 manifest.
-
-## First kernel, end to end
-
-Save this as `kernels/scale.tach`:
+Save `kernels/scale.tach`:
 
 ```tach
-export compute scale[i](
-  data: buffer<f32[]>,
+export function scale[i](
+  values: buffer<f32[]>,
   factor: uniform<f32>,
 ) {
-  if (i < data.length) {
-    data[i] *= factor;
+  if (i < values.length) {
+    values[i] *= factor;
   }
 }
 ```
 
-Compile it from the application root:
+Compile it:
 
 ```sh
 npx tach check kernels/scale.tach
 npx tach build kernels/scale.tach
 ```
 
-`check` runs the complete compiler and validation pipeline without writing
-files. `build` writes these synchronized artifacts to `build/`:
-
-```text
-scale.tir
-scale.wgsl
-scale.spv
-scale.spvasm
-scale.js
-scale.d.ts
-scale.tach.json
-```
-
-Import the generated JavaScript module as ordinary application code:
+Use the generated function like a typed command constructor:
 
 ```ts
 import { tach } from "@depths/tach";
 import { scale } from "./build/scale.js";
 
-const initial = new Float32Array([1, 2, 3, 4]);
-
 const result = await tach(async (gpu) => {
-  const data = gpu.buffer(initial);
-  await gpu.submit(scale(data, 2));
-  return data.read();
+  const values = gpu.buffer(new Float32Array([1, 2, 3, 4]));
+
+  await gpu.submit(scale(values, 2));
+  return values.read();
 });
 
 if (!result.ok) {
@@ -82,33 +54,108 @@ if (!result.ok) {
 console.log(result.value); // Float32Array [2, 4, 6, 8]
 ```
 
-The generated `scale` signature is equivalent to:
+The generated declaration is equivalent to:
 
 ```ts
 function scale(
-  data: ComputeBuffer<Float32Array | readonly number[]>,
+  values: ComputeBuffer<Float32Array | readonly number[]>,
   factor: number,
   $dispatch?: DispatchOptions<number>,
 ): ComputeDispatch;
 ```
 
-There is no shader-module factory or resource map in application code. Source
-parameters remain positional, named structs become TypeScript interfaces, and
-exported kernel names remain exported function names.
+Source parameter order becomes host parameter order. The final dispatch object
+is generated automatically.
 
-## The execution model
+## The whole mental model
 
-Tach's host model has three explicit objects and one explicit boundary:
+There are only three application-facing concepts:
 
 ```text
-host value -> ComputeBuffer
-kernel call -> ComputeDispatch
-ComputeDispatch -> gpu.submit(...) -> WebGPU queue
+gpu.buffer(hostValue)     -> ComputeBuffer
+generatedKernel(...)     -> ComputeDispatch
+gpu.submit(dispatches)   -> ordered WebGPU work
 ```
 
-### Buffers are session-owned handles
+A kernel call does not execute. It builds an opaque command. `submit` is the
+execution boundary. A read or `idle()` is the completion boundary.
 
-`gpu.buffer(value)` creates a `ComputeBuffer<T>` owned by that `Tach` session:
+This separation lets one submission contain several kernels:
+
+```ts
+await gpu.submit(
+  scale(values, 2),
+  scale(values, 0.5),
+);
+```
+
+They are recorded in argument order into one compute pass and one queue
+submission.
+
+## Choose a lifetime
+
+Both APIs create the same `Tach` session. The difference is who closes it.
+
+### A scoped job: `tach(...)`
+
+Use `tach` when one callback owns the whole job:
+
+```ts
+const result = await tach(async (gpu) => {
+  const data = gpu.buffer(initial);
+  await gpu.submit(transform(data, params));
+  return data.read();
+});
+```
+
+It:
+
+1. requests an adapter and device;
+2. runs the callback;
+3. waits for queued work;
+4. returns success or failure as a `Result`; and
+5. closes the session and destroys its buffers.
+
+Return host data from the callback. A returned `ComputeBuffer` is already
+closed with its session.
+
+### Resident state: `openTach()`
+
+Use `openTach` for a frame loop, simulation, solver, or service:
+
+```ts
+import { openTach } from "@depths/tach";
+import { step } from "./build/simulation.js";
+
+const opened = await openTach({
+  adapter: { powerPreference: "high-performance" },
+});
+if (!opened.ok) throw new Error(opened.error.message);
+
+const gpu = opened.value;
+const state = gpu.buffer(initialState);
+
+try {
+  for (let frame = 0; frame < 1_000; frame++) {
+    await gpu.submit(step(state, { dt: 1 / 60 }));
+    // No readback or idle wait in the hot path.
+  }
+
+  await gpu.idle();
+} finally {
+  gpu.close();
+}
+```
+
+The adapter, device, shader modules, pipelines, bind groups, uniform arena, and
+buffers stay resident. `close()` is immediate and idempotent. If graceful GPU
+completion matters, await `idle()` first. A lost device requires a new session
+and recreated application state.
+
+There is no separate batch engine and frame engine. Both lifetimes use the
+same buffers, commands, caches, ordering, and errors.
+
+## Buffers
 
 ```ts
 interface ComputeBuffer<T> {
@@ -118,140 +165,52 @@ interface ComputeBuffer<T> {
 }
 ```
 
-The runtime takes a structured clone, so later mutation of the original host
-object does not mutate the buffer. Before the buffer reaches a submitted
-kernel, it remains a host value. Its first submitted use supplies the
-compiler-generated codec and layout, packs the bytes, creates the WebGPU
-buffer, and fixes its physical byte length.
+`gpu.buffer(value)` stores a structured clone. The first submitted kernel use
+supplies the compiler-generated layout, packs the value, creates the WebGPU
+buffer, and fixes its byte length.
 
-After materialization, `write(value)` uploads new bytes without replacing the
-GPU buffer. The packed length must remain identical; resize by creating a new
-`ComputeBuffer`. `read()` waits for prior session submissions, copies through a
-temporary readback buffer, decodes the value, and returns another clone.
-`destroy()` is idempotent, and any later use is a lifecycle error.
+Before that first use, `write(value)` may change the eventual size. After it,
+`write` updates the resident GPU buffer and must preserve byte length. Create a
+new buffer to resize.
 
-### Kernel calls create commands
+`read()` waits for earlier session submissions, copies through a temporary
+readback buffer, decodes the compiler-owned layout, and returns a clone.
+Reading a never-submitted buffer simply returns a clone of its host value.
 
-A generated kernel call validates its parameters, snapshots its uniform bytes,
-and returns an opaque `ComputeDispatch`:
+`destroy()` is idempotent. A destroyed buffer, a closed-session buffer, and a
+buffer passed to another session are lifecycle errors.
 
-```ts
-const command = scale(data, 2);
-```
+Different buffer parameters of one command must receive different
+`ComputeBuffer` objects. If a kernel updates data in place, give it one buffer
+parameter.
 
-It does not submit or wait. Awaiting a command directly fails loudly with an
-instruction to pass it to `Tach.submit`; a forgotten command cannot silently
-become a no-op.
+## Commands, submission, and synchronization
 
-Buffer arguments are live handles, whereas uniform arguments are snapshots at
-command construction. Different buffer parameters of one command must be
-different `ComputeBuffer` objects. To mutate in place, use one buffer parameter
-in the Tach kernel.
-
-### `submit` is the execution boundary
+A generated kernel call validates its arguments, snapshots uniform values, and
+returns a `ComputeDispatch`:
 
 ```ts
-await gpu.submit(commandA, commandB, commandC);
+const command = scale(values, 2);
+await gpu.submit(command);
 ```
 
-One call prepares every command, encodes them in argument order into one
-compute pass and one command buffer, and performs one WebGPU queue submission.
-Commands must belong to the session receiving them.
+Buffer arguments remain live handles. Uniform arguments are frozen at command
+construction. Accidentally writing `await scale(...)` throws a targeted error
+instead of silently doing nothing.
 
-Awaiting `submit()` waits for asynchronous shader/pipeline preparation and
-host-side queue submission. It does **not** wait for the GPU queue to become
-idle. Calls are chained internally so submissions made by interleaved promises
-retain call order.
+`submit(first, ...rest)` waits for asynchronous pipeline preparation and host
+queue submission. It does not wait for GPU completion. Concurrent JavaScript
+callers still retain `submit` call order through the session.
 
-Use a synchronization boundary only when the CPU needs completion:
+Wait only where the CPU actually needs a result:
 
-- `await gpu.idle()` waits for all prior session work;
-- `await buffer.read()` orders and waits for a readback; and
-- `tach(...)` waits automatically before closing its scope.
+- `await gpu.idle()` waits for all earlier session work;
+- `await buffer.read()` waits and reads back; and
+- `tach(...)` waits before returning and closing.
 
-## Two lifetimes, one session implementation
+## Logical size and repeated dispatches
 
-The choice between `tach` and `openTach` is about ownership, not execution
-semantics. Both forms use the same buffers, commands, queue ordering, caches,
-errors, and cleanup rules.
-
-### Scoped work with `tach`
-
-```ts
-function tach<T>(
-  work: (gpu: Tach) => T | Promise<T>,
-  options?: TachOptions,
-): Promise<Result<T>>;
-```
-
-`tach(...)` acquires an adapter and device, invokes the callback, waits for
-queued work, converts success or failure to a discriminated `Result`, and
-closes the session in every path. It is the compact form for a complete batch:
-
-```ts
-const result = await tach(async (gpu) => {
-  const data = gpu.buffer(initial);
-
-  await gpu.submit(
-    scale(data, 2),
-    scale(data, 2),
-  );
-
-  return data.read();
-});
-```
-
-Every buffer created inside the callback becomes unusable when the scope ends.
-Return host data, not a `ComputeBuffer`, when the caller needs the result.
-
-### Resident work with `openTach`
-
-```ts
-function openTach(options?: TachOptions): Promise<Result<Tach>>;
-```
-
-`openTach()` returns a caller-owned session. Adapter, device, resident buffers,
-compiled shader modules, pipelines, stable bind groups, and the uniform upload
-arena survive across submissions:
-
-```ts
-import { openTach } from "@depths/tach";
-import { scale } from "./build/scale.js";
-
-const opened = await openTach({
-  adapter: { powerPreference: "high-performance" },
-});
-if (!opened.ok) throw new Error(opened.error.message);
-
-const gpu = opened.value;
-const data = gpu.buffer(initial);
-
-try {
-  for (let frame = 0; frame < 1_000; frame++) {
-    await gpu.submit(scale(data, 1.0001));
-    // submit does not insert a queue-idle stall.
-  }
-
-  const final = await data.read(); // The read is the completion boundary.
-  console.log(final);
-} finally {
-  gpu.close();
-}
-```
-
-This is the form for animation, simulation, iterative solvers, and services
-that should not reacquire a device or rebuild resident state per iteration.
-If no final readback is needed, call `await gpu.idle()` before graceful
-shutdown. `close()` itself is immediate and idempotent: it destroys every
-owned buffer, the uniform arena, cached binding state, and the WebGPU device.
-
-A lost device invalidates resident resources. Recovery opens a new session and
-recreates application state.
-
-## Logical size and repeated dispatch
-
-The optional final `DispatchOptions` object controls logical extent and command
-repetition:
+Generated kernels accept an optional final object:
 
 ```ts
 interface DispatchOptions<Size extends DispatchSize = DispatchSize> {
@@ -260,100 +219,86 @@ interface DispatchOptions<Size extends DispatchSize = DispatchSize> {
 }
 ```
 
-`size` must match the kernel's declared coordinate rank:
+`size` matches the coordinate rank:
 
-| Tach kernel | Generated `size` type |
+| Tach declaration | TypeScript `size` |
 |---|---|
 | `kernel[i]` | `number` |
 | `kernel[x, y]` | `readonly [number, number]` |
 | `kernel[x, y, z]` | `readonly [number, number, number]` |
 
-Each component must be a positive safe integer. The runtime divides each
-logical component by the compiler-recorded workgroup component and rounds up.
-The kernel must guard coordinates in the partially filled edge workgroup.
-
-For a one-dimensional kernel, omitted `size` is inferred from the first
-runtime-sized storage buffer. If that is unavailable, the default is exactly
-one workgroup. Two- and three-dimensional shapes are not inferred from flat
-storage; their omitted default is also one workgroup.
-
-Use an explicit extent when it is clearer or when the buffer contains more
-data than one invocation consumes:
+For example:
 
 ```ts
-await gpu.submit(scale(data, 2, { size: elementCount }));
+await gpu.submit(render(pixels, params, { size: [1920, 1080] }));
 ```
 
-`dispatches` must be a positive safe integer. It repeats the same prepared
-command—with the same buffers, uniform snapshot, and workgroup counts—inside
-the containing compute pass:
+Each component must be a positive safe integer. Tach divides by the compiled
+workgroup size and rounds up, so the kernel must guard its edge coordinates.
+
+A one-dimensional kernel can omit `size` when its first runtime-sized storage
+buffer gives the obvious length. Otherwise omission means exactly one
+workgroup. Two- and three-dimensional shapes normally need an explicit size.
+
+`dispatches` repeats one prepared command inside the same compute pass:
 
 ```ts
 await gpu.submit(step(state, params, {
   size: particleCount,
-  dispatches: 128,
+  dispatches: 100,
 }));
 ```
 
-This amortizes command construction and queue submission for iterative kernels.
-Use separate commands when an iteration needs different uniform values.
+Every repetition uses the same buffers, uniform snapshot, and launch size. Use
+separate commands when uniforms differ. Repetition is ordered dispatch, not
+compiler kernel fusion.
 
-## Host data mapping
+## Host data shapes
 
-Generated declarations map Tach types directly:
+Generated declarations perform the mapping for you:
 
-| Tach | TypeScript host shape |
+| Tach value | TypeScript value |
 |---|---|
 | `i32`, `u32`, `f32` | `number` |
-| `atomic<i32>`, `atomic<u32>` in storage | `number` |
-| numeric vectors such as `f32x4` | readonly numeric tuple |
+| storage atomic | `number` |
+| numeric vector | readonly numeric tuple |
 | named struct | generated readonly interface |
 | scalar runtime array | matching typed array or readonly number array |
 | two-/four-lane runtime vector array | flat typed array or tuple array |
 | three-lane runtime vector array | tuple array |
 
-Three-lane vectors use tuple arrays because their GPU element stride contains
-padding. Scalar, two-lane, and four-lane runtime arrays are tightly packed; on
-little-endian hosts the matching `Float32Array`, `Int32Array`, or `Uint32Array`
-can cross the boundary without element-wise packing, and `read()` preserves
-that representation.
+Three-lane GPU vectors have padded element stride, so they use tuple arrays.
+Scalar, two-lane, and four-lane runtime arrays are tightly packed. On a
+little-endian host, matching `Float32Array`, `Int32Array`, and `Uint32Array`
+values cross that boundary without element-by-element packing, and readback
+preserves their representation.
 
-Ordinary arrays and objects are packed with compiler-provided byte offsets and
-strides. The runtime checks integer ranges, vector lane counts, required
-struct fields, complete runtime elements, and minimum resource size. Runtime
-arrays must contain at least one element under the current ABI.
+For object/array values, compiler-emitted codecs validate integer ranges,
+vector lane counts, fields, runtime element completeness, offsets, and strides.
+Application code never writes a padding field or calls a public packer.
 
-Packing is deliberately private. Application code works with generated types
-and `ComputeBuffer`; it does not reproduce shader layout or call a public
-packer.
+## Performance rules that matter
 
-## Performance model
+The first use is cold. It may allocate and upload a buffer, create a shader
+module, compile a pipeline, create a bind group, and grow the uniform arena.
 
-The first submitted use pays unavoidable cold costs:
+After warm-up, generated modules cache shader modules and pipelines per device;
+the session keeps buffers resident, reuses stable bind groups, and shares an
+aligned uniform buffer.
 
-- buffer layout selection, packing, allocation, and upload;
-- shader-module creation; and
-- asynchronous compute-pipeline creation.
+For a hot loop:
 
-After warm-up:
+1. open one persistent session;
+2. create long-lived buffers once;
+3. warm up before measuring;
+4. batch commands at real dependency boundaries; and
+5. avoid `read()` and `idle()` inside the loop unless the CPU needs completion.
 
-- each generated module caches its shader module and pipelines per device;
-- each session keeps buffers resident;
-- stable bind groups are cached by layout and buffer ranges;
-- uniforms share one aligned session buffer that grows as needed; and
-- several commands or repeated dispatches can share one pass and submission.
+The bind-group cache currently retains live combinations for the session. If a
+profile later proves that high-churn applications need bounded eviction, that
+policy belongs in the runtime rather than application code.
 
-For a hot loop, open one persistent session, create long-lived buffers once,
-avoid readback/`idle()` in the hot path, and batch commands at the actual
-application dependency boundary. Measure steady-state work separately from
-first-use compilation and allocation.
-
-The bind-group cache currently retains live binding combinations for the
-session lifetime. Applications with continuously changing combinations should
-destroy obsolete buffers; a bounded eviction policy is a future upgrade if
-profiles justify it.
-
-## WebGPU selection options
+## Options and the public session
 
 Both lifetime APIs accept:
 
@@ -365,12 +310,10 @@ interface TachOptions {
 }
 ```
 
-- `gpu` overrides `navigator.gpu`, which is useful for controlled environments
-  and tests;
-- `adapter` is forwarded to `requestAdapter`; and
-- `device` is forwarded to `requestDevice`.
+`gpu` overrides `navigator.gpu`, mainly for controlled environments and tests.
+The other objects pass through to `requestAdapter` and `requestDevice`.
 
-The resulting `Tach` exposes its selected `adapter` and `device`, plus:
+The opened session is:
 
 ```ts
 interface Tach {
@@ -383,12 +326,12 @@ interface Tach {
 }
 ```
 
-`ComputeBuffer` intentionally does not expose its underlying `GPUBuffer`; the
-compiler/runtime retains ownership of its layout and lifetime.
+`ComputeBuffer` intentionally hides its `GPUBuffer`; Tach owns its layout and
+lifetime.
 
 ## Results and failures
 
-Adapter/device acquisition and scoped execution use error-as-data:
+Opening and scoped work use error-as-data:
 
 ```ts
 type Result<T, E = TachError> =
@@ -403,37 +346,21 @@ interface TachError {
 }
 ```
 
-Current error categories distinguish WebGPU availability, adapter and device
-acquisition, device loss, GPU validation/out-of-memory/internal failures,
-buffer encoding/readback, kernel preparation/submission, lifecycle misuse,
-user callback failures, and native compiler setup/execution.
+Categories distinguish WebGPU availability, adapter/device acquisition and
+loss, GPU validation/out-of-memory/internal errors, buffers, kernels,
+lifecycle misuse, callback failures, and compiler setup/execution.
 
-Methods on a caller-owned persistent session throw or reject on operational
-failure, so use `try`/`finally` and always close. Inside `tach(...)`, those
-failures and callback exceptions are normalized into the returned `Result`.
+Operations on a persistent session throw or reject on failure, so use
+`try`/`finally`. Inside `tach(...)`, failures and callback exceptions become
+the returned `Result`.
 
-The session wraps synchronous WebGPU calls in validation, out-of-memory, and
-internal error scopes. Errors reported asynchronously are retained and surface
-at a later submission or explicit synchronization boundary. Uncaptured errors
-and device loss also invalidate later operations instead of being ignored.
+The runtime uses WebGPU error scopes and retains asynchronous errors. Device
+loss, uncaptured errors, and scoped errors surface at a later submission or
+synchronization boundary instead of disappearing.
 
-## Generated-module boundary
+## Compiler command
 
-Generated `.js` files import `defineModule` from `@depths/tach/internal` and
-embed compiler-owned WGSL, resource descriptors, layouts, and kernel records.
-That subpath exists for generated code; applications should not import it.
-
-The public application entry point is `@depths/tach`. Generated modules export
-only source-named kernels, while their `.d.ts` files import the public
-`ComputeBuffer`, `ComputeDispatch`, and `DispatchOptions` types.
-
-Rebuild `.js`, `.d.ts`, `.tach.json`, WGSL, SPIR-V, and IR together. They form
-one validated compiler result and are not designed to be mixed across compiler
-versions or edited by hand.
-
-## Native compiler CLI
-
-npm exposes the package compiler as `tach`:
+The package exposes the native compiler as `tach`:
 
 ```text
 tach build FILE.tach
@@ -444,63 +371,54 @@ tach spirv-dis FILE.tach
 tach version
 ```
 
-A package script avoids a global installation:
+`build` writes `.tir`, `.wgsl`, `.spv`, `.spvasm`, `.js`, `.d.ts`, and
+`.tach.json` to `build/`. Rebuild them together from `.tach` source.
 
-```json
-{
-  "scripts": {
-    "kernels": "tach build kernels/scale.tach"
-  }
-}
-```
+Published packages support Linux, macOS, and Windows on x64 and arm64. The
+installer selects the release asset for the package version and verifies its
+SHA-256 checksum. Compiler resolution checks, in order:
 
-Compiler resolution uses the first available source:
+1. `TACH_BIN`;
+2. an already installed package compiler;
+3. `dist/tach` or `dist/tach.exe` in a containing development checkout; and
+4. the verified release asset.
 
-1. executable path from `TACH_BIN`;
-2. a compiler already installed into the package;
-3. `dist/tach` or `dist/tach.exe` from a containing Tach development checkout;
-4. the verified native asset for the installed package version.
-
-`TACH_BIN` may be absolute or relative to the current working directory. An
-invalid override is returned as a `compiler-install` error; it does not fall
-through silently.
+An invalid `TACH_BIN` is an error; it does not silently fall through.
 
 ## Node compiler API
 
-The Node-only `@depths/tach/compiler` entry point exposes compiler discovery and
-execution without requiring application code to manage child processes:
+Node-only tools may import `@depths/tach/compiler`:
 
 ```ts
-import {
-  build,
-  compilerPath,
-  runCompiler,
-} from "@depths/tach/compiler";
+import { build, compilerPath, runCompiler } from "@depths/tach/compiler";
 
-const resolved = await compilerPath();
-if (!resolved.ok) throw new Error(resolved.error.message);
+const compiler = await compilerPath();
+if (!compiler.ok) throw new Error(compiler.error.message);
 
 const checked = await runCompiler(["check", "kernels/scale.tach"]);
 if (!checked.ok) throw new Error(checked.error.message);
 
 const built = await build("kernels/scale.tach", { cwd: process.cwd() });
-if (built.ok) {
-  console.log(built.value.path);
-  console.log(built.value.stdout);
-}
+if (!built.ok) throw new Error(built.error.message);
 ```
 
-`runCompiler(args, options?)` captures `stdout`, `stderr`, and the resolved
-executable path. `options.cwd` selects the child working directory;
-`options.env` overlays environment variables. Nonzero exits, signals, spawn
-failures, and setup failures return `Result` errors rather than rejecting the
-API promise.
+These APIs return `Result` values. They capture output and the resolved binary.
+`cwd` selects the child directory and `env` overlays environment variables.
+Do not import this entry point into a browser bundle.
 
-Do not import this Node entry point into browser bundles.
+## Generated code boundary
 
-## Development in the Tach repository
+Generated `.js` imports `defineModule` from `@depths/tach/internal` and embeds
+WGSL plus compiler-owned descriptors. That subpath is for generated code, not
+applications. Application imports belong at `@depths/tach`.
 
-From the repository root:
+The generated JavaScript, declarations, metadata, WGSL, SPIR-V, and IR are one
+validated compiler result. They are not designed to be edited or mixed across
+compiler versions.
+
+## Repository development
+
+From the Tach repository root:
 
 ```sh
 npm ci
@@ -509,21 +427,16 @@ npm run check --workspace=@depths/tach
 npm test --workspace=@depths/tach
 ```
 
-The repository package version is `0.0.0`; its installer therefore uses the
-locally built `dist/tach` compiler and warns, rather than attempting a release
-download, when that binary is missing.
+The workspace tests cover compiler discovery, packing, typed arrays,
+ownership, non-aliasing, batching, size inference, caching, error scopes,
+synchronization, and cleanup with a controlled WebGPU implementation. The
+`browser-test` and `showcase-ts` workspaces exercise real Chromium WebGPU.
 
-The workspace tests cover compiler resolution/execution and the runtime's
-ownership, cloning, packing, typed-array preservation, batching, inference,
-non-aliasing, cache reuse, error scopes, synchronization, and cleanup with a
-controlled WebGPU implementation. Real-browser execution is covered by the
-repository's `browser-test` and `showcase-ts` workspaces.
+Further reading:
 
-## Further reference
-
-- [Tach project overview](https://github.com/Depths-AI/tach)
-- [Language reference](https://github.com/Depths-AI/tach/blob/main/docs/language.md)
-- [Compiler and runtime architecture](https://github.com/Depths-AI/tach/blob/main/docs/architecture.md)
-- [Resource, host, and runtime ABI](https://github.com/Depths-AI/tach/blob/main/docs/abi.md)
+- [Project overview](../README.md)
+- [Language guide](../docs/language.md)
+- [Architecture](../docs/architecture.md)
+- [Resource and runtime ABI](../docs/abi.md)
 
 `@depths/tach` is licensed under `AGPL-3.0-only`.
