@@ -30,7 +30,7 @@ interface HostLayoutField {
 }
 
 interface HostLayout {
-  readonly kind: "i32" | "u32" | "f32" | "vector" | "array" | "runtime" | "struct";
+  readonly kind: "bool" | "i32" | "u32" | "f32" | "vector" | "array" | "runtime" | "struct";
   readonly size?: number;
   readonly stride?: number;
   readonly count?: number;
@@ -43,7 +43,7 @@ interface ResourceDefinition {
   readonly name: string;
   readonly group: number;
   readonly binding: number;
-  readonly kind: "uniform" | "storage";
+  readonly kind: "storage";
   readonly access: "read" | "read_write";
   readonly byteSize?: number;
   readonly minimumByteSize: number;
@@ -51,9 +51,23 @@ interface ResourceDefinition {
   readonly layout: HostLayout;
 }
 
-interface KernelResourceDefinition {
+interface KernelParameterDefinition {
   readonly name: string;
-  readonly resource: number;
+  readonly resource?: number;
+}
+
+interface ParameterFieldDefinition {
+  readonly parameter: number;
+  readonly path: readonly string[];
+  readonly offset: number;
+  readonly layout: HostLayout;
+}
+
+interface ParameterBlockDefinition {
+  readonly group: number;
+  readonly binding: number;
+  readonly byteSize: number;
+  readonly fields: readonly ParameterFieldDefinition[];
 }
 
 interface KernelDefinition {
@@ -61,7 +75,8 @@ interface KernelDefinition {
   readonly entryPoint: string;
   readonly dimensions: 1 | 2 | 3;
   readonly workgroupSize: readonly [number, number, number];
-  readonly resources: readonly KernelResourceDefinition[];
+  readonly parameters: readonly KernelParameterDefinition[];
+  readonly parameterBlock?: ParameterBlockDefinition;
 }
 
 export interface ModuleDefinition {
@@ -116,6 +131,10 @@ function writeValue(
   path: string,
 ): void {
   switch (type.kind) {
+    case "bool":
+      if (typeof value !== "boolean") throw new TypeError(`${path} must be a boolean`);
+      view.setUint32(offset, value ? 1 : 0, true);
+      return;
     case "i32": {
       const scalar = number(value, path);
       if (!Number.isInteger(scalar) || scalar < -2_147_483_648 || scalar > 2_147_483_647) {
@@ -192,6 +211,8 @@ function readValue(
   available: number,
 ): unknown {
   switch (type.kind) {
+    case "bool":
+      return view.getUint32(offset, true) !== 0;
     case "i32":
       return view.getInt32(offset, true);
     case "u32":
@@ -465,6 +486,29 @@ function dispatchOptions(value: DispatchOptions | undefined): {
   return { size: value.size, dispatches };
 }
 
+function packParameters(
+  info: KernelDefinition,
+  block: ParameterBlockDefinition,
+  values: readonly unknown[],
+): Uint8Array {
+  const bytes = new Uint8Array(block.byteSize);
+  const view = new DataView(bytes.buffer);
+  for (const field of block.fields) {
+    const parameter = required(info.parameters[field.parameter], `${info.name} parameter ${field.parameter}`);
+    let value = values[field.parameter];
+    let path = `${info.name}.${parameter.name}`;
+    for (const name of field.path) {
+      if (value === null || typeof value !== "object" || !(name in value)) {
+        throw new TypeError(`${path} is missing field ${name}`);
+      }
+      value = (value as Record<string, unknown>)[name];
+      path += `.${name}`;
+    }
+    writeValue(view, field.offset, field.layout, value, path);
+  }
+  return bytes;
+}
+
 async function compileKernel(
   device: GPUDevice,
   shaderModule: GPUShaderModule,
@@ -473,7 +517,8 @@ async function compileKernel(
 ): Promise<CompiledKernel> {
   const grouped = new Map<number, GPUBindGroupLayoutEntry[]>();
   let maxGroup = -1;
-  for (const parameter of info.resources) {
+  for (const parameter of info.parameters) {
+    if (parameter.resource === undefined) continue;
     const resource = required(resources[parameter.resource], parameter.name);
     maxGroup = Math.max(maxGroup, resource.group);
     let entries = grouped.get(resource.group);
@@ -482,11 +527,20 @@ async function compileKernel(
       binding: resource.binding,
       visibility: shaderStage.compute,
       buffer: {
-        type: resource.kind === "uniform"
-          ? "uniform"
-          : resource.access === "read_write" ? "storage" : "read-only-storage",
+        type: resource.access === "read_write" ? "storage" : "read-only-storage",
         minBindingSize: resource.minimumByteSize,
       },
+    });
+  }
+  if (info.parameterBlock) {
+    const block = info.parameterBlock;
+    maxGroup = Math.max(maxGroup, block.group);
+    let entries = grouped.get(block.group);
+    if (!entries) grouped.set(block.group, entries = []);
+    entries.push({
+      binding: block.binding,
+      visibility: shaderStage.compute,
+      buffer: { type: "uniform", minBindingSize: block.byteSize },
     });
   }
 
@@ -555,7 +609,7 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
         operation: "kernel",
       }));
     }
-    if (values.length !== info.resources.length) {
+    if (values.length !== info.parameters.length) {
       throw new TachFailure(tachError(
         "kernel",
         `${info.name} received the wrong number of parameters`,
@@ -566,10 +620,10 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
     let owner: RuntimeOwner | undefined;
     const storage = new Map<number, BufferState<unknown>>();
     const parametersByBuffer = new Map<BufferState<unknown>, string>();
-    for (let index = 0; index < info.resources.length; index++) {
-      const parameter = required(info.resources[index], `${info.name} parameter ${index}`);
-      const resource = required(definition.resources[parameter.resource], parameter.name);
-      if (resource.kind !== "storage") continue;
+    for (let index = 0; index < info.parameters.length; index++) {
+      const parameter = required(info.parameters[index], `${info.name} parameter ${index}`);
+      if (parameter.resource === undefined) continue;
+      required(definition.resources[parameter.resource], parameter.name);
       const state = getBufferState(
         values[index] as ComputeBuffer<unknown>,
         `${info.name}.${parameter.name}`,
@@ -585,7 +639,7 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
       if (previous) {
         throw new TachFailure(tachError(
           "buffer",
-          `${info.name}.${parameter.name} aliases ${info.name}.${previous}; resource parameters require distinct compute buffers`,
+          `${info.name}.${parameter.name} aliases ${info.name}.${previous}; buffer parameters require distinct compute buffers`,
           { operation: info.name },
         ));
       }
@@ -602,14 +656,10 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
     }
     owner.assertHealthy(info.name);
     let configured: ReturnType<typeof dispatchOptions>;
-    const uniforms: Uint8Array[] = [];
+    const parameters: Uint8Array[] = [];
     try {
       configured = dispatchOptions(options);
-      for (let index = 0; index < info.resources.length; index++) {
-        const parameter = required(info.resources[index], `${info.name} parameter ${index}`);
-        const resource = required(definition.resources[parameter.resource], parameter.name);
-        if (resource.kind === "uniform") uniforms.push(pack(resource, values[index]));
-      }
+      if (info.parameterBlock) parameters.push(packParameters(info, info.parameterBlock, values));
     } catch (cause) {
       throw new TachFailure(normalizeError(cause, "kernel", info.name));
     }
@@ -619,29 +669,33 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
       async prepare(): Promise<PreparedDispatch> {
         const kernel = await compiled(owner, kernelIndex, info);
         return {
-          uniforms,
-          encode(pass, uniformBindings) {
+          parameters,
+          encode(pass, parameterBindings) {
             owner.assertHealthy(info.name);
             const entriesByGroup = new Map<number, BufferBindGroupEntry[]>();
             let inferredSize: number | undefined;
-            let uniformIndex = 0;
-            for (let index = 0; index < info.resources.length; index++) {
+            for (let index = 0; index < info.parameters.length; index++) {
               const parameter = required(
-                info.resources[index],
+                info.parameters[index],
                 `${info.name} parameter ${index}`,
               );
+              if (parameter.resource === undefined) continue;
               const resource = required(definition.resources[parameter.resource], parameter.name);
-              let binding: GPUBufferBinding;
-              if (resource.kind === "storage") {
-                const state = required(storage.get(index), parameter.name);
-                binding = { buffer: materialize(state, resource) };
-                if (info.dimensions === 1) inferredSize ??= runtimeLength(resource, state);
-              } else {
-                binding = required(uniformBindings[uniformIndex++], parameter.name);
-              }
+              const state = required(storage.get(index), parameter.name);
+              const binding: GPUBufferBinding = { buffer: materialize(state, resource) };
+              if (info.dimensions === 1) inferredSize ??= runtimeLength(resource, state);
               let entries = entriesByGroup.get(resource.group);
               if (!entries) entriesByGroup.set(resource.group, entries = []);
               entries.push({ binding: resource.binding, resource: binding });
+            }
+            if (info.parameterBlock) {
+              const block = info.parameterBlock;
+              let entries = entriesByGroup.get(block.group);
+              if (!entries) entriesByGroup.set(block.group, entries = []);
+              entries.push({
+                binding: block.binding,
+                resource: required(parameterBindings[0], `${info.name} parameter block`),
+              });
             }
 
             pass.setPipeline(kernel.pipeline);

@@ -35,28 +35,29 @@ func compileBindings(t *testing.T, source string) (*Artifacts, *Metadata) {
 	return out, &meta
 }
 
-func TestScalarUniformUsesPhysicalWrapperSize(t *testing.T) {
+func TestValuesShareOnePhysicalParameterBlock(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroup(32)
-export function scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
-  if (i < data.length) { data[i] *= factor; }
+export function scale[i](data: buffer<float32[]>, factor: float32, enabled: bool) {
+  if (enabled && i < data.length) { data[i] *= factor; }
 }`)
-	if len(meta.Resources) != 2 {
+	if len(meta.Resources) != 1 {
 		t.Fatalf("resources = %d", len(meta.Resources))
 	}
-	factor := meta.Resources[1]
-	if factor.ByteSize != 16 || factor.MinimumByteSize != 16 {
-		t.Fatalf("factor sizes = byte:%d minimum:%d", factor.ByteSize, factor.MinimumByteSize)
+	block := meta.Kernels[0].ParameterBlock
+	if block == nil || block.Binding != 1 || block.ByteSize != 16 || len(block.Fields) != 2 {
+		t.Fatalf("parameter block = %+v", block)
 	}
-	if !strings.Contains(out.JavaScript, `"name":"factor"`) || !strings.Contains(out.JavaScript, `"byteSize":16`) {
-		t.Fatal("generated JS does not carry the physical uniform wrapper size into its private resource descriptor")
+	if !strings.Contains(out.JavaScript, `"parameterBlock":{"group":0,"binding":1,"byteSize":16`) ||
+		!strings.Contains(out.JavaScript, `"kind":"bool"`) {
+		t.Fatal("generated JS does not carry the packed value block and bool codec")
 	}
 }
 
 func TestDirectRuntimeResourceCarriesHostLayout(t *testing.T) {
 	out, _ := compileBindings(t, `
 @workgroup(1)
-export function clear[i](data: buffer<u32[]>) {
+export function clear[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if !strings.Contains(out.JavaScript, `"kind":"runtime"`) ||
@@ -67,24 +68,24 @@ export function clear[i](data: buffer<u32[]>) {
 
 func TestAtomicResourceUsesUnderlyingHostRepresentation(t *testing.T) {
 	out, _ := compileBindings(t, `
-type Counters = { total: atomic<u32> };
+type Counters = { total: atomic<uint32> };
 @workgroup(1)
 export function increment[i](counters: buffer<Counters>) {
   atomicAdd(counters.total, 1);
 }`)
 	if !strings.Contains(out.JavaScript, `"name":"total","offset":0,"type":{"kind":"u32"`) {
-		t.Fatal("atomic resource does not use its underlying u32 host representation")
+		t.Fatal("atomic resource does not use its underlying uint32 host representation")
 	}
 }
 
 func TestRuntimeResourceDescriptorRecordsMinimumBindingSize(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroup(1)
-export function clear[i](data: buffer<u32[]>) {
+export function clear[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if meta.Resources[0].MinimumByteSize != 4 {
-		t.Fatalf("runtime u32 MinimumByteSize = %d, want 4", meta.Resources[0].MinimumByteSize)
+		t.Fatalf("runtime uint32 MinimumByteSize = %d, want 4", meta.Resources[0].MinimumByteSize)
 	}
 	if !strings.Contains(out.JavaScript, `"minimumByteSize":4`) {
 		t.Fatal("runtime resource descriptor omits Tach's minimum binding size")
@@ -94,7 +95,7 @@ export function clear[i](data: buffer<u32[]>) {
 func TestGeneratedSurfaceMirrorsSource(t *testing.T) {
 	out, meta := compileBindings(t, `
 @workgroup(64)
-export function scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
+export function scale[i](data: buffer<float32[]>, factor: float32) {
   if (i < data.length) { data[i] *= factor; }
 }`)
 	if len(meta.Kernels) != 1 || meta.Kernels[0].Name != "scale" || meta.Kernels[0].EntryPoint != "scale" || meta.Kernels[0].Dimensions != 1 {
@@ -120,7 +121,7 @@ export function scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
 func TestKernelMayBeNamedBuffer(t *testing.T) {
 	out, _ := compileBindings(t, `
 @workgroup(1)
-export function buffer[i](data: buffer<u32[]>) {
+export function buffer[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = 0; }
 }`)
 	if !strings.Contains(out.JavaScript, "export function buffer(data, $dispatch)") ||
@@ -133,10 +134,10 @@ func TestPackedRuntimeArraysExposeTypedHostRepresentations(t *testing.T) {
 	out, _ := compileBindings(t, `
 @workgroup(1)
 export function arrays[i](
-  signed: buffer<i32[]>,
-  unsigned: buffer<u32[]>,
-  floats: buffer<f32[]>,
-  vectors: buffer<f32x4[]>,
+  signed: buffer<int32[]>,
+  unsigned: buffer<uint32[]>,
+  floats: buffer<float32[]>,
+  vectors: buffer<float32x4[]>,
 ) { }
 `)
 	for _, want := range []string{
@@ -153,11 +154,11 @@ export function arrays[i](
 
 func TestSourceOwnedTachPrefixIsNotReserved(t *testing.T) {
 	out, _ := compileBindings(t, `
-type TachBuffer = { value: u32 };
+type TachBuffer = { value: uint32 };
 @workgroup(1)
 export function preserve[i](data: buffer<TachBuffer>) { }
 `)
-	if !strings.Contains(out.Declarations, "export interface TachBuffer") ||
+	if !strings.Contains(out.Declarations, "export type TachBuffer") ||
 		!strings.Contains(out.Declarations, "data: ComputeBuffer<TachBuffer>") {
 		t.Fatal("source-owned TachBuffer name was not preserved exactly")
 	}

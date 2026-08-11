@@ -104,7 +104,7 @@ func TestFixedArraySizeCannotOverflow(t *testing.T) {
 
 func TestBoolHasNoHostLayout(t *testing.T) {
 	if _, err := Of(types.TBool); err == nil {
-		t.Fatal("expected boolean host layout to be rejected")
+		t.Fatal("expected bool host layout to be rejected")
 	}
 }
 

@@ -18,8 +18,8 @@ Save `kernels/scale.tach`:
 
 ```tach
 export function scale[i](
-  values: buffer<f32[]>,
-  factor: uniform<f32>,
+  values: buffer<float32[]>,
+  factor: float32,
 ) {
   if (i < values.length) {
     values[i] *= factor;
@@ -147,7 +147,7 @@ try {
 }
 ```
 
-The adapter, device, shader modules, pipelines, bind groups, uniform arena, and
+The adapter, device, shader modules, pipelines, bind groups, parameter arena, and
 buffers stay resident. `close()` is immediate and idempotent. If graceful GPU
 completion matters, await `idle()` first. A lost device requires a new session
 and recreated application state.
@@ -186,7 +186,7 @@ parameter.
 
 ## Commands, submission, and synchronization
 
-A generated kernel call validates its arguments, snapshots uniform values, and
+A generated kernel call validates its arguments, snapshots plain values, and
 returns a `ComputeDispatch`:
 
 ```ts
@@ -194,7 +194,7 @@ const command = scale(values, 2);
 await gpu.submit(command);
 ```
 
-Buffer arguments remain live handles. Uniform arguments are frozen at command
+Buffer arguments remain live handles. Plain arguments are frozen at command
 construction. Accidentally writing `await scale(...)` throws a targeted error
 instead of silently doing nothing.
 
@@ -249,8 +249,8 @@ await gpu.submit(step(state, params, {
 }));
 ```
 
-Every repetition uses the same buffers, uniform snapshot, and launch size. Use
-separate commands when uniforms differ. Repetition is ordered dispatch, not
+Every repetition uses the same buffers, parameter snapshot, and launch size. Use
+separate commands when values differ. Repetition is ordered dispatch, not
 compiler kernel fusion.
 
 ## Host data shapes
@@ -259,10 +259,11 @@ Generated declarations perform the mapping for you:
 
 | Tach value | TypeScript value |
 |---|---|
-| `i32`, `u32`, `f32` | `number` |
+| `int32`, `uint32`, `float32` | `number` |
+| `bool` | `boolean` |
 | storage atomic | `number` |
 | numeric vector | readonly numeric tuple |
-| named struct | generated readonly interface |
+| named struct | generated readonly object type |
 | scalar runtime array | matching typed array or readonly number array |
 | two-/four-lane runtime vector array | flat typed array or tuple array |
 | three-lane runtime vector array | tuple array |
@@ -280,11 +281,11 @@ Application code never writes a padding field or calls a public packer.
 ## Performance rules that matter
 
 The first use is cold. It may allocate and upload a buffer, create a shader
-module, compile a pipeline, create a bind group, and grow the uniform arena.
+module, compile a pipeline, create a bind group, and grow the parameter arena.
 
 After warm-up, generated modules cache shader modules and pipelines per device;
 the session keeps buffers resident, reuses stable bind groups, and shares an
-aligned uniform buffer.
+aligned compiler-owned parameter buffer.
 
 For a hot loop:
 

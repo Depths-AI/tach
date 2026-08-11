@@ -32,3 +32,26 @@ func TestVerifyRejectsDuplicateSSAIDsAcrossRegions(t *testing.T) {
 		t.Fatalf("Verify() error = %v, want duplicate SSA definition", err)
 	}
 }
+
+func TestVerifyRequiresEveryKernelValueMapping(t *testing.T) {
+	module := &Module{
+		Resources: []Resource{{Name: "out", Type: types.Runtime(types.TU32), Access: Mutable}},
+		Functions: []*Function{{
+			Name: "write", Compute: true, Return: types.TVoid, Workgroup: [3]uint32{1, 1, 1},
+			Indices: []Param{{Name: "i", ID: 1, Type: types.TU32}},
+			Params:  []Param{{Name: "value", ID: 2, Type: types.TU32}},
+			KernelParams: []KernelParam{
+				{Name: "out", Resource: 0},
+				{Name: "value", Value: 2, Resource: -1},
+			},
+			Body: &Block{Term: &Return{}},
+		}},
+	}
+	if err := Verify(module); err != nil {
+		t.Fatal(err)
+	}
+	module.Functions[0].KernelParams = module.Functions[0].KernelParams[:1]
+	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "value parameter value is not mapped") {
+		t.Fatalf("Verify() error = %v, want missing kernel value mapping", err)
+	}
+}

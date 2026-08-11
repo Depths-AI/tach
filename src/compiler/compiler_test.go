@@ -11,9 +11,9 @@ import (
 
 func TestCompletePipelineStructuredSSA(t *testing.T) {
 	source := `
-type Params = { scale: f32, count: u32 };
+type Params = { scale: float32, count: uint32 };
 @workgroup(64)
-export function transform[start](data: buffer<f32[]>, params: uniform<Params>) {
+export function transform[start](data: buffer<float32[]>, params: Params) {
   let i = start;
   let acc = 0.0;
   while (i < params.count && acc < 1000.0) {
@@ -48,12 +48,67 @@ export function transform[start](data: buffer<f32[]>, params: uniform<Params>) {
 	}
 }
 
+func TestKernelValuesUseOneCrossTargetParameterBlock(t *testing.T) {
+	r, err := Compile("parameters.tach", `
+type Settings = { enabled: bool, gain: float32 };
+export function apply[i](data: buffer<float32[]>, settings: Settings, bias: float32) {
+  if (settings.enabled && i < data.length) { data[i] = data[i] * settings.gain + bias; }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(r.IR, "uniform") || !strings.Contains(r.IR, "settings=%2: Settings, bias=%3: float32") {
+		t.Fatalf("Core IR did not retain target-neutral value parameters:\n%s", r.IR)
+	}
+	if strings.Count(r.WGSL, "var<uniform>") != 1 || !strings.Contains(r.WGSL, "!= 0u") {
+		t.Fatalf("WGSL did not lower values and bool through one physical block:\n%s", r.WGSL)
+	}
+	if !strings.Contains(r.SPIRVAsm, `"__tach_parameters_apply"`) || strings.Contains(r.SPIRVAsm, "OpFunctionParameter") {
+		t.Fatalf("SPIR-V did not lower entry values through a physical block:\n%s", r.SPIRVAsm)
+	}
+	if !strings.Contains(r.TypeScript, "export type Settings") || !strings.Contains(r.TypeScript, "readonly enabled: boolean") {
+		t.Fatalf("generated TypeScript did not preserve the logical source types:\n%s", r.TypeScript)
+	}
+	if strings.Contains(r.JavaScript, `"path":null`) || !strings.Contains(r.JavaScript, `"path":[]`) {
+		t.Fatalf("generated runtime plan has a non-canonical scalar path:\n%s", r.JavaScript)
+	}
+	var metadata struct {
+		Resources []json.RawMessage `json:"resources"`
+		Kernels   []struct {
+			Parameters []struct {
+				Kind string `json:"kind"`
+			} `json:"parameters"`
+			ParameterBlock *struct {
+				Binding  uint32 `json:"binding"`
+				ByteSize uint32 `json:"byteSize"`
+				Fields   []struct {
+					Parameter int      `json:"parameter"`
+					Path      []string `json:"path"`
+				} `json:"fields"`
+			} `json:"parameterBlock"`
+		} `json:"kernels"`
+	}
+	if err := json.Unmarshal(r.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	block := metadata.Kernels[0].ParameterBlock
+	if len(metadata.Resources) != 1 || block == nil || block.Binding != 1 || block.ByteSize != 16 || len(block.Fields) != 3 {
+		t.Fatalf("metadata parameter ABI = %+v", metadata)
+	}
+	if got := metadata.Kernels[0].Parameters; len(got) != 3 || got[0].Kind != "buffer" || got[1].Kind != "value" || got[2].Kind != "value" {
+		t.Fatalf("logical parameters = %+v", got)
+	}
+	if block.Fields[2].Parameter != 2 || block.Fields[2].Path == nil || len(block.Fields[2].Path) != 0 {
+		t.Fatalf("scalar field path = %#v", block.Fields[2])
+	}
+}
+
 func TestCompletePipelineAtomicsAndBarriers(t *testing.T) {
 	source := `
-type Counters = { total: atomic<u32> };
+type Counters = { total: atomic<uint32> };
 @workgroup(64)
 export function accumulate[i](counters: buffer<Counters>) {
-  workgroup scratch: atomic<u32>[64];
+  let scratch: shared<atomic<uint32>[64]>;
   const lane = i % 64;
   if (lane == 0) { atomicStore(scratch[0], 0); }
   workgroupBarrier();
@@ -85,7 +140,7 @@ export function accumulate[i](counters: buffer<Counters>) {
 func TestBarrierUniformityRejectsDivergentControl(t *testing.T) {
 	_, err := Compile("bad.tach", `
 @workgroup(64)
-export function bad[i](data: buffer<u32[]>) {
+export function bad[i](data: buffer<uint32[]>) {
   if (i % 64 == 0) { workgroupBarrier(); }
 }`)
 	if err == nil || !strings.Contains(err.Error(), "non-uniform control flow") {
@@ -96,7 +151,7 @@ export function bad[i](data: buffer<u32[]>) {
 func TestBarrierUniformityAllowsVaryingCarriedDataWithUniformTripCount(t *testing.T) {
 	_, err := Compile("uniform-loop.tach", `
 @workgroup(64)
-export function good[index](data: buffer<u32[]>, params: uniform<u32>) {
+export function good[index](data: buffer<uint32[]>, params: uint32) {
   let i = 0;
   let varying = index % 64;
   while (i < params) {
@@ -114,7 +169,7 @@ export function good[index](data: buffer<u32[]>, params: uniform<u32>) {
 
 func TestAtomicLoadNeedsNoSourceAccessQualifier(t *testing.T) {
 	r, err := Compile("atomic-load.tach", `
-type Counters = { total: atomic<u32> };
+type Counters = { total: atomic<uint32> };
 @workgroup(1)
 export function bad[i](counters: buffer<Counters>) { atomicLoad(counters.total); }
 `)
@@ -129,12 +184,12 @@ export function bad[i](counters: buffer<Counters>) { atomicLoad(counters.total);
 func TestNumericLiteralCanonicalization(t *testing.T) {
 	r, err := Compile("numbers.tach", `
 @workgroup(1)
-export function numbers[i](out: buffer<u32[]>) {
-  const mask: u32 = 0xff00_ff00;
-  const hex: u32 = 0xff;
-  const count: u32 = 0b1010;
-  const scale: f32 = 1.25e-3;
-  if (i < out.length) { out[i] = mask + hex + count + u32(scale); }
+export function numbers[i](out: buffer<uint32[]>) {
+  const mask: uint32 = 0xff00_ff00;
+  const hex: uint32 = 0xff;
+  const count: uint32 = 0b1010;
+  const scale: float32 = 1.25e-3;
+  if (i < out.length) { out[i] = mask + hex + count + uint32(scale); }
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -151,14 +206,14 @@ export function numbers[i](out: buffer<u32[]>) {
 
 func TestSuffixlessNumericInferenceIsOperandOrderIndependent(t *testing.T) {
 	r, err := Compile("literal-order.tach", `
-export function literals[i](out: buffer<f32x4>) {
+export function literals[i](out: buffer<float32x4>) {
   const signed = i == 0 ? 1 : -2;
-  out = f32x4(1 + 2.0, 2.0 + 1, 1.0 + -2, f32(signed));
+  out = float32x4(1 + 2.0, 2.0 + 1, 1.0 + -2, float32(signed));
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(r.IR, "const i32") || strings.Count(r.IR, "const f32") != 2 {
+	if !strings.Contains(r.IR, "const int32") || strings.Count(r.IR, "const float32") != 2 {
 		t.Fatalf("suffixless binary/conditional literals did not infer order-independent numeric types:\n%s", r.IR)
 	}
 }
@@ -166,16 +221,16 @@ export function literals[i](out: buffer<f32x4>) {
 func TestCompletePipelineBitwiseAndPortableShifts(t *testing.T) {
 	source := `
 @workgroup(32)
-export function bitwise[i](out: buffer<u32[]>) {
-  let u: u32 = 0xff00;
-  let s: i32 = -64;
+export function bitwise[i](out: buffer<uint32[]>) {
+  let u: uint32 = 0xff00;
+  let s: int32 = -64;
   const left = u << 40;
   const logical = u >> 36;
   const arithmetic = s >> 35;
   let mixed = (left | logical) ^ ~u;
   mixed &= 0xffff;
   mixed <<= 33;
-  if (i < out.length) { out[i] = mixed | u32(arithmetic); }
+  if (i < out.length) { out[i] = mixed | uint32(arithmetic); }
 }`
 	r, err := Compile("bitwise.tach", source)
 	if err != nil {
@@ -201,11 +256,11 @@ export function bitwise[i](out: buffer<u32[]>) {
 func TestCompletePipelineMathIntrinsics(t *testing.T) {
 	source := `
 @workgroup(64)
-export function math[i](out: buffer<f32x4[]>) {
+export function math[i](out: buffer<float32x4[]>) {
   if (i < out.length) {
-    const a = f32x3(f32(i) + 1.0, 2.0, 3.0);
+    const a = float32x3(float32(i) + 1.0, 2.0, 3.0);
     const b = normalize(a);
-    const c = cross(a, f32x3(0.0, 1.0, 0.0));
+    const c = cross(a, float32x3(0.0, 1.0, 0.0));
     const len = length(a);
     const dist = distance(a, c);
     const d = dot(a, b);
@@ -214,8 +269,8 @@ export function math[i](out: buffer<f32x4[]>) {
     const expo = exp2(log2(len + 1.0)) + exp(log(len + 1.0));
     const powered = pow(len + 1.0, 2.0);
     const rounded = floor(powered) + ceil(dist) + trunc(shaped);
-    const bounded: u32 = clamp(min(i, 1024), 1, max(i, 1));
-    out[i] = f32x4(b.x, b.y, b.z, shaped + expo + rounded + f32(bounded));
+    const bounded: uint32 = clamp(min(i, 1024), 1, max(i, 1));
+    out[i] = float32x4(b.x, b.y, b.z, shaped + expo + rounded + float32(bounded));
   }
 }`
 	r, err := Compile("math.tach", source)
@@ -243,7 +298,7 @@ func TestFloatMinMaxClampAreRejectedUntilPortableSpecialValueSemanticsExist(t *t
 	for _, expr := range []string{"min(1.0, 2.0)", "max(1.0, 2.0)", "clamp(1.0, 0.0, 2.0)"} {
 		_, err := Compile("float-bounds.tach", `
 @workgroup(1)
-export function bad[i](out: buffer<f32[]>) {
+export function bad[i](out: buffer<float32[]>) {
   if (i < out.length) { out[i] = `+expr+`; }
 }`)
 		if err == nil || !strings.Contains(err.Error(), "integer") {
@@ -254,11 +309,11 @@ export function bad[i](out: buffer<f32[]>) {
 
 func TestCompilationIsByteDeterministic(t *testing.T) {
 	source := `
-type Params = { scale: f32, count: u32 };
-function shape(x: f32): f32 { return sin(x) * exp2(x); }
-function enabled(value: boolean): boolean { return value; }
+type Params = { scale: float32, count: uint32 };
+function shape(x: float32): float32 { return sin(x) * exp2(x); }
+function enabled(value: bool): bool { return value; }
 @workgroup(64)
-export function deterministic[i](data: buffer<f32[]>, params: uniform<Params>) {
+export function deterministic[i](data: buffer<float32[]>, params: Params) {
   if (enabled(i < params.count && i < data.length)) { data[i] = shape(data[i] * params.scale); }
 }`
 	a, err := Compile("deterministic.tach", source)
@@ -277,8 +332,8 @@ export function deterministic[i](data: buffer<f32[]>, params: uniform<Params>) {
 func TestForLoopLowersToSameStructuredSSA(t *testing.T) {
 	r, err := Compile("for.tach", `
 @workgroup(64)
-export function counted[index](data: buffer<u32[]>) {
-  const lanes = u32x4(1, 2, 3, 4);
+export function counted[index](data: buffer<uint32[]>) {
+  const lanes = uint32x4(1, 2, 3, 4);
   let sum = 0;
   for (let i = 0; i < 4; i++) { sum += lanes[i]; }
   if (index < data.length) { data[index] = sum; }
@@ -294,7 +349,7 @@ export function counted[index](data: buffer<u32[]>) {
 func TestConditionalExpressionUsesStructuredValueIf(t *testing.T) {
 	r, err := Compile("conditional.tach", `
 @workgroup(32)
-export function choose[i](out: buffer<u32[]>) {
+export function choose[i](out: buffer<uint32[]>) {
   if (i < out.length) { out[i] = (i & 1) == 0 ? i : i + 1; }
 }`)
 	if err != nil {
@@ -308,7 +363,7 @@ export function choose[i](out: buffer<u32[]>) {
 func TestVectorLanePlacesAndElseIf(t *testing.T) {
 	r, err := Compile("lanes.tach", `
 @workgroup(32)
-export function lanes[i](data: buffer<u32x4[]>) {
+export function lanes[i](data: buffer<uint32x4[]>) {
   if (i < data.length) {
     if (i == 0) { data[i].x = 1; }
     else if (i == 1) { data[i][1] = 2; }
@@ -326,28 +381,28 @@ export function lanes[i](data: buffer<u32x4[]>) {
 func TestTachVectorCompositionAndSwizzlesStayTargetNeutral(t *testing.T) {
 	r, err := Compile("vectors.tach", `
 @workgroup(32)
-export function vectors[i](data: buffer<f32x4[]>) {
+export function vectors[i](data: buffer<float32x4[]>) {
   if (i < data.length) {
-    const low = f32x2(1, 2);
-    const value = f32x4(low, 3.0, 4.0);
-    data[i] = f32x4(value.yx, value.zw);
+    const low = float32x2(1, 2);
+    const value = float32x4(low, 3.0, 4.0);
+    data[i] = float32x4(value.yx, value.zw);
   }
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(r.IR, "f32x4") || !strings.Contains(r.IR, "extract") || strings.Contains(r.IR, "vec4") {
+	if !strings.Contains(r.IR, "float32x4") || !strings.Contains(r.IR, "extract") || strings.Contains(r.IR, "vec4") {
 		t.Fatalf("Core IR did not retain Tach-native vector semantics:\n%s", r.IR)
 	}
 	if !strings.Contains(r.WGSL, "vec4<f32>") {
-		t.Fatalf("WGSL backend did not lower Tach f32x4:\n%s", r.WGSL)
+		t.Fatalf("WGSL backend did not lower Tach float32x4:\n%s", r.WGSL)
 	}
 }
 
 func TestVectorScalarArithmeticIsNormalizedInsideCore(t *testing.T) {
 	r, err := Compile("vector-scalars.tach", `
 @workgroup(32)
-export function vectorScalars[i](values: buffer<f32x4[]>, bits: buffer<u32x4[]>) {
+export function vectorScalars[i](values: buffer<float32x4[]>, bits: buffer<uint32x4[]>) {
   if (i < values.length && i < bits.length) {
     values[i] = pow(values[i] + 1, 2) / 2;
     bits[i] = (bits[i] << 3) | 1;
@@ -356,7 +411,7 @@ export function vectorScalars[i](values: buffer<f32x4[]>, bits: buffer<u32x4[]>)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(r.IR, "composite f32x4") < 2 || strings.Count(r.IR, "composite u32x4") < 2 {
+	if strings.Count(r.IR, "composite float32x4") < 2 || strings.Count(r.IR, "composite uint32x4") < 2 {
 		t.Fatalf("scalar broadcasts were not made explicit in Core IR:\n%s", r.IR)
 	}
 	for _, targetSyntax := range []string{"= vec4<f32>(", "= vec4<u32>("} {
@@ -368,16 +423,25 @@ export function vectorScalars[i](values: buffer<f32x4[]>, bits: buffer<u32x4[]>)
 
 func TestLegacyAndTargetShapedSourceFormsAreRejected(t *testing.T) {
 	tests := []struct{ name, source, want string }{
-		{"fn keyword", `fn old(x: f32): f32 { return x; }`, "expected type, function, or export function declaration"},
-		{"compute keyword", `export compute old[i](data: buffer<u32[]>) { }`, `expected "function"`},
-		{"bool type", `function old(value: bool): bool { return value; }`, `unknown type "bool"`},
+		{"fn keyword", `fn old(x: float32): float32 { return x; }`, "expected type, function, or export function declaration"},
+		{"compute keyword", `export compute old[i](data: buffer<uint32[]>) { }`, `expected "function"`},
+		{"boolean type", `function old(value: boolean): boolean { return value; }`, `unknown type "boolean"`},
+		{"short integer", `function old(value: u32): u32 { return value; }`, `unknown type "u32"`},
+		{"short signed integer", `function old(value: i32): i32 { return value; }`, `unknown type "i32"`},
+		{"short float", `function old(value: f32): f32 { return value; }`, `unknown type "f32"`},
+		{"short vector", `function old(value: f32x4): f32x4 { return value; }`, `unknown type "f32x4"`},
+		{"uniform wrapper", `@workgroup(1) export function old[i](data: buffer<uint32[]>, value: uniform<uint32>) { }`, `unknown generic type "uniform"`},
+		{"workgroup declaration", `@workgroup(1) export function old[i](data: buffer<uint32[]>) { workgroup scratch: uint32; }`, `expected ;`},
+		{"initialized shared memory", `@workgroup(1) export function old[i](data: buffer<uint32[]>) { let scratch: shared<uint32> = 0; }`, `shared<T> is only valid in an uninitialized kernel-body let declaration`},
+		{"nested shared memory", `@workgroup(1) export function old[i](data: buffer<uint32[]>) { if (true) { let scratch: shared<uint32>; } }`, `shared variables must be declared in the kernel body`},
+		{"empty type", `type Empty = {}; export function old[i](data: buffer<uint32[]>) {}`, `type Empty requires at least one field`},
 		{"vector name", `@workgroup(1) export function old[i](data: buffer<vec4f[]>) { }`, `unknown type "vec4f"`},
-		{"resource wrapper", `@workgroup(1) export function old[i](data: storage<u32[]>) { }`, "uniform<T> or buffer<T>"},
-		{"resource coordinates", `@workgroup(1) export function old[i](@bind(0, 0) data: buffer<u32[]>) { }`, "expected identifier"},
-		{"intrinsic spelling", `@workgroup(1) export function old[i](data: buffer<f32>) { data = inverseSqrt(data); }`, `unknown callable function "inverseSqrt"`},
-		{"ambient invocation ID", `@workgroup(1) export function old[i](data: buffer<u32[]>) { data[0] = globalId.x; }`, `unknown identifier "globalId"`},
-		{"implicit indices", `@workgroup(1) export function old(data: buffer<u32[]>) { }`, `expected [`},
-		{"old workgroup attribute", `@workgroupSize(1) export function old[i](data: buffer<u32[]>) { }`, `unknown kernel attribute @workgroupSize`},
+		{"resource wrapper", `@workgroup(1) export function old[i](data: storage<uint32[]>) { }`, `unknown generic type "storage"`},
+		{"resource coordinates", `@workgroup(1) export function old[i](@bind(0, 0) data: buffer<uint32[]>) { }`, "expected identifier"},
+		{"intrinsic spelling", `@workgroup(1) export function old[i](data: buffer<float32>) { data = inverseSqrt(data); }`, `unknown callable function "inverseSqrt"`},
+		{"ambient invocation ID", `@workgroup(1) export function old[i](data: buffer<uint32[]>) { data[0] = globalId.x; }`, `unknown identifier "globalId"`},
+		{"implicit indices", `@workgroup(1) export function old(data: buffer<uint32[]>) { }`, `expected [`},
+		{"old workgroup attribute", `@workgroupSize(1) export function old[i](data: buffer<uint32[]>) { }`, `unknown kernel attribute @workgroupSize`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -391,22 +455,22 @@ func TestLegacyAndTargetShapedSourceFormsAreRejected(t *testing.T) {
 
 func TestLogicalIndicesAndPortableWorkgroupDefaults(t *testing.T) {
 	r, err := Compile("indices.tach", `
-export function linear[i](one: buffer<u32[]>) {
+export function linear[i](one: buffer<uint32[]>) {
   if (i < one.length) { one[i] = i; }
 }
-export function planar[x, y](two: buffer<u32[]>) {
+export function planar[x, y](two: buffer<uint32[]>) {
   if (x < two.length) { two[x] = x + y; }
 }
-export function volume[x, y, z](three: buffer<u32[]>) {
+export function volume[x, y, z](three: buffer<uint32[]>) {
   if (x < three.length) { three[x] = x + y + z; }
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"compute @linear[i=%1] workgroup(256,1,1)",
-		"compute @planar[x=%1, y=%2] workgroup(16,16,1)",
-		"compute @volume[x=%1, y=%2, z=%3] workgroup(8,8,4)",
+		"compute @linear[i=%1](one=@0) workgroup(256,1,1)",
+		"compute @planar[x=%1, y=%2](two=@1) workgroup(16,16,1)",
+		"compute @volume[x=%1, y=%2, z=%3](three=@2) workgroup(8,8,4)",
 	} {
 		if !strings.Contains(r.IR, want) {
 			t.Fatalf("Core IR missing %q:\n%s", want, r.IR)
@@ -438,13 +502,13 @@ export function volume[x, y, z](three: buffer<u32[]>) {
 
 func TestLogicalIndexAndWorkgroupDeclarationsAreValidated(t *testing.T) {
 	tests := []struct{ source, want string }{
-		{`export function none[](out: buffer<u32[]>) { }`, "requires 1 to 3 logical indices"},
-		{`export function many[a, b, c, d](out: buffer<u32[]>) { }`, "requires 1 to 3 logical indices"},
-		{`export function duplicate[i, i](out: buffer<u32[]>) { }`, `duplicate logical index "i"`},
-		{`export function collision[i](i: buffer<u32[]>) { }`, `duplicate parameter "i"`},
-		{`@workgroup(257) export function wide[i](out: buffer<u32[]>) { }`, "portable limit 256"},
-		{`@workgroup(32, 16) export function crowded[x, y](out: buffer<u32[]>) { }`, "portable limit is 256"},
-		{`@workgroup(16, 2) export function rankMismatch[i](out: buffer<u32[]>) { }`, "expects 1 to 1 integer arguments"},
+		{`export function none[](out: buffer<uint32[]>) { }`, "requires 1 to 3 logical indices"},
+		{`export function many[a, b, c, d](out: buffer<uint32[]>) { }`, "requires 1 to 3 logical indices"},
+		{`export function duplicate[i, i](out: buffer<uint32[]>) { }`, `duplicate logical index "i"`},
+		{`export function collision[i](i: buffer<uint32[]>) { }`, `duplicate parameter "i"`},
+		{`@workgroup(257) export function wide[i](out: buffer<uint32[]>) { }`, "portable limit 256"},
+		{`@workgroup(32, 16) export function crowded[x, y](out: buffer<uint32[]>) { }`, "portable limit is 256"},
+		{`@workgroup(16, 2) export function rankMismatch[i](out: buffer<uint32[]>) { }`, "expects 1 to 1 integer arguments"},
 	}
 	for _, test := range tests {
 		_, err := Compile("invalid.tach", test.source)
@@ -457,7 +521,7 @@ func TestLogicalIndexAndWorkgroupDeclarationsAreValidated(t *testing.T) {
 func TestKernelEntryPointIsOneCrossTargetABIName(t *testing.T) {
 	r, err := Compile("entry.tach", `
 @workgroup(8)
-export function step[i](data: buffer<u32[]>) {
+export function step[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = i; }
 }`)
 	if err != nil {
@@ -486,12 +550,12 @@ export function step[i](data: buffer<u32[]>) {
 func TestBackendsAssignModuleGlobalResourceBindings(t *testing.T) {
 	r, err := Compile("multi.tach", `
 @workgroup(8)
-export function writeU32[i](data: buffer<u32[]>) {
+export function writeU32[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = i; }
 }
 @workgroup(8)
-export function writeF32[i](data: buffer<f32[]>) {
-  if (i < data.length) { data[i] = f32(i); }
+export function writeF32[i](data: buffer<float32[]>) {
+  if (i < data.length) { data[i] = float32(i); }
 }`)
 	if err != nil {
 		t.Fatal(err)

@@ -36,10 +36,10 @@ type Field struct {
 
 var (
 	TVoid = &Type{Kind: Void, Name: "void"}
-	TBool = &Type{Kind: Bool, Name: "boolean"}
-	TI32  = &Type{Kind: I32, Name: "i32"}
-	TU32  = &Type{Kind: U32, Name: "u32"}
-	TF32  = &Type{Kind: F32, Name: "f32"}
+	TBool = &Type{Kind: Bool, Name: "bool"}
+	TI32  = &Type{Kind: I32, Name: "int32"}
+	TU32  = &Type{Kind: U32, Name: "uint32"}
+	TF32  = &Type{Kind: F32, Name: "float32"}
 )
 
 func Vec(elem *Type, lanes int) *Type      { return &Type{Kind: Vector, Elem: elem, Lanes: lanes} }
@@ -133,7 +133,7 @@ func IsSignedNumeric(t *Type) bool {
 
 // ContainsRuntimeArray is true when the type has a runtime-sized tail, directly
 // or through a nested structure. Such values can be addressed in buffers but
-// cannot be loaded, constructed, passed by value, or used in uniform buffers.
+// cannot be loaded, constructed, passed by value, or used in parameter blocks.
 func ContainsRuntimeArray(t *Type) bool {
 	if t == nil {
 		return false
@@ -214,31 +214,31 @@ func ParseBuiltin(name string) *Type {
 	switch name {
 	case "void":
 		return TVoid
-	case "boolean":
+	case "bool":
 		return TBool
-	case "i32":
+	case "int32":
 		return TI32
-	case "u32":
+	case "uint32":
 		return TU32
-	case "f32":
+	case "float32":
 		return TF32
-	case "f32x2":
+	case "float32x2":
 		return Vec(TF32, 2)
-	case "f32x3":
+	case "float32x3":
 		return Vec(TF32, 3)
-	case "f32x4":
+	case "float32x4":
 		return Vec(TF32, 4)
-	case "u32x2":
+	case "uint32x2":
 		return Vec(TU32, 2)
-	case "u32x3":
+	case "uint32x3":
 		return Vec(TU32, 3)
-	case "u32x4":
+	case "uint32x4":
 		return Vec(TU32, 4)
-	case "i32x2":
+	case "int32x2":
 		return Vec(TI32, 2)
-	case "i32x3":
+	case "int32x3":
 		return Vec(TI32, 3)
-	case "i32x4":
+	case "int32x4":
 		return Vec(TI32, 4)
 	}
 	return nil

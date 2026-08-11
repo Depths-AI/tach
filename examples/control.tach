@@ -1,12 +1,13 @@
 type Params = {
-  scale: f32,
-  count: u32,
+  scale: float32,
+  count: uint32,
+  enabled: bool,
 };
 
 @workgroup(64)
 export function transform[start](
-  data: buffer<f32[]>,
-  params: uniform<Params>,
+  data: buffer<float32[]>,
+  params: Params,
 ) {
   let i = start;
   let acc = 0.0;
@@ -23,7 +24,7 @@ export function transform[start](
     out += 1.0;
   }
 
-  if (start < params.count) {
+  if (params.enabled && start < params.count) {
     data[start] = out;
   }
 }

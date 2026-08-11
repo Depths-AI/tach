@@ -1,33 +1,33 @@
 type ParticleParams = {
-  dt: f32,
-  count: u32,
-  steps: u32,
+  dt: float32,
+  count: uint32,
+  steps: uint32,
 };
 
 type FractalParams = {
-  width: u32,
-  height: u32,
-  maxIterations: u32,
-  scale: f32,
-  centerX: f32,
-  centerY: f32,
+  width: uint32,
+  height: uint32,
+  maxIterations: uint32,
+  scale: float32,
+  centerX: float32,
+  centerY: float32,
 };
 
 type MatrixParams = {
-  size: u32,
+  size: uint32,
 };
 
 type OptionParams = {
-  count: u32,
+  count: uint32,
 };
 
 type RenderParams = {
-  width: u32,
-  height: u32,
-  time: f32,
+  width: uint32,
+  height: uint32,
+  time: float32,
 };
 
-function normalCDF(x: f32): f32 {
+function normalCDF(x: float32): float32 {
   const magnitude = abs(x);
   const t = 1.0 / (1.0 + 0.2316419 * magnitude);
   const polynomial = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
@@ -36,30 +36,30 @@ function normalCDF(x: f32): f32 {
   return x < 0.0 ? 1.0 - positive : positive;
 }
 
-function saturate(x: f32): f32 {
+function saturate(x: float32): float32 {
   return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
 }
 
-function smoothRange(edge0: f32, edge1: f32, x: f32): f32 {
+function smoothRange(edge0: float32, edge1: float32, x: float32): float32 {
   const t = saturate((x - edge0) / (edge1 - edge0));
   return t * t * (3.0 - 2.0 * t);
 }
 
-function blend(base: f32, layer: f32, amount: f32): f32 {
+function blend(base: float32, layer: float32, amount: float32): float32 {
   return base + (layer - base) * saturate(amount);
 }
 
-function hashPixel(x: u32, y: u32): f32 {
+function hashPixel(x: uint32, y: uint32): float32 {
   let value = x * 374761393 + y * 668265263;
   value = (value ^ (value >> 13)) * 1274126177;
   value ^= value >> 16;
-  return f32(value & 65535) / 65535.0;
+  return float32(value & 65535) / 65535.0;
 }
 
 export function integrateParticles[i](
-  positions: buffer<f32[]>,
-  velocities: buffer<f32[]>,
-  params: uniform<ParticleParams>,
+  positions: buffer<float32[]>,
+  velocities: buffer<float32[]>,
+  params: ParticleParams,
 ) {
   if (i < params.count) {
     for (let step = 0; step < params.steps; step++) {
@@ -69,15 +69,15 @@ export function integrateParticles[i](
 }
 
 export function mandelbrot[x, y](
-  output: buffer<u32[]>,
-  params: uniform<FractalParams>,
+  output: buffer<uint32[]>,
+  params: FractalParams,
 ) {
   if (x >= params.width || y >= params.height) {
     return;
   }
 
-  const cx = (f32(x) - f32(params.width) * 0.5) * params.scale + params.centerX;
-  const cy = (f32(y) - f32(params.height) * 0.5) * params.scale + params.centerY;
+  const cx = (float32(x) - float32(params.width) * 0.5) * params.scale + params.centerX;
+  const cy = (float32(y) - float32(params.height) * 0.5) * params.scale + params.centerY;
   let zx = 0.0;
   let zy = 0.0;
   let iteration = 0;
@@ -92,13 +92,13 @@ export function mandelbrot[x, y](
 
 @workgroup(16, 16)
 export function multiplyMatrices[column, row](
-  left: buffer<f32[]>,
-  right: buffer<f32[]>,
-  output: buffer<f32[]>,
-  params: uniform<MatrixParams>,
+  left: buffer<float32[]>,
+  right: buffer<float32[]>,
+  output: buffer<float32[]>,
+  params: MatrixParams,
 ) {
-  workgroup leftTile: f32[256];
-  workgroup rightTile: f32[256];
+  let leftTile: shared<float32[256]>;
+  let rightTile: shared<float32[256]>;
 
   const localColumn = column % 16;
   const localRow = row % 16;
@@ -133,17 +133,17 @@ export function multiplyMatrices[column, row](
 }
 
 export function priceOptions[i](
-  output: buffer<f32[]>,
-  params: uniform<OptionParams>,
+  output: buffer<float32[]>,
+  params: OptionParams,
 ) {
   if (i >= params.count) {
     return;
   }
 
-  const spot = 80.0 + f32(i % 400) * 0.1;
-  const strike = 90.0 + f32(i % 200) * 0.1;
-  const years = 0.25 + f32(i % 365) / 365.0;
-  const volatility = 0.15 + f32(i % 100) * 0.001;
+  const spot = 80.0 + float32(i % 400) * 0.1;
+  const strike = 90.0 + float32(i % 200) * 0.1;
+  const years = 0.25 + float32(i % 365) / 365.0;
+  const volatility = 0.15 + float32(i % 100) * 0.001;
   const rate = 0.03;
   const sigmaRootTime = volatility * sqrt(years);
   const d1 = (log(spot / strike) + (rate + 0.5 * volatility * volatility) * years) / sigmaRootTime;
@@ -152,16 +152,16 @@ export function priceOptions[i](
 }
 
 export function proceduralScene[x, y](
-  rgba: buffer<u32[]>,
-  params: uniform<RenderParams>,
+  rgba: buffer<uint32[]>,
+  params: RenderParams,
 ) {
   if (x >= params.width || y >= params.height) {
     return;
   }
 
-  const u = (f32(x) + 0.5) / f32(params.width);
-  const v = (f32(y) + 0.5) / f32(params.height);
-  const aspect = f32(params.width) / f32(params.height);
+  const u = (float32(x) + 0.5) / float32(params.width);
+  const v = (float32(y) + 0.5) / float32(params.height);
+  const aspect = float32(params.width) / float32(params.height);
   const px = (u - 0.5) * aspect;
   const py = 0.5 - v;
 
@@ -198,8 +198,8 @@ export function proceduralScene[x, y](
   if (seed > 0.91 && py > -0.06) {
     const centerX = 2.0 + hashPixel(cellX + 17, cellY + 31) * 8.0;
     const centerY = 2.0 + hashPixel(cellX + 47, cellY + 11) * 8.0;
-    const starX = f32(x % cellSize) - centerX;
-    const starY = f32(y % cellSize) - centerY;
+    const starX = float32(x % cellSize) - centerX;
+    const starY = float32(y % cellSize) - centerY;
     const core = exp(-(starX * starX + starY * starY) * 1.7);
     const rays = 0.22 * exp(-abs(starX) * 4.0 - abs(starY) * 0.45) +
       0.22 * exp(-abs(starY) * 4.0 - abs(starX) * 0.45);
@@ -239,16 +239,16 @@ export function proceduralScene[x, y](
 
   const vignette = saturate(1.0 - (px * px * 0.5 + (v - 0.5) * (v - 0.5)) * 1.35);
   const grain = 0.97 + hashPixel(x + 101, y + 79) * 0.06;
-  const scanline = 0.975 + 0.025 * sin(f32(y) * 1.65);
+  const scanline = 0.975 + 0.025 * sin(float32(y) * 1.65);
   const exposure = (0.62 + 0.38 * vignette) * grain * scanline;
   red *= exposure;
   green *= exposure;
   blue *= exposure;
   const alpha = 0.94 + 0.06 * vignette;
 
-  const red8 = u32(saturate(red) * 255.0 + 0.5);
-  const green8 = u32(saturate(green) * 255.0 + 0.5);
-  const blue8 = u32(saturate(blue) * 255.0 + 0.5);
-  const alpha8 = u32(saturate(alpha) * 255.0 + 0.5);
+  const red8 = uint32(saturate(red) * 255.0 + 0.5);
+  const green8 = uint32(saturate(green) * 255.0 + 0.5);
+  const blue8 = uint32(saturate(blue) * 255.0 + 0.5);
+  const alpha8 = uint32(saturate(alpha) * 255.0 + 0.5);
   rgba[y * params.width + x] = red8 | (green8 << 8) | (blue8 << 16) | (alpha8 << 24);
 }

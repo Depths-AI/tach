@@ -13,7 +13,7 @@ import (
 func TestDeadExpressionTreeIsRemoved(t *testing.T) {
 	a, err := parser.Parse("dead.tach", `
 @workgroup(1)
-export function dead[i](out: buffer<f32[]>) {
+export function dead[i](out: buffer<float32[]>) {
   const unused = sin(2.0) * cos(3.0);
   if (i < out.length) { out[i] = 1.0; }
 }`)
@@ -40,7 +40,7 @@ export function dead[i](out: buffer<f32[]>) {
 func TestRepeatedPureValuesAreCanonicalized(t *testing.T) {
 	a, err := parser.Parse("common.tach", `
 @workgroup(64)
-export function common[i](out: buffer<u32[]>) {
+export function common[i](out: buffer<uint32[]>) {
   const a = i + 1;
   const b = i + 1;
   if (i < out.length) { out[i] = a + b; }
@@ -59,23 +59,23 @@ export function common[i](out: buffer<u32[]>) {
 	if got := strings.Count(dump, " = + %1,"); got != 1 {
 		t.Fatalf("repeated index expression was emitted %d times, want one:\n%s", got, dump)
 	}
-	if got := strings.Count(dump, "const u32 1"); got != 1 {
+	if got := strings.Count(dump, "const uint32 1"); got != 1 {
 		t.Fatalf("constant 1 was emitted %d times, want one:\n%s", got, dump)
 	}
 }
 
 func TestImmutableMemoryValuesAreCanonicalized(t *testing.T) {
 	a, err := parser.Parse("memory.tach", `
-type Params = { scale: f32 };
+type Params = { scale: float32 };
 @workgroup(1)
-export function memory[i](values: buffer<f32[]>, source: buffer<f32[]>, params: uniform<Params>) {
+export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, params: Params) {
   const scale = params.scale + params.scale;
   const length = values.length + values.length;
   const immutable = source[0] + source[0];
   const before = values[0];
   values[0] = scale;
   const after = values[0];
-  values[1] = before + after + immutable + f32(length);
+  values[1] = before + after + immutable + float32(length);
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -88,8 +88,8 @@ export function memory[i](values: buffer<f32[]>, source: buffer<f32[]>, params: 
 		t.Fatal(err)
 	}
 	dump := ir.Dump(m)
-	if got := strings.Count(dump, "load"); got != 4 {
-		t.Fatalf("got %d loads, want one uniform, one immutable-buffer, and two ordered mutable-buffer loads:\n%s", got, dump)
+	if got := strings.Count(dump, "load"); got != 3 {
+		t.Fatalf("got %d loads, want one immutable-buffer and two ordered mutable-buffer loads:\n%s", got, dump)
 	}
 	if got := strings.Count(dump, "array_length"); got != 1 {
 		t.Fatalf("array length was emitted %d times, want one:\n%s", got, dump)
@@ -98,9 +98,9 @@ export function memory[i](values: buffer<f32[]>, source: buffer<f32[]>, params: 
 
 func TestUnusedPureMemoryAndCallResultsAreRemoved(t *testing.T) {
 	a, err := parser.Parse("dead-memory.tach", `
-function square(x: f32): f32 { return x * x; }
+function square(x: float32): float32 { return x * x; }
 @workgroup(1)
-export function dead[i](out: buffer<f32[]>) {
+export function dead[i](out: buffer<float32[]>) {
   const count = out.length;
   const value = out[0];
   square(value);
@@ -126,12 +126,12 @@ export function dead[i](out: buffer<f32[]>) {
 
 func TestLoopBufferValuesAreLazilyPromotedToRegisterCarriers(t *testing.T) {
 	a, err := parser.Parse("loop-memory.tach", `
-type Params = { dt: f32, count: u32, steps: u32 };
+type Params = { dt: float32, count: uint32, steps: uint32 };
 @workgroup(64)
 export function integrate[i](
-  positions: buffer<f32[]>,
-  velocities: buffer<f32[]>,
-  params: uniform<Params>,
+  positions: buffer<float32[]>,
+  velocities: buffer<float32[]>,
+  params: Params,
 ) {
   if (i < params.count) {
     for (let step = 0; step < params.steps; step++) {
@@ -176,8 +176,8 @@ export function integrate[i](
 			}
 		}
 	}
-	if lazyLoads != 3 {
-		t.Fatalf("got %d lazy first-iteration loads, want position, velocity, and dt:\n%s", lazyLoads, dump)
+	if lazyLoads != 2 {
+		t.Fatalf("got %d lazy first-iteration loads, want position and velocity; dt is a kernel value:\n%s", lazyLoads, dump)
 	}
 	loopOffset := strings.Index(dump, "loop params=")
 	if strings.Count(dump, "store &") != 1 || strings.Index(dump[loopOffset:], "store &") < 0 {
@@ -192,7 +192,7 @@ export function integrate[i](
 func TestLoopBufferPromotionStopsAtSynchronization(t *testing.T) {
 	a, err := parser.Parse("synchronized-loop.tach", `
 @workgroup(4)
-export function synchronized[i](data: buffer<u32[]>, steps: uniform<u32>) {
+export function synchronized[i](data: buffer<uint32[]>, steps: uint32) {
   for (let step = 0; step < steps; step++) {
     data[i % 4] += 1;
     workgroupBarrier();

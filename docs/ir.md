@@ -19,8 +19,8 @@ Consider a complete kernel:
 
 ```tach
 export function scale[i](
-  data: buffer<f32[]>,
-  factor: uniform<f32>,
+  data: buffer<float32[]>,
+  factor: float32,
 ) {
   if (i < data.length) {
     data[i] *= factor;
@@ -31,19 +31,16 @@ export function scale[i](
 Its optimized dump has this shape:
 
 ```text
-resource @0 data: buffer<f32[]> access=mutable
-resource @1 factor: uniform<f32>
+buffer @0 data: float32[] access=mutable
 
-compute @scale[i=%1] workgroup(256,1,1) {
-  &p1 = place.resource @0 : f32[]
-  %2 = array_length &p1
-  %3 = < %1, %2 : boolean
-  if %3 -> [] {
-    &p3 = place.index &p1, %1 : f32
-    %4 = load &p3 : f32
-    &p4 = place.resource @1 : f32
-    %5 = load &p4 : f32
-    %6 = * %4, %5 : f32
+compute @scale[i=%1](data=@0, factor=%2: float32) workgroup(256,1,1) {
+  &p1 = place.resource @0 : float32[]
+  %3 = array_length &p1
+  %4 = < %1, %3 : bool
+  if %4 -> [] {
+    &p3 = place.index &p1, %1 : float32
+    %5 = load &p3 : float32
+    %6 = * %5, %2 : float32
     store &p3, %6
     yield []
   } else {
@@ -57,8 +54,9 @@ This example exposes the central distinctions:
 
 - `%N` identifies an immutable typed value;
 - `&pN` identifies a typed addressable place;
-- resources live at module scope;
-- the kernel's logical coordinate is an ordinary `u32` parameter;
+- buffers live at module scope;
+- the kernel's logical coordinate is an ordinary `uint32` parameter;
+- the plain `factor` input is an ordinary immutable value;
 - memory reads and writes are explicit; and
 - control flow remains structured.
 
@@ -73,42 +71,41 @@ Module
   Functions
 ```
 
-Structs retain logical field names and types. Resources define the external
-kernel interface. Functions include value helpers and exported compute entry
+Structs retain logical field names and types. Resources are the module's
+external buffers. Functions include value helpers and exported compute entry
 points.
 
-### Resources
+### Buffer resources
 
-Each resource records:
+Each buffer records:
 
 ```text
 name
-kind       uniform | buffer
-type       logical resource type
+type       logical buffer type
 access     read | mutable
 source span
 ```
 
-Resource order is module-global and deterministic. A kernel keeps a
-`ResourceParams` list mapping each source parameter name and position to that
-module resource. Physical bindings and byte layout are derived later by the
-ABI layer; neither is encoded in the logical IR type.
-
-Uniforms are always read-only. Buffer access is inferred from the lowered
-effects. The verifier rejects stores through read-only roots.
+Buffer order is module-global and deterministic. A kernel keeps a
+`KernelParams` list that preserves source parameter order and maps each entry
+to either a module buffer or an SSA value parameter. Physical bindings and byte
+layout are derived later by the ABI layer; neither is encoded in a logical IR
+type. Buffer access is inferred from lowered effects, and the verifier rejects
+stores through read-only roots.
 
 ### Functions
 
 A helper function records typed value parameters, a result type, and a body.
-A kernel instead records:
+A kernel records:
 
 - one to three logical index parameters;
 - its three-axis workgroup size;
-- its resource-parameter mapping;
+- its ordinary immutable value parameters;
+- its source-order buffer/value mapping;
 - its workgroup-memory declarations; and
 - a `void` body.
 
-Logical indices are explicit `u32` parameters in Core IR. There is no Core IR
+Logical indices are explicit `uint32` parameters in Core IR. There is no Core IR
 notion of a WGSL builtin variable or SPIR-V `BuiltIn` decoration. A backend
 privately chooses the target input needed to produce each used coordinate.
 
@@ -150,18 +147,19 @@ pointer and supports no pointer arithmetic, casting, or comparison.
 
 | Instruction | Meaning |
 |---|---|
-| `PlaceRoot` | root a path at a uniform or buffer resource |
-| `PlaceWorkgroup` | root a path at a workgroup variable |
+| `PlaceRoot` | root a path at a buffer resource |
+| `PlaceWorkgroup` | root a path at a shared variable |
 | `PlaceField` | project a struct field or constant vector lane |
 | `PlaceIndex` | index an array, runtime array, or vector dynamically |
 
 `Load`, `Store`, `ArrayLength`, and atomic instructions consume places. The
-place chain makes the root resource, address space, element type, and write
+place chain makes the root buffer, address space, element type, and write
 permission recoverable at every memory operation.
 
 This distinction also explains source locals. Rebinding a source `let` does
 not create a hidden memory cell. It creates new values and structured merge or
-loop results. Only buffers, uniforms, and workgroup variables become places.
+loop results. Only buffers and shared variables become places. Plain kernel
+parameters are values from their first Core IR appearance onward.
 
 ## 4. Structured control flow
 
@@ -188,7 +186,7 @@ An `If` owns a condition value, a then block, an else block, and zero or more
 typed results:
 
 ```text
-%result = if %condition -> f32 {
+%result = if %condition -> float32 {
   ...
   yield [%thenValue]
 } else {
@@ -221,7 +219,7 @@ loop params=[(%index <- %initialIndex), (%sum <- %initialSum)] {
 }
 ```
 
-The condition yields one `boolean`. The body's `Continue` supplies one next value
+The condition yields one `bool`. The body's `Continue` supplies one next value
 for every parameter. When the condition is false, the current parameters
 become the loop results. Source `while` and `for` both lower to this single
 form.
@@ -242,10 +240,10 @@ source statements and loops without a continuing path.
 Core IR uses resolved logical Tach types:
 
 ```text
-boolean, i32, u32, f32
+bool, int32, uint32, float32
 numeric vectors with 2, 3, or 4 lanes
 named structs
-atomic<i32>, atomic<u32>
+atomic<int32>, atomic<uint32>
 fixed arrays
 runtime arrays
 void
@@ -256,9 +254,11 @@ descriptor decorations, WGSL wrapper structs, or SPIR-V storage-class pointer
 types.
 
 The layout package independently computes host-visible alignment, offsets,
-strides, and minimum resource sizes. Each backend then establishes an explicit
-boundary between logical values and physical resource memory. This prevents
-ABI padding from contaminating helper signatures or optimization.
+strides, and minimum buffer sizes. The ABI planner also flattens each kernel's
+plain values into one physical parameter block without changing Core IR. Each
+backend establishes an explicit boundary between logical values and physical
+buffer/block memory. This prevents padding and backend storage rules from
+contaminating helper signatures or optimization.
 
 ## 6. Effects and synchronization
 
@@ -269,14 +269,15 @@ The instructions with observable memory or execution effects are:
 - `BarrierWorkgroup`; and
 - `BarrierBuffer`.
 
-Loads from mutable buffers and workgroup memory are not freely reusable because
-an effect may change the addressed value. Loads from uniforms and inferred
-read-only buffers may be reused when the place and structured dominance match.
+Loads from mutable buffers and shared memory are not freely reusable because an
+effect may change the addressed value. Loads from inferred read-only buffers
+may be reused when the place and structured dominance match. Plain kernel
+parameters require no memory load at all; they are immutable SSA values.
 
 ### Atomics
 
 An atomic instruction records a Tach operation, an atomic place, an underlying
-`i32` or `u32` type, and any value operand/result. The portable operation set
+`int32` or `uint32` type, and any value operand/result. The portable operation set
 is load, store, add, subtract, minimum, maximum, bitwise and/or/xor, and
 exchange. Target scope and memory-semantics operands are backend decisions, not
 Core IR operands.
@@ -288,10 +289,9 @@ uniformity analysis classifies each available value conservatively as uniform
 or varying within a workgroup and follows structured branches plus loop-carried
 fixed points.
 
-Constants are uniform. Logical coordinates, mutable buffer/workgroup loads,
-and atomic results are varying. A uniform-resource load remains uniform only
-when its address is uniform. A barrier is valid only when all enclosing
-control decisions are uniform.
+Constants and plain kernel parameters are uniform. Logical coordinates,
+buffer/shared-memory loads, and atomic results are varying. A barrier is valid
+only when all enclosing control decisions are uniform.
 
 ### Workgroup zero initialization
 
@@ -305,12 +305,12 @@ before source instructions execute.
 `ir.Verify` is the executable contract for Core IR. It checks, among other
 invariants:
 
-- well-formed modules, resources, functions, and workgroup sizes;
+- well-formed modules, buffers, functions, and workgroup sizes;
 - unique, nonzero value and place definitions;
 - availability of every operand at its structured use;
 - exact operand, result, branch-yield, and loop-carrier types;
 - direct helper-call signatures and valid returns;
-- valid resource and workgroup roots;
+- valid buffer and shared-memory roots;
 - field, array, runtime-array, and vector projections;
 - place-root access and legal loads/stores;
 - runtime-sized and nonconstructible type restrictions;
@@ -345,7 +345,7 @@ verify
 The pass reuses exact repeated constants, unary/binary operations, conversions,
 intrinsics, extracts, pure helper calls, and small composites where structured
 dominance makes reuse valid. It also reuses identical place paths, array
-lengths, and loads from uniforms or inferred read-only buffers.
+lengths, and loads from inferred read-only buffers.
 
 Mutable loads, atomics, stores, and barriers are not commoned. Composites and
 calls wider than four operands currently skip commoning to avoid allocating a
@@ -354,7 +354,7 @@ key in the hot path; they remain correct and may still become dead.
 ### Loop-invariant code motion
 
 Pure instructions whose operands are defined outside a loop move before it.
-An immutable resource load from the condition region can move because the
+An immutable buffer load from the condition region can move because the
 condition executes before deciding whether to enter. A body-only load is not
 eagerly hoisted across a possible zero-trip loop.
 
@@ -365,7 +365,7 @@ buffer place with a loop-carried value. It performs the first load lazily,
 keeps subsequent iterations in SSA, and writes back only if the loop ran.
 
 Promotion is deliberately conservative. It stops when the loop contains
-synchronization, atomics, an early exit, another touch of the same resource,
+synchronization, atomics, an early exit, another touch of the same buffer,
 multiple candidate loads/stores, or a place defined inside the loop. This
 preserves memory order and zero-trip behavior without speculative alias
 analysis.
@@ -409,8 +409,9 @@ obtain this optimization.
 | Core concept | WGSL lowering | SPIR-V lowering |
 |---|---|---|
 | logical index | selected builtin input expression | selected interface builtin |
+| plain kernel value | reconstructed from one parameter block | reconstructed from one parameter block |
 | immutable value | expression or generated local | SSA result ID |
-| resource/workgroup place | access expression | pointer plus access chain |
+| buffer/shared place | access expression | pointer plus access chain |
 | load/store | value read/assignment | `OpLoad` / `OpStore` |
 | structured `If` | WGSL `if` | selection merge, branches, `OpPhi` |
 | structured `Loop` | generated locals and `loop` | loop merge, branches, `OpPhi` |

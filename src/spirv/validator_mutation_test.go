@@ -30,8 +30,8 @@ func compileSPVForMutation(t *testing.T) []byte {
 	t.Helper()
 	return compileSourceForMutation(t, `
 @workgroup(1)
-export function math[i](out: buffer<f32[]>) {
-  if (i < out.length) { out[i] = sin(f32(i)); }
+export function math[i](out: buffer<float32[]>) {
+  if (i < out.length) { out[i] = sin(float32(i)); }
 }`)
 }
 
@@ -128,9 +128,9 @@ func TestValidatorRejectsUnsupportedGLSL450Instruction(t *testing.T) {
 
 func TestValidatorRejectsNonScalarDynamicVectorIndex(t *testing.T) {
 	bin := compileSourceForMutation(t, `
-function lane(value: u32x4, index: u32): u32 { return value[index]; }
+function lane(value: uint32x4, index: uint32): uint32 { return value[index]; }
 @workgroup(1)
-export function readLane[i](out: buffer<u32>) { out = lane(u32x4(1, 2, 3, 4), i); }
+export function readLane[i](out: buffer<uint32>) { out = lane(uint32x4(1, 2, 3, 4), i); }
 `)
 	m, err := Decode(bin)
 	if err != nil {
@@ -152,9 +152,9 @@ export function readLane[i](out: buffer<u32>) { out = lane(u32x4(1, 2, 3, 4), i)
 
 func TestValidatorRejectsFunctionControlOutsideEmittedProfile(t *testing.T) {
 	bin := compileSourceForMutation(t, `
-function twice(x: f32): f32 { return x + x; }
+function twice(x: float32): float32 { return x + x; }
 @workgroup(1)
-export function useHelper[i](out: buffer<f32>) { out = twice(2.0); }
+export function useHelper[i](out: buffer<float32>) { out = twice(2.0); }
 `)
 	m, err := Decode(bin)
 	if err != nil {
@@ -227,8 +227,8 @@ func TestValidatorRequiresDescriptorArrayStride(t *testing.T) {
 func TestValidatorRejectsWorkgroupArrayStride(t *testing.T) {
 	bin := compileSourceForMutation(t, `
 @workgroup(1)
-export function arrayMemory[i](out: buffer<u32>) {
-  workgroup scratch: u32[4];
+export function arrayMemory[i](out: buffer<uint32>) {
+  let scratch: shared<uint32[4]>;
   scratch[0] = 7;
   out = scratch[0];
 }`)
@@ -242,10 +242,10 @@ export function arrayMemory[i](out: buffer<u32>) {
 
 func TestValidatorRejectsWorkgroupMemberOffsets(t *testing.T) {
 	bin := compileSourceForMutation(t, `
-type Pair = { x: u32, y: u32 };
+type Pair = { x: uint32, y: uint32 };
 @workgroup(1)
-export function structMemory[i](out: buffer<u32>) {
-  workgroup pair: Pair;
+export function structMemory[i](out: buffer<uint32>) {
+  let pair: shared<Pair>;
   pair = { x: 7, y: 9 };
   const copy: Pair = pair;
   out = copy.x + copy.y;

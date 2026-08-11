@@ -30,15 +30,23 @@ type resourceMetadata struct {
 }
 
 type kernelMetadata struct {
-	Name          string                   `json:"name"`
-	EntryPoint    string                   `json:"entryPoint"`
-	WorkgroupSize [3]uint32                `json:"workgroupSize"`
-	Resources     []kernelResourceMetadata `json:"resources"`
+	Name           string                    `json:"name"`
+	EntryPoint     string                    `json:"entryPoint"`
+	WorkgroupSize  [3]uint32                 `json:"workgroupSize"`
+	Parameters     []kernelParameterMetadata `json:"parameters"`
+	ParameterBlock *parameterBlockMetadata   `json:"parameterBlock"`
 }
 
-type kernelResourceMetadata struct {
+type kernelParameterMetadata struct {
 	Name     string `json:"name"`
-	Resource int    `json:"resource"`
+	Kind     string `json:"kind"`
+	Resource *int   `json:"resource"`
+}
+
+type parameterBlockMetadata struct {
+	Group    uint32 `json:"group"`
+	Binding  uint32 `json:"binding"`
+	ByteSize uint32 `json:"byteSize"`
 }
 
 type adapter struct {
@@ -395,11 +403,12 @@ func (h *vulkanHarness) dispatch(
 	spirv []byte,
 	metadataJSON []byte,
 	kernelName string,
-	resources map[string][]byte,
+	buffers map[string][]byte,
+	parameters []byte,
 	invocations [3]uint32,
 ) (output map[string][]byte, err error) {
 	mark := h.validationMark()
-	output, err = h.dispatchUnchecked(spirv, metadataJSON, kernelName, resources, invocations)
+	output, err = h.dispatchUnchecked(spirv, metadataJSON, kernelName, buffers, parameters, invocations)
 	err = errors.Join(err, validationError(h.validationSince(mark)))
 	return output, err
 }
@@ -425,7 +434,8 @@ func (h *vulkanHarness) dispatchUnchecked(
 	spirv []byte,
 	metadataJSON []byte,
 	kernelName string,
-	resources map[string][]byte,
+	buffers map[string][]byte,
+	parameters []byte,
 	invocations [3]uint32,
 ) (map[string][]byte, error) {
 	if len(spirv) < 20 || len(spirv)%4 != 0 {
@@ -455,47 +465,74 @@ func (h *vulkanHarness) dispatchUnchecked(
 	}
 
 	type boundResource struct {
+		name     string
+		data     []byte
+		readback bool
 		metadata resourceMetadata
 		buffer   vk.Buffer
 		memory   vk.DeviceMemory
 		size     vk.DeviceSize
 		coherent bool
 	}
-	bound := make([]boundResource, len(kernel.Resources))
-	for i, parameter := range kernel.Resources {
-		if parameter.Resource < 0 || parameter.Resource >= len(metadata.Resources) {
-			return nil, fmt.Errorf("kernel resource %s has invalid index %d", parameter.Name, parameter.Resource)
-		}
-		resource := metadata.Resources[parameter.Resource]
-		data, ok := resources[parameter.Name]
-		if !ok {
-			return nil, fmt.Errorf("kernel resource %s has no test data", parameter.Name)
-		}
-		if len(data) < int(resource.MinimumByteSize) {
-			return nil, fmt.Errorf("kernel resource %s has %d bytes, needs at least %d", parameter.Name, len(data), resource.MinimumByteSize)
-		}
-		if resource.ByteSize != 0 && len(data) != int(resource.ByteSize) {
-			return nil, fmt.Errorf("kernel resource %s has %d bytes, needs exactly %d", parameter.Name, len(data), resource.ByteSize)
-		}
-		buffer, memory, allocationSize, coherent, err := h.createBuffer(resource.Kind, data)
-		if err != nil {
-			for j := 0; j < i; j++ {
-				vk.DestroyBuffer(h.device, bound[j].buffer, nil)
-				vk.FreeMemory(h.device, bound[j].memory, nil)
-			}
-			return nil, fmt.Errorf("resource %s: %w", parameter.Name, err)
-		}
-		bound[i] = boundResource{
-			metadata: resource, buffer: buffer, memory: memory, size: allocationSize, coherent: coherent,
-		}
-	}
-	defer func() {
+	bound := make([]boundResource, 0, len(kernel.Parameters)+1)
+	destroyBound := func() {
 		for _, resource := range bound {
 			vk.DestroyBuffer(h.device, resource.buffer, nil)
 			vk.FreeMemory(h.device, resource.memory, nil)
 		}
-	}()
-
+	}
+	defer destroyBound()
+	for _, parameter := range kernel.Parameters {
+		if parameter.Kind == "value" {
+			continue
+		}
+		if parameter.Kind != "buffer" || parameter.Resource == nil || *parameter.Resource < 0 || *parameter.Resource >= len(metadata.Resources) {
+			return nil, fmt.Errorf("kernel buffer %s has invalid metadata", parameter.Name)
+		}
+		resource := metadata.Resources[*parameter.Resource]
+		data, ok := buffers[parameter.Name]
+		if !ok {
+			return nil, fmt.Errorf("kernel buffer %s has no test data", parameter.Name)
+		}
+		if len(data) < int(resource.MinimumByteSize) {
+			return nil, fmt.Errorf("kernel buffer %s has %d bytes, needs at least %d", parameter.Name, len(data), resource.MinimumByteSize)
+		}
+		if resource.ByteSize != 0 && len(data) != int(resource.ByteSize) {
+			return nil, fmt.Errorf("kernel buffer %s has %d bytes, needs exactly %d", parameter.Name, len(data), resource.ByteSize)
+		}
+		buffer, memory, allocationSize, coherent, err := h.createBuffer(resource.Kind, data)
+		if err != nil {
+			return nil, fmt.Errorf("buffer %s: %w", parameter.Name, err)
+		}
+		bound = append(bound, boundResource{
+			name: parameter.Name, data: data, readback: true,
+			metadata: resource, buffer: buffer, memory: memory, size: allocationSize, coherent: coherent,
+		})
+	}
+	if len(buffers) != len(bound) {
+		return nil, fmt.Errorf("kernel %s received %d buffer inputs, want %d", kernel.Name, len(buffers), len(bound))
+	}
+	if kernel.ParameterBlock == nil {
+		if len(parameters) != 0 {
+			return nil, fmt.Errorf("kernel %s has no parameter block", kernel.Name)
+		}
+	} else {
+		if len(parameters) != int(kernel.ParameterBlock.ByteSize) {
+			return nil, fmt.Errorf("kernel %s parameter block has %d bytes, needs %d", kernel.Name, len(parameters), kernel.ParameterBlock.ByteSize)
+		}
+		parameterMetadata := resourceMetadata{
+			Name: "parameters", Group: kernel.ParameterBlock.Group, Binding: kernel.ParameterBlock.Binding,
+			Kind: "uniform", ByteSize: kernel.ParameterBlock.ByteSize, MinimumByteSize: kernel.ParameterBlock.ByteSize,
+		}
+		buffer, memory, allocationSize, coherent, err := h.createBuffer(parameterMetadata.Kind, parameters)
+		if err != nil {
+			return nil, fmt.Errorf("parameter block: %w", err)
+		}
+		bound = append(bound, boundResource{
+			name: "parameters", data: parameters, metadata: parameterMetadata,
+			buffer: buffer, memory: memory, size: allocationSize, coherent: coherent,
+		})
+	}
 	setBindings := map[uint32][]vk.DescriptorSetLayoutBinding{}
 	var maxSet uint32
 	for _, resource := range bound {
@@ -566,7 +603,7 @@ func (h *vulkanHarness) dispatchUnchecked(
 		writes[i] = vk.WriteDescriptorSet{
 			SType: vk.StructureTypeWriteDescriptorSet, DstSet: descriptorSets[resource.metadata.Group],
 			DstBinding: resource.metadata.Binding, DescriptorCount: 1, DescriptorType: typeName,
-			PBufferInfo: []vk.DescriptorBufferInfo{{Buffer: resource.buffer, Range: vk.DeviceSize(len(resources[kernel.Resources[i].Name]))}},
+			PBufferInfo: []vk.DescriptorBufferInfo{{Buffer: resource.buffer, Range: vk.DeviceSize(len(resource.data))}},
 		}
 	}
 	vk.UpdateDescriptorSets(h.device, uint32(len(writes)), writes, 0, nil)
@@ -669,9 +706,12 @@ func (h *vulkanHarness) dispatchUnchecked(
 		return nil, err
 	}
 
-	output := make(map[string][]byte, len(bound))
-	for i, resource := range bound {
-		data := make([]byte, len(resources[kernel.Resources[i].Name]))
+	output := make(map[string][]byte, len(buffers))
+	for _, resource := range bound {
+		if !resource.readback {
+			continue
+		}
+		data := make([]byte, len(resource.data))
 		var mapped unsafe.Pointer
 		if err := result("map result buffer", vk.MapMemory(h.device, resource.memory, 0, resource.size, 0, &mapped)); err != nil {
 			return nil, err
@@ -690,7 +730,7 @@ func (h *vulkanHarness) dispatchUnchecked(
 		}
 		copy(data, unsafe.Slice((*byte)(mapped), len(data)))
 		vk.UnmapMemory(h.device, resource.memory)
-		output[kernel.Resources[i].Name] = data
+		output[resource.name] = data
 	}
 	return output, nil
 }

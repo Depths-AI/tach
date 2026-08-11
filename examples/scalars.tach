@@ -1,6 +1,6 @@
 export function scale[i](
-  data: buffer<f32[]>,
-  factor: uniform<f32>,
+  data: buffer<float32[]>,
+  factor: float32,
 ) {
   if (i < data.length) {
     data[i] *= factor;

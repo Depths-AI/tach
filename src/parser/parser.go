@@ -331,24 +331,6 @@ func (p *Parser) block() (*ast.BlockStmt, error) {
 }
 func (p *Parser) stmt() (ast.Stmt, error) {
 	switch {
-	case p.text("workgroup"):
-		start := p.take()
-		n, err := p.expect(lexer.Ident)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.Colon); err != nil {
-			return nil, err
-		}
-		ty, err := p.typeExpr()
-		if err != nil {
-			return nil, err
-		}
-		semi, err := p.expect(lexer.Semicolon)
-		if err != nil {
-			return nil, err
-		}
-		return &ast.WorkgroupStmt{Name: n.Text, Type: ty, Span: join(start.Span, semi.Span)}, nil
 	case p.text("const") || p.text("let"):
 		start := p.take()
 		mut := start.Text == "let"
@@ -363,6 +345,17 @@ func (p *Parser) stmt() (ast.Stmt, error) {
 			if err != nil {
 				return nil, err
 			}
+		}
+		if !p.at(lexer.Assign) {
+			shared, ok := ty.(*ast.GenericType)
+			if !mut || !ok || shared.Name != "shared" || len(shared.Args) != 1 {
+				return nil, p.err(p.cur(), "expected '=' or an uninitialized shared<T> declaration")
+			}
+			semi, err := p.expect(lexer.Semicolon)
+			if err != nil {
+				return nil, err
+			}
+			return &ast.WorkgroupStmt{Name: n.Text, Type: shared.Args[0], Span: join(start.Span, semi.Span)}, nil
 		}
 		if _, err = p.expect(lexer.Assign); err != nil {
 			return nil, err

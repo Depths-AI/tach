@@ -72,10 +72,10 @@ export interface BufferBindGroupEntry {
 }
 
 export interface PreparedDispatch {
-  readonly uniforms: readonly Uint8Array[];
+  readonly parameters: readonly Uint8Array[];
   encode(
     pass: GPUComputePassEncoder,
-    uniforms: readonly GPUBufferBinding[],
+    parameters: readonly GPUBufferBinding[],
   ): void;
 }
 
@@ -138,8 +138,8 @@ class Session implements Tach, RuntimeOwner {
   #nextObjectID = 1;
   #submissionTail: Promise<void> = Promise.resolve();
   #deferredFailure?: TachError;
-  #uniform: GPUBuffer | undefined;
-  #uniformCapacity = 0;
+  #parameters: GPUBuffer | undefined;
+  #parameterCapacity = 0;
   #closed = false;
   #lost?: GPUDeviceLostInfo;
 
@@ -271,23 +271,23 @@ class Session implements Tach, RuntimeOwner {
 
   #record(dispatches: readonly PreparedDispatch[]): void {
     this.#captureDeferred("submit", "kernel", () => {
-      const uniformBindings = this.#writeUniforms(dispatches);
+      const parameterBindings = this.#writeParameters(dispatches);
       const encoder = this.device.createCommandEncoder({ label: "Tach submission" });
       const pass = encoder.beginComputePass({ label: "Tach compute pass" });
-      let uniformIndex = 0;
+      let parameterIndex = 0;
       for (const dispatch of dispatches) {
-        const next = uniformIndex + dispatch.uniforms.length;
-        dispatch.encode(pass, uniformBindings.slice(uniformIndex, next));
-        uniformIndex = next;
+        const next = parameterIndex + dispatch.parameters.length;
+        dispatch.encode(pass, parameterBindings.slice(parameterIndex, next));
+        parameterIndex = next;
       }
       pass.end();
       this.device.queue.submit([encoder.finish()]);
     });
   }
 
-  #writeUniforms(dispatches: readonly PreparedDispatch[]): readonly GPUBufferBinding[] {
+  #writeParameters(dispatches: readonly PreparedDispatch[]): readonly GPUBufferBinding[] {
     const alignment = this.device.limits?.minUniformBufferOffsetAlignment ?? 256;
-    const chunks = dispatches.flatMap((dispatch) => dispatch.uniforms);
+    const chunks = dispatches.flatMap((dispatch) => dispatch.parameters);
     let byteLength = 0;
     const offsets = chunks.map((bytes) => {
       byteLength = align(byteLength, alignment);
@@ -297,7 +297,7 @@ class Session implements Tach, RuntimeOwner {
     });
     if (byteLength === 0) return [];
 
-    const buffer = this.#uniformBuffer(byteLength);
+    const buffer = this.#parameterBuffer(byteLength);
     const upload = new Uint8Array(byteLength);
     for (let index = 0; index < chunks.length; index++) {
       upload.set(chunks[index] as Uint8Array, offsets[index]);
@@ -310,21 +310,21 @@ class Session implements Tach, RuntimeOwner {
     }));
   }
 
-  #uniformBuffer(byteLength: number): GPUBuffer {
-    if (this.#uniform && this.#uniformCapacity >= byteLength) return this.#uniform;
-    let capacity = Math.max(4096, this.#uniformCapacity);
+  #parameterBuffer(byteLength: number): GPUBuffer {
+    if (this.#parameters && this.#parameterCapacity >= byteLength) return this.#parameters;
+    let capacity = Math.max(4096, this.#parameterCapacity);
     while (capacity < byteLength) capacity *= 2;
     if (!Number.isSafeInteger(capacity)) {
-      throw new RangeError("uniform data exceeds JavaScript's safe integer range");
+      throw new RangeError("parameter data exceeds JavaScript's safe integer range");
     }
     const next = this.device.createBuffer({
-      label: "Tach uniform arena",
+      label: "Tach parameter arena",
       size: align(capacity, 4),
       usage: bufferUsage.copyDst | bufferUsage.uniform,
     });
-    this.#uniform?.destroy();
-    this.#uniform = next;
-    this.#uniformCapacity = capacity;
+    this.#parameters?.destroy();
+    this.#parameters = next;
+    this.#parameterCapacity = capacity;
     this.#bindGroups.clear();
     return next;
   }
@@ -433,8 +433,8 @@ class Session implements Tach, RuntimeOwner {
   close(): void {
     if (this.#closed) return;
     for (const state of [...this.#buffers]) destroyBufferState(state);
-    this.#uniform?.destroy();
-    this.#uniform = undefined;
+    this.#parameters?.destroy();
+    this.#parameters = undefined;
     this.#bindGroups.clear();
     this.device.removeEventListener("uncapturederror", this.#onUncaptured);
     this.#closed = true;

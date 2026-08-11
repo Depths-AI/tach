@@ -194,7 +194,7 @@ func loopInvariant(m *ir.Module, in ir.Instr, values map[ir.ValueID]bool, places
 func immutableResource(m *ir.Module, resources map[ir.PlaceID]int, place ir.PlaceID) bool {
 	resource, ok := resources[place]
 	return ok && resource >= 0 && resource < len(m.Resources) &&
-		(m.Resources[resource].Kind == ir.Uniform || m.Resources[resource].Access == ir.Read)
+		m.Resources[resource].Access == ir.Read
 }
 
 func placeResourceRoots(f *ir.Function) map[ir.PlaceID]int {
@@ -295,7 +295,7 @@ func promoteLoop(m *ir.Module, loop *ir.Loop, resources map[ir.PlaceID]int, next
 		var store *ir.Store
 		if len(writes) == 0 && immutableResource(m, resources, place) {
 			// Cache an invariant read on the first executed iteration.
-		} else if len(writes) == 1 && m.Resources[resource].Kind == ir.Buffer &&
+		} else if len(writes) == 1 &&
 			loadOrder[reads[0]] < storeOrder[writes[0]] {
 			store = writes[0]
 		} else {
@@ -692,7 +692,7 @@ func pureValueKey(m *ir.Module, in ir.Instr, resources map[ir.PlaceID]int) (valu
 	case *ir.Load:
 		resource, ok := resources[x.Place]
 		if !ok || resource < 0 || resource >= len(m.Resources) ||
-			(m.Resources[resource].Kind != ir.Uniform && m.Resources[resource].Access != ir.Read) {
+			m.Resources[resource].Access != ir.Read {
 			return key, false
 		}
 		key, _ = set(10, x.Type.String(), "")

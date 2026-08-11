@@ -38,6 +38,9 @@ func verifyUniformity(m *Module, f *Function, fmap map[string]*Function) error {
 	for _, index := range f.Indices {
 		e.values[index.ID] = false
 	}
+	for _, parameter := range f.Params {
+		e.values[parameter.ID] = true
+	}
 	_, _, err := analyzeUniformBlock(m, f, f.Body, e, fmap, true, true)
 	return err
 }
@@ -99,12 +102,7 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 			p.addr = p.addr && value(x.Index)
 			e.places[x.Result] = p
 		case *Load:
-			p := e.places[x.Place]
-			u := false
-			if p.resource >= 0 && p.resource < len(m.Resources) && m.Resources[p.resource].Kind == Uniform {
-				u = p.addr
-			}
-			e.values[x.Result] = u
+			e.values[x.Result] = false
 		case *Store:
 			// Stores do not define SSA values. Mutable memory is conservatively
 			// classified as varying on every subsequent load.

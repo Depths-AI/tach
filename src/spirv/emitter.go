@@ -24,7 +24,11 @@ func Emit(m *ir.Module) ([]byte, error) {
 		return nil, err
 	}
 	optimize(p)
-	b := newBuilder(p)
+	parameters, err := abi.PlanParameters(m)
+	if err != nil {
+		return nil, err
+	}
+	b := newBuilder(p, parameters)
 	if err := b.build(); err != nil {
 		return nil, err
 	}
@@ -40,8 +44,9 @@ func Emit(m *ir.Module) ([]byte, error) {
 }
 
 type builder struct {
-	p *program
-	m *ir.Module
+	p          *program
+	m          *ir.Module
+	parameters *abi.ParameterPlan
 
 	nextID uint32
 
@@ -61,6 +66,7 @@ type builder struct {
 	constants    map[string]uint32
 	funcIDs      map[string]uint32
 	resourceIDs  []uint32
+	parameterIDs map[*ir.Function]uint32
 	inputIDs     map[inputKind]uint32
 	workgroupIDs map[string][]uint32
 	glsl450      uint32
@@ -73,16 +79,18 @@ const (
 	typeHostABI
 )
 
-func newBuilder(p *program) *builder {
+func newBuilder(p *program, parameters *abi.ParameterPlan) *builder {
 	return &builder{
 		p:            p,
 		m:            p.source,
+		parameters:   parameters,
 		nextID:       1,
 		types:        map[string]uint32{},
 		pointers:     map[string]uint32{},
 		fnTypes:      map[string]uint32{},
 		constants:    map[string]uint32{},
 		funcIDs:      map[string]uint32{},
+		parameterIDs: map[*ir.Function]uint32{},
 		inputIDs:     map[inputKind]uint32{},
 		workgroupIDs: map[string][]uint32{},
 	}
@@ -128,6 +136,9 @@ func (b *builder) build() error {
 		return err
 	}
 	if err := b.emitResources(); err != nil {
+		return err
+	}
+	if err := b.emitParameterBlocks(); err != nil {
 		return err
 	}
 	if err := b.emitInputs(); err != nil {
@@ -349,13 +360,6 @@ func (b *builder) emitStructDebugTypes() error {
 	return nil
 }
 
-func (b *builder) storageClass(r ir.Resource) uint32 {
-	if r.Kind == ir.Uniform {
-		return StorageUniform
-	}
-	return StorageStorageBuffer
-}
-
 func (b *builder) emitResources() error {
 	b.resourceIDs = make([]uint32, len(b.m.Resources))
 	for i, r := range b.m.Resources {
@@ -370,7 +374,7 @@ func (b *builder) emitResources() error {
 		emit(&b.debug, OpName, append([]uint32{wrapper}, encodeString("__tach_resource_"+strconv.Itoa(i))...)...)
 		emit(&b.debug, OpMemberName, append([]uint32{wrapper, 0}, encodeString("data")...)...)
 
-		storage := b.storageClass(r)
+		storage := uint32(StorageStorageBuffer)
 		ptr := b.id()
 		emit(&b.typesGlobals, OpTypePointer, ptr, storage, wrapper)
 		varID := b.id()
@@ -378,10 +382,35 @@ func (b *builder) emitResources() error {
 		emit(&b.typesGlobals, OpVariable, ptr, varID, storage)
 		emit(&b.annotations, OpDecorate, varID, DecorationDescriptorSet, 0)
 		emit(&b.annotations, OpDecorate, varID, DecorationBinding, uint32(i))
-		if r.Kind == ir.Buffer && r.Access == ir.Read && !types.ContainsAtomic(r.Type) {
+		if r.Access == ir.Read && !types.ContainsAtomic(r.Type) {
 			emit(&b.annotations, OpDecorate, varID, DecorationNonWritable)
 		}
 		emit(&b.debug, OpName, append([]uint32{varID}, encodeString(r.Name)...)...)
+	}
+	return nil
+}
+
+func (b *builder) emitParameterBlocks() error {
+	for _, block := range b.parameters.Blocks {
+		typeID, err := b.typeID(block.Type, typeHostABI)
+		if err != nil {
+			return fmt.Errorf("kernel %s parameter block type: %w", block.Function.Name, err)
+		}
+		emit(&b.annotations, OpDecorate, typeID, DecorationBlock)
+		emit(&b.debug, OpName, append([]uint32{typeID}, encodeString(block.Type.Name)...)...)
+		for index, field := range block.Fields {
+			emit(&b.debug, OpMemberName, append([]uint32{typeID, uint32(index)}, encodeString(field.Name)...)...)
+		}
+		pointer, err := b.pointerID(StorageUniform, block.Type)
+		if err != nil {
+			return err
+		}
+		variable := b.id()
+		b.parameterIDs[block.Function] = variable
+		emit(&b.typesGlobals, OpVariable, pointer, variable, StorageUniform)
+		emit(&b.annotations, OpDecorate, variable, DecorationDescriptorSet, 0)
+		emit(&b.annotations, OpDecorate, variable, DecorationBinding, block.Binding)
+		emit(&b.debug, OpName, append([]uint32{variable}, encodeString("__tach_parameters_"+block.Function.Name)...)...)
 	}
 	return nil
 }
@@ -484,7 +513,7 @@ func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
 		} else if raw == "false" {
 			emit(&b.typesGlobals, OpConstantFalse, tid, id)
 		} else {
-			return 0, fmt.Errorf("invalid boolean constant %q", raw)
+			return 0, fmt.Errorf("invalid bool constant %q", raw)
 		}
 	case types.I32:
 		v, err := strconv.ParseInt(raw, 10, 32)
@@ -557,7 +586,11 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	if err != nil {
 		return err
 	}
-	fnType, err := b.functionTypeID(f.Return, f.Params)
+	parameters := f.Params
+	if f.Compute {
+		parameters = nil
+	}
+	fnType, err := b.functionTypeID(f.Return, parameters)
 	if err != nil {
 		return err
 	}
@@ -569,7 +602,7 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	emit(&b.functions, OpFunction, retType, fid, control, fnType)
 
 	s := &fnEmitter{b: b, f: f, values: map[ir.ValueID]uint32{}, vtypes: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]spvPlace{}, inputs: map[inputKind]uint32{}}
-	for _, p := range f.Params {
+	for _, p := range parameters {
 		pt, err := b.typeID(p.Type, typeLogical)
 		if err != nil {
 			return err
@@ -582,6 +615,9 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	label := b.id()
 	emit(&b.functions, OpLabel, label)
 	s.currentLabel = label
+	if err := s.emitParameters(); err != nil {
+		return err
+	}
 	if err := s.emitWorkgroupZeroInitialization(); err != nil {
 		return err
 	}
@@ -596,6 +632,91 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	}
 	emit(&b.functions, OpFunctionEnd)
 	return nil
+}
+
+func (s *fnEmitter) emitParameters() error {
+	if !s.f.Compute || len(s.f.Params) == 0 {
+		return nil
+	}
+	block := s.b.parameters.For(s.f)
+	if block == nil || s.b.parameterIDs[s.f] == 0 {
+		return fmt.Errorf("kernel %s parameter block was not declared", s.f.Name)
+	}
+	cursor := 0
+	for parameter, value := range s.f.Params {
+		id, err := s.emitParameterValue(block, parameter, value.Type, &cursor)
+		if err != nil {
+			return err
+		}
+		s.def(value.ID, id, value.Type)
+	}
+	if cursor != len(block.Fields) {
+		return fmt.Errorf("kernel %s parameter block consumed %d of %d fields", s.f.Name, cursor, len(block.Fields))
+	}
+	return nil
+}
+
+func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int, logical *types.Type, cursor *int) (uint32, error) {
+	if logical.Kind == types.Struct {
+		values := make([]uint32, len(logical.Fields))
+		for index, field := range logical.Fields {
+			value, err := s.emitParameterValue(block, parameter, field.Type, cursor)
+			if err != nil {
+				return 0, err
+			}
+			values[index] = value
+		}
+		typeID, err := s.b.typeID(logical, typeLogical)
+		if err != nil {
+			return 0, err
+		}
+		result := s.b.id()
+		emit(&s.b.functions, OpCompositeConstruct, append([]uint32{typeID, result}, values...)...)
+		return result, nil
+	}
+	if block == nil || *cursor >= len(block.Fields) {
+		return 0, fmt.Errorf("kernel parameter %d has no physical field", parameter)
+	}
+	fieldIndex := *cursor
+	field := block.Fields[fieldIndex]
+	*cursor = fieldIndex + 1
+	if field.Parameter != parameter || !types.Equal(field.Logical, logical) {
+		return 0, fmt.Errorf("kernel parameter %d field %d does not match %s", parameter, fieldIndex, logical)
+	}
+	pointer, err := s.b.pointerID(StorageUniform, field.Physical)
+	if err != nil {
+		return 0, err
+	}
+	index, err := s.b.u32Constant(uint32(fieldIndex))
+	if err != nil {
+		return 0, err
+	}
+	address := s.b.id()
+	variable := s.b.parameterIDs[s.f]
+	if variable == 0 {
+		return 0, fmt.Errorf("kernel %s parameter block was not declared", s.f.Name)
+	}
+	emit(&s.b.functions, OpAccessChain, pointer, address, variable, index)
+	typeID, err := s.b.typeID(field.Physical, typeLogical)
+	if err != nil {
+		return 0, err
+	}
+	loaded := s.b.id()
+	emit(&s.b.functions, OpLoad, typeID, loaded, address)
+	if logical.Kind != types.Bool {
+		return loaded, nil
+	}
+	zero, err := s.b.u32Constant(0)
+	if err != nil {
+		return 0, err
+	}
+	boolType, err := s.b.typeID(types.TBool, typeLogical)
+	if err != nil {
+		return 0, err
+	}
+	result := s.b.id()
+	emit(&s.b.functions, OpINotEqual, boolType, result, loaded, zero)
+	return result, nil
 }
 
 func (s *fnEmitter) emitCoordinates() error {
@@ -1250,8 +1371,7 @@ func (s *fnEmitter) emitPlaceRoot(x *ir.PlaceRoot) error {
 	if x.Resource < 0 || x.Resource >= len(s.b.m.Resources) {
 		return fmt.Errorf("resource index %d out of bounds", x.Resource)
 	}
-	r := s.b.m.Resources[x.Resource]
-	storage := s.b.storageClass(r)
+	storage := uint32(StorageStorageBuffer)
 	ptrType, err := s.b.pointerID(storage, x.Type)
 	if err != nil {
 		return err
@@ -1642,7 +1762,7 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 		return err
 	}
 	if !ce.falls || len(ce.vals) != 1 {
-		return fmt.Errorf("loop condition must yield one boolean")
+		return fmt.Errorf("loop condition must yield one bool")
 	}
 	emit(&s.b.functions, OpBranchConditional, ce.vals[0], body, merge)
 	s.terminated = true

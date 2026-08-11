@@ -7,7 +7,8 @@ For every example it:
 1. runs Tach's complete compiler pipeline in memory;
 2. validates the emitted module with Khronos `spirv-val` for Vulkan 1.1;
 3. creates a native Vulkan compute pipeline from the emitted `.spv`;
-4. binds host-visible buffers according to Tach's reflection metadata;
+4. binds storage buffers and the compiler-planned value block from Tach's
+   reflection metadata;
 5. dispatches the kernel and asserts the readback values; and
 6. fails on messages from `VK_LAYER_KHRONOS_validation` when the layer is
    installed.

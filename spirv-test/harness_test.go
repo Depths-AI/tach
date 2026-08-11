@@ -109,7 +109,8 @@ func TestExamplesVulkan(t *testing.T) {
 				compilation.SPIRV,
 				compilation.Metadata,
 				testCase.kernel,
-				testCase.resources,
+				testCase.buffers,
+				testCase.parameters,
 				testCase.invocations,
 			)
 			if err == nil {

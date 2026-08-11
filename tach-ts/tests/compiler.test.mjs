@@ -22,7 +22,7 @@ test("build emits package-backed JavaScript bindings", async () => {
     const source = join(directory, "scale.tach");
     await writeFile(source, `
 @workgroup(1)
-export function scale[i](data: buffer<f32[]>, factor: uniform<f32>) {
+export function scale[i](data: buffer<float32[]>, factor: float32) {
   if (i < data.length) { data[i] *= factor; }
 }
 `);

@@ -27,17 +27,13 @@ type Metadata struct {
 }
 
 type TypeMetadata struct {
-	Name      string      `json:"name"`
-	ByteSize  uint32      `json:"byteSize"`
-	Alignment uint32      `json:"alignment"`
-	Runtime   bool        `json:"runtime"`
-	Fields    []FieldMeta `json:"fields"`
+	Name   string      `json:"name"`
+	Fields []FieldMeta `json:"fields"`
 }
 
 type FieldMeta struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	ByteOffset uint32 `json:"byteOffset"`
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 type ResourceMeta struct {
@@ -56,27 +52,48 @@ type ResourceMeta struct {
 }
 
 type KernelMeta struct {
-	Name          string               `json:"name"`
-	EntryPoint    string               `json:"entryPoint"`
-	Dimensions    uint32               `json:"dimensions"`
-	WorkgroupSize [3]uint32            `json:"workgroupSize"`
-	Resources     []KernelResourceMeta `json:"resources"`
+	Name           string                `json:"name"`
+	EntryPoint     string                `json:"entryPoint"`
+	Dimensions     uint32                `json:"dimensions"`
+	WorkgroupSize  [3]uint32             `json:"workgroupSize"`
+	Parameters     []KernelParameterMeta `json:"parameters"`
+	ParameterBlock *ParameterBlockMeta   `json:"parameterBlock,omitempty"`
 }
 
-type KernelResourceMeta struct {
+type KernelParameterMeta struct {
 	Name     string `json:"name"`
-	Resource int    `json:"resource"`
+	Kind     string `json:"kind"`
+	Type     string `json:"type"`
+	Resource *int   `json:"resource,omitempty"`
+}
+
+type ParameterBlockMeta struct {
+	Group    uint32               `json:"group"`
+	Binding  uint32               `json:"binding"`
+	ByteSize uint32               `json:"byteSize"`
+	Fields   []ParameterFieldMeta `json:"fields"`
+}
+
+type ParameterFieldMeta struct {
+	Parameter  int      `json:"parameter"`
+	Path       []string `json:"path"`
+	Type       string   `json:"type"`
+	ByteOffset uint32   `json:"byteOffset"`
 }
 
 // Generate emits a JavaScript module whose public surface is a direct
-// translation of Tach: structs become TypeScript interfaces and exported
+// translation of Tach: named types become TypeScript object types and exported
 // compute kernels become functions with positional parameters. The generated
 // module delegates WebGPU lifecycle and host-data plumbing to @depths/tach.
 func Generate(m *ir.Module, wgslSource string) (*Artifacts, error) {
 	if err := ir.Verify(m); err != nil {
 		return nil, err
 	}
-	meta, err := buildMetadata(m)
+	parameters, err := abi.PlanParameters(m)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := buildMetadata(m, parameters)
 	if err != nil {
 		return nil, err
 	}
@@ -102,29 +119,21 @@ func Generate(m *ir.Module, wgslSource string) (*Artifacts, error) {
 	}, nil
 }
 
-func buildMetadata(m *ir.Module) (*Metadata, error) {
+func buildMetadata(m *ir.Module, parameters *abi.ParameterPlan) (*Metadata, error) {
 	out := &Metadata{
 		Types:     []TypeMetadata{},
 		Resources: []ResourceMeta{},
 		Kernels:   []KernelMeta{},
 	}
 	for _, t := range m.Structs {
-		l, err := layout.Of(t)
-		if err != nil {
-			return nil, err
-		}
 		item := TypeMetadata{
-			Name:      t.Name,
-			ByteSize:  l.Size,
-			Alignment: l.Align,
-			Runtime:   l.Runtime,
-			Fields:    []FieldMeta{},
+			Name:   t.Name,
+			Fields: []FieldMeta{},
 		}
-		for index, field := range t.Fields {
+		for _, field := range t.Fields {
 			item.Fields = append(item.Fields, FieldMeta{
-				Name:       field.Name,
-				Type:       field.Type.String(),
-				ByteOffset: l.Fields[index].Offset,
+				Name: field.Name,
+				Type: field.Type.String(),
 			})
 		}
 		out.Types = append(out.Types, item)
@@ -142,11 +151,7 @@ func buildMetadata(m *ir.Module) (*Metadata, error) {
 			Alignment: l.Align,
 			Runtime:   l.Runtime,
 		}
-		if resource.Kind == ir.Uniform {
-			item.Kind = "uniform"
-		} else {
-			item.Kind = "storage"
-		}
+		item.Kind = "storage"
 		if resource.Access == ir.Mutable || types.ContainsAtomic(resource.Type) {
 			item.Access = "read_write"
 		} else {
@@ -176,16 +181,39 @@ func buildMetadata(m *ir.Module) (*Metadata, error) {
 			EntryPoint:    abi.KernelEntry(function.Name),
 			Dimensions:    uint32(len(function.Indices)),
 			WorkgroupSize: function.Workgroup,
-			Resources:     []KernelResourceMeta{},
+			Parameters:    []KernelParameterMeta{},
 		}
-		for _, parameter := range function.ResourceParams {
-			if parameter.Resource < 0 || parameter.Resource >= len(m.Resources) {
-				return nil, fmt.Errorf("kernel %s resource index out of range", function.Name)
+		valueTypes := map[ir.ValueID]*types.Type{}
+		for _, parameter := range function.Params {
+			valueTypes[parameter.ID] = parameter.Type
+		}
+		valuePositions := map[ir.ValueID]int{}
+		for position, parameter := range function.KernelParams {
+			entry := KernelParameterMeta{Name: parameter.Name}
+			if parameter.Value != 0 {
+				entry.Kind = "value"
+				entry.Type = valueTypes[parameter.Value].String()
+				valuePositions[parameter.Value] = position
+			} else {
+				if parameter.Resource < 0 || parameter.Resource >= len(m.Resources) {
+					return nil, fmt.Errorf("kernel %s resource index out of range", function.Name)
+				}
+				resource := parameter.Resource
+				entry.Kind = "buffer"
+				entry.Type = m.Resources[resource].Type.String()
+				entry.Resource = &resource
 			}
-			item.Resources = append(item.Resources, KernelResourceMeta{
-				Name:     parameter.Name,
-				Resource: parameter.Resource,
-			})
+			item.Parameters = append(item.Parameters, entry)
+		}
+		if block := parameters.For(function); block != nil {
+			item.ParameterBlock = &ParameterBlockMeta{Group: 0, Binding: block.Binding, ByteSize: block.Layout.Size, Fields: []ParameterFieldMeta{}}
+			for _, field := range block.Fields {
+				value := function.Params[field.Parameter]
+				item.ParameterBlock.Fields = append(item.ParameterBlock.Fields, ParameterFieldMeta{
+					Parameter: valuePositions[value.ID],
+					Path:      append([]string{}, field.Path...), Type: field.Logical.String(), ByteOffset: field.Offset,
+				})
+			}
 		}
 		out.Kernels = append(out.Kernels, item)
 	}
@@ -303,6 +331,34 @@ type runtimeResource struct {
 	Layout          *hostLayout `json:"layout"`
 }
 
+type runtimeKernelParameter struct {
+	Name     string `json:"name"`
+	Resource *int   `json:"resource,omitempty"`
+}
+
+type runtimeParameterField struct {
+	Parameter int         `json:"parameter"`
+	Path      []string    `json:"path"`
+	Offset    uint32      `json:"offset"`
+	Layout    *hostLayout `json:"layout"`
+}
+
+type runtimeParameterBlock struct {
+	Group    uint32                  `json:"group"`
+	Binding  uint32                  `json:"binding"`
+	ByteSize uint32                  `json:"byteSize"`
+	Fields   []runtimeParameterField `json:"fields"`
+}
+
+type runtimeKernel struct {
+	Name           string                   `json:"name"`
+	EntryPoint     string                   `json:"entryPoint"`
+	Dimensions     uint32                   `json:"dimensions"`
+	WorkgroupSize  [3]uint32                `json:"workgroupSize"`
+	Parameters     []runtimeKernelParameter `json:"parameters"`
+	ParameterBlock *runtimeParameterBlock   `json:"parameterBlock,omitempty"`
+}
+
 func runtimeResources(m *ir.Module, meta *Metadata) ([]runtimeResource, error) {
 	out := make([]runtimeResource, len(m.Resources))
 	for index, resource := range m.Resources {
@@ -331,6 +387,43 @@ func jsQuote(s string) string {
 	return string(value)
 }
 
+func runtimeKernels(metadata *Metadata) ([]runtimeKernel, error) {
+	out := make([]runtimeKernel, 0, len(metadata.Kernels))
+	for _, item := range metadata.Kernels {
+		kernel := runtimeKernel{
+			Name: item.Name, EntryPoint: item.EntryPoint, Dimensions: item.Dimensions,
+			WorkgroupSize: item.WorkgroupSize, Parameters: []runtimeKernelParameter{},
+		}
+		for _, parameter := range item.Parameters {
+			kernel.Parameters = append(kernel.Parameters, runtimeKernelParameter{Name: parameter.Name, Resource: parameter.Resource})
+		}
+		if block := item.ParameterBlock; block != nil {
+			kernel.ParameterBlock = &runtimeParameterBlock{Group: block.Group, Binding: block.Binding, ByteSize: block.ByteSize, Fields: []runtimeParameterField{}}
+			for _, field := range block.Fields {
+				logical := types.ParseBuiltin(field.Type)
+				if logical == nil {
+					return nil, fmt.Errorf("kernel %s has invalid parameter field type %s", item.Name, field.Type)
+				}
+				var description *hostLayout
+				if logical.Kind == types.Bool {
+					description = &hostLayout{Kind: "bool", Size: 4}
+				} else {
+					var err error
+					description, err = describeHostLayout(logical)
+					if err != nil {
+						return nil, err
+					}
+				}
+				kernel.ParameterBlock.Fields = append(kernel.ParameterBlock.Fields, runtimeParameterField{
+					Parameter: field.Parameter, Path: append([]string{}, field.Path...), Offset: field.ByteOffset, Layout: description,
+				})
+			}
+		}
+		out = append(out, kernel)
+	}
+	return out, nil
+}
+
 func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, error) {
 	resources, err := runtimeResources(m, meta)
 	if err != nil {
@@ -340,23 +433,27 @@ func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, er
 	if err != nil {
 		return "", err
 	}
-	kernelsJSON, err := json.Marshal(meta.Kernels)
+	kernels, err := runtimeKernels(meta)
 	if err != nil {
 		return "", err
 	}
-	for _, kernel := range meta.Kernels {
+	kernelsJSON, err := json.Marshal(kernels)
+	if err != nil {
+		return "", err
+	}
+	for _, kernel := range kernels {
 		if err := validateKernelExportName(kernel.Name); err != nil {
 			return "", err
 		}
 		hasBuffer := false
-		for _, parameter := range kernel.Resources {
+		for _, parameter := range kernel.Parameters {
 			if !isASCIIIdentifier(parameter.Name) || typeScriptKeywords[parameter.Name] {
 				return "", fmt.Errorf(
 					"Tach parameter name %q is not a portable JavaScript identifier",
 					parameter.Name,
 				)
 			}
-			if m.Resources[parameter.Resource].Kind == ir.Buffer {
+			if parameter.Resource != nil {
 				hasBuffer = true
 			}
 		}
@@ -374,20 +471,20 @@ func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, er
 	fmt.Fprintf(&b, "  resources: %s,\n", resourcesJSON)
 	fmt.Fprintf(&b, "  kernels: %s,\n", kernelsJSON)
 	b.WriteString("});\n\n")
-	for index, kernel := range meta.Kernels {
+	for index, kernel := range kernels {
 		fmt.Fprintf(&b, "export function %s(", kernel.Name)
-		for parameterIndex, parameter := range kernel.Resources {
+		for parameterIndex, parameter := range kernel.Parameters {
 			if parameterIndex > 0 {
 				b.WriteString(", ")
 			}
 			b.WriteString(parameter.Name)
 		}
-		if len(kernel.Resources) > 0 {
+		if len(kernel.Parameters) > 0 {
 			b.WriteString(", ")
 		}
 		b.WriteString("$dispatch) {\n")
 		fmt.Fprintf(&b, "  return $tach.dispatch(%d, [", index)
-		for parameterIndex, parameter := range kernel.Resources {
+		for parameterIndex, parameter := range kernel.Parameters {
 			if parameterIndex > 0 {
 				b.WriteString(", ")
 			}
@@ -467,19 +564,28 @@ func emitDeclarations(m *ir.Module, meta *Metadata) (string, error) {
 	b.WriteString("import type { ComputeBuffer, ComputeDispatch, DispatchOptions } from \"@depths/tach\";\n\n")
 	for _, t := range m.Structs {
 		name, _ := typeScriptTypeName(t.Name)
-		fmt.Fprintf(&b, "export interface %s {\n", name)
+		fmt.Fprintf(&b, "export type %s = {\n", name)
 		for _, field := range t.Fields {
 			fmt.Fprintf(&b, "  readonly %s: %s;\n", tsProperty(field.Name), tsType(field.Type))
 		}
-		b.WriteString("}\n\n")
+		b.WriteString("};\n\n")
 	}
 	for _, kernel := range meta.Kernels {
+		function := m.Function(kernel.Name)
+		if function == nil {
+			return "", fmt.Errorf("unknown kernel %s", kernel.Name)
+		}
+		valueTypes := map[ir.ValueID]*types.Type{}
+		for _, value := range function.Params {
+			valueTypes[value.ID] = value.Type
+		}
 		fmt.Fprintf(&b, "export function %s(\n", kernel.Name)
-		for _, parameter := range kernel.Resources {
-			resource := m.Resources[parameter.Resource]
-			parameterType := tsType(resource.Type)
-			if resource.Kind == ir.Buffer {
-				parameterType = "ComputeBuffer<" + parameterType + ">"
+		for _, parameter := range function.KernelParams {
+			parameterType := ""
+			if parameter.Value == 0 {
+				parameterType = "ComputeBuffer<" + tsType(m.Resources[parameter.Resource].Type) + ">"
+			} else {
+				parameterType = tsType(valueTypes[parameter.Value])
 			}
 			fmt.Fprintf(&b, "  %s: %s,\n", parameter.Name, parameterType)
 		}
@@ -492,6 +598,8 @@ func emitDeclarations(m *ir.Module, meta *Metadata) (string, error) {
 
 func tsType(t *types.Type) string {
 	switch t.Kind {
+	case types.Bool:
+		return "boolean"
 	case types.I32, types.U32, types.F32, types.Atomic:
 		return "number"
 	case types.Vector:
@@ -585,6 +693,16 @@ func ValidateGenerated(js, dts string, metaJSON []byte) error {
 		}
 		if kernel.EntryPoint != kernel.Name {
 			return fmt.Errorf("kernel %s has mangled entry point %q", kernel.Name, kernel.EntryPoint)
+		}
+		if block := kernel.ParameterBlock; block != nil {
+			pair := [2]uint32{block.Group, block.Binding}
+			if pairs[pair] {
+				return fmt.Errorf("duplicate metadata binding %v", pair)
+			}
+			pairs[pair] = true
+			if block.ByteSize == 0 || block.ByteSize%16 != 0 {
+				return fmt.Errorf("kernel %s has invalid parameter block size %d", kernel.Name, block.ByteSize)
+			}
 		}
 		export := "export function " + kernel.Name + "("
 		if !strings.Contains(js, export) || !strings.Contains(dts, export) {

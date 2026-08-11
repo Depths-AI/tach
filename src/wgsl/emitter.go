@@ -22,6 +22,7 @@ func workgroupName(f *ir.Function, i int) string {
 type emitter struct {
 	p           *program
 	m           *ir.Module
+	parameters  *abi.ParameterPlan
 	b           strings.Builder
 	indent      int
 	structIndex map[string]int
@@ -37,7 +38,11 @@ func Emit(m *ir.Module) (string, error) {
 		return "", err
 	}
 	optimize(p)
-	e := &emitter{p: p, m: m, structIndex: map[string]int{}, funcIndex: map[string]int{}}
+	parameters, err := abi.PlanParameters(m)
+	if err != nil {
+		return "", err
+	}
+	e := &emitter{p: p, m: m, parameters: parameters, structIndex: map[string]int{}, funcIndex: map[string]int{}}
 	for i, t := range m.Structs {
 		e.structIndex[t.Name] = i
 	}
@@ -52,6 +57,10 @@ func Emit(m *ir.Module) (string, error) {
 	}
 	for i, r := range m.Resources {
 		e.emitResource(i, r)
+		e.line("")
+	}
+	for _, block := range parameters.Blocks {
+		e.emitParameterBlock(block)
 		e.line("")
 	}
 	for _, f := range m.Functions {
@@ -155,15 +164,35 @@ func (e *emitter) emitResource(i int, r ir.Resource) {
 	}
 	e.indent--
 	e.line("}")
-	if r.Kind == ir.Uniform {
-		e.line("@group(0) @binding(%d) var<uniform> %s: %s;", i, resourceName(i), w)
-	} else {
-		access := "read"
-		if r.Access == ir.Mutable || types.ContainsAtomic(r.Type) {
-			access = "read_write"
-		}
-		e.line("@group(0) @binding(%d) var<storage, %s> %s: %s;", i, access, resourceName(i), w)
+	access := "read"
+	if r.Access == ir.Mutable || types.ContainsAtomic(r.Type) {
+		access = "read_write"
 	}
+	e.line("@group(0) @binding(%d) var<storage, %s> %s: %s;", i, access, resourceName(i), w)
+}
+
+func parameterTypeName(block *abi.ParameterBlock) string {
+	return fmt.Sprintf("_tach_parameters_%d", block.Binding)
+}
+
+func parameterResourceName(block *abi.ParameterBlock) string {
+	return fmt.Sprintf("_tach_p%d", block.Binding)
+}
+
+func (e *emitter) emitParameterBlock(block *abi.ParameterBlock) {
+	e.line("// Tach parameters: %s", block.Function.Name)
+	e.line("struct %s {", parameterTypeName(block))
+	e.indent++
+	for index, field := range block.Fields {
+		prefix := ""
+		if index == 0 {
+			prefix = "@align(16) "
+		}
+		e.line("%s%s: %s,", prefix, field.Name, e.typeName(field.Physical))
+	}
+	e.indent--
+	e.line("}")
+	e.line("@group(0) @binding(%d) var<uniform> %s: %s;", block.Binding, parameterResourceName(block), parameterTypeName(block))
 }
 
 func hasRuntimeTail(t *types.Type) bool {
@@ -220,7 +249,24 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 		st.def(id, types.TU32)
 	}
 	for _, p := range f.Params {
-		st.values[p.ID] = p.Type
+		if !f.Compute {
+			st.values[p.ID] = p.Type
+		}
+	}
+	if f.Compute {
+		block := e.parameters.For(f)
+		cursor := 0
+		for parameter, p := range f.Params {
+			expression, err := e.parameterExpression(block, parameter, p.Type, &cursor)
+			if err != nil {
+				return err
+			}
+			e.line("let %s: %s = %s;", v(p.ID), e.typeName(p.Type), expression)
+			st.def(p.ID, p.Type)
+		}
+		if block != nil && cursor != len(block.Fields) {
+			return fmt.Errorf("kernel %s parameter block consumed %d of %d fields", f.Name, cursor, len(block.Fields))
+		}
 	}
 	if err := st.emitBlock(f.Body, nil, nil); err != nil {
 		return err
@@ -228,6 +274,33 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	e.indent--
 	e.line("}")
 	return nil
+}
+
+func (e *emitter) parameterExpression(block *abi.ParameterBlock, parameter int, logical *types.Type, cursor *int) (string, error) {
+	if logical.Kind == types.Struct {
+		values := make([]string, len(logical.Fields))
+		for index, field := range logical.Fields {
+			value, err := e.parameterExpression(block, parameter, field.Type, cursor)
+			if err != nil {
+				return "", err
+			}
+			values[index] = value
+		}
+		return fmt.Sprintf("%s(%s)", e.typeName(logical), strings.Join(values, ", ")), nil
+	}
+	if block == nil || *cursor >= len(block.Fields) {
+		return "", fmt.Errorf("kernel parameter %d has no physical field", parameter)
+	}
+	field := block.Fields[*cursor]
+	*cursor = *cursor + 1
+	if field.Parameter != parameter || !types.Equal(field.Logical, logical) {
+		return "", fmt.Errorf("kernel parameter %d field %d does not match %s", parameter, *cursor-1, logical)
+	}
+	expression := parameterResourceName(block) + "." + field.Name
+	if logical.Kind == types.Bool {
+		expression = "(" + expression + " != 0u)"
+	}
+	return expression, nil
 }
 
 type placeExpr struct {

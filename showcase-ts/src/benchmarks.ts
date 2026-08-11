@@ -39,6 +39,11 @@ export interface BenchmarkRun {
   readonly frame: RenderedFrame;
 }
 
+interface MeasuredBenchmark {
+  readonly gpuResult: BenchmarkResult;
+  compare(): Promise<BenchmarkResult>;
+}
+
 interface Profile {
   readonly samples: number;
   readonly particleCount: number;
@@ -148,7 +153,7 @@ function result(
   };
 }
 
-async function particles(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
+async function particles(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
   const count = profile.particleCount;
   const values = count * 4;
   const positions = new Float32Array(values);
@@ -173,29 +178,28 @@ async function particles(gpu: Tach, profile: Profile, compareCPU: boolean): Prom
     dispatches: 1,
     rateUnit: "million component updates/s",
   };
-  if (!compareCPU) {
-    gpuPositions.destroy();
-    gpuVelocities.destroy();
-    return result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, null, null,
-      "CPU comparison skipped");
-  }
   const actual = await gpuPositions.read();
-
-  const expected = positions.slice();
-  const integrateCPU = (steps: number): void => {
-    for (let step = 0; step < steps; step++) {
-      for (let i = 0; i < values; i++) expected[i] = expected[i]! + velocities[i]! * 0.001;
-    }
-  };
-  integrateCPU(profile.particleSteps * 2);
-  const cpuTimes = await measureCPU(profile.samples, () => integrateCPU(profile.particleSteps));
-  let maxError = 0;
-  for (let i = 0; i < values; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
   gpuPositions.destroy();
   gpuVelocities.destroy();
 
-  return result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
-  `maximum absolute error ${maxError.toExponential(2)}`);
+  return {
+    gpuResult: result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, null, null,
+      "CPU comparison skipped"),
+    async compare() {
+      const expected = positions.slice();
+      const integrateCPU = (steps: number): void => {
+        for (let step = 0; step < steps; step++) {
+          for (let i = 0; i < values; i++) expected[i] = expected[i]! + velocities[i]! * 0.001;
+        }
+      };
+      integrateCPU(profile.particleSteps * 2);
+      const cpuTimes = await measureCPU(profile.samples, () => integrateCPU(profile.particleSteps));
+      let maxError = 0;
+      for (let i = 0; i < values; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
+      return result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
+        `maximum absolute error ${maxError.toExponential(2)}`);
+    },
+  };
 }
 
 function mandelbrotCPU(output: Uint32Array, params: FractalParams, dispatches: number): void {
@@ -220,7 +224,7 @@ function mandelbrotCPU(output: Uint32Array, params: FractalParams, dispatches: n
   }
 }
 
-async function fractal(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
+async function fractal(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
   const width = profile.fractalSize;
   const height = profile.fractalSize;
   const pixels = width * height;
@@ -241,37 +245,37 @@ async function fractal(gpu: Tach, profile: Profile, compareCPU: boolean): Promis
   const identity = {
     id: "fractal",
     name: "Mandelbrot escape",
-    description: "A divergent, data-dependent loop computes every pixel independently with f32 arithmetic.",
+    description: "A divergent, data-dependent loop computes every pixel independently with float32 arithmetic.",
     problem: `${width} × ${height}, limit ${params.maxIterations} × ${profile.fractalDispatches} renders`,
     dispatches: profile.fractalDispatches,
     rateUnit: "million pixel-dispatches/s",
   };
-  if (!compareCPU) {
-    output.destroy();
-    return result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, null, null,
-      "CPU comparison skipped");
-  }
   const actual = await output.read();
-
-  const expected = new Uint32Array(pixels);
-  mandelbrotCPU(expected, params, 1);
-  const cpuTimes = await measureCPU(profile.samples, () => mandelbrotCPU(
-    expected,
-    params,
-    profile.fractalDispatches,
-  ));
-  let close = 0;
-  let maxDifference = 0;
-  for (let i = 0; i < pixels; i++) {
-    const difference = Math.abs(actual[i]! - expected[i]!);
-    if (difference <= 1) close++;
-    maxDifference = Math.max(maxDifference, difference);
-  }
   output.destroy();
-  const agreement = close / pixels;
 
-  return result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, cpuTimes, agreement >= 0.995,
-  `${(agreement * 100).toFixed(3)}% within one iteration; maximum difference ${maxDifference}`);
+  return {
+    gpuResult: result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, null, null,
+      "CPU comparison skipped"),
+    async compare() {
+      const expected = new Uint32Array(pixels);
+      mandelbrotCPU(expected, params, 1);
+      const cpuTimes = await measureCPU(profile.samples, () => mandelbrotCPU(
+        expected,
+        params,
+        profile.fractalDispatches,
+      ));
+      let close = 0;
+      let maxDifference = 0;
+      for (let i = 0; i < pixels; i++) {
+        const difference = Math.abs(actual[i]! - expected[i]!);
+        if (difference <= 1) close++;
+        maxDifference = Math.max(maxDifference, difference);
+      }
+      const agreement = close / pixels;
+      return result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, cpuTimes, agreement >= 0.995,
+        `${(agreement * 100).toFixed(3)}% within one iteration; maximum difference ${maxDifference}`);
+    },
+  };
 }
 
 function multiplyCPU(
@@ -295,7 +299,7 @@ function multiplyCPU(
   }
 }
 
-async function matrices(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
+async function matrices(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
   const size = profile.matrixSize;
   const cells = size * size;
   const left = new Float32Array(cells);
@@ -322,32 +326,30 @@ async function matrices(gpu: Tach, profile: Profile, compareCPU: boolean): Promi
     dispatches: profile.matrixDispatches,
     rateUnit: "GFLOP/s",
   };
-  if (!compareCPU) {
-    gpuLeft.destroy();
-    gpuRight.destroy();
-    gpuOutput.destroy();
-    return result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
-      gpuTimes, null, null, "CPU comparison skipped");
-  }
   const actual = await gpuOutput.read();
-
-  const expected = new Float32Array(cells);
-  multiplyCPU(left, right, expected, size, 1);
-  const cpuTimes = await measureCPU(profile.samples, () => multiplyCPU(
-    left,
-    right,
-    expected,
-    size,
-    profile.matrixDispatches,
-  ));
-  let maxError = 0;
-  for (let i = 0; i < cells; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
   gpuLeft.destroy();
   gpuRight.destroy();
   gpuOutput.destroy();
 
-  return result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
-  gpuTimes, cpuTimes, maxError < 0.01, `maximum absolute error ${maxError.toExponential(2)}`);
+  return {
+    gpuResult: result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
+      gpuTimes, null, null, "CPU comparison skipped"),
+    async compare() {
+      const expected = new Float32Array(cells);
+      multiplyCPU(left, right, expected, size, 1);
+      const cpuTimes = await measureCPU(profile.samples, () => multiplyCPU(
+        left,
+        right,
+        expected,
+        size,
+        profile.matrixDispatches,
+      ));
+      let maxError = 0;
+      for (let i = 0; i < cells; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
+      return result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
+        gpuTimes, cpuTimes, maxError < 0.01, `maximum absolute error ${maxError.toExponential(2)}`);
+    },
+  };
 }
 
 function normalCDF(x: number): number {
@@ -374,7 +376,7 @@ function priceOptionsCPU(output: Float32Array, dispatches: number): void {
   }
 }
 
-async function options(gpu: Tach, profile: Profile, compareCPU: boolean): Promise<BenchmarkResult> {
+async function options(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
   const count = profile.optionCount;
   const output = gpu.buffer(new Float32Array(count));
   const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, priceOptions(
@@ -390,22 +392,22 @@ async function options(gpu: Tach, profile: Profile, compareCPU: boolean): Promis
     dispatches: profile.optionDispatches,
     rateUnit: "million option valuations/s",
   };
-  if (!compareCPU) {
-    output.destroy();
-    return result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, null, null,
-      "CPU comparison skipped");
-  }
   const actual = await output.read();
-
-  const expected = new Float32Array(count);
-  priceOptionsCPU(expected, 1);
-  const cpuTimes = await measureCPU(profile.samples, () => priceOptionsCPU(expected, profile.optionDispatches));
-  let maxError = 0;
-  for (let i = 0; i < count; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
   output.destroy();
 
-  return result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
-  `maximum absolute error ${maxError.toExponential(2)}`);
+  return {
+    gpuResult: result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, null, null,
+      "CPU comparison skipped"),
+    async compare() {
+      const expected = new Float32Array(count);
+      priceOptionsCPU(expected, 1);
+      const cpuTimes = await measureCPU(profile.samples, () => priceOptionsCPU(expected, profile.optionDispatches));
+      let maxError = 0;
+      for (let i = 0; i < count; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
+      return result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
+        `maximum absolute error ${maxError.toExponential(2)}`);
+    },
+  };
 }
 
 function saturate(value: number): number {
@@ -532,8 +534,7 @@ function renderSceneCPU(output: Uint32Array, params: RenderParams, dispatches: n
 async function rendering(
   gpu: Tach,
   profile: Profile,
-  compareCPU: boolean,
-): Promise<{ readonly result: BenchmarkResult; readonly frame: RenderedFrame }> {
+): Promise<{ readonly measured: MeasuredBenchmark; readonly frame: RenderedFrame }> {
   const width = 1920;
   const height = 1080;
   const pixels = width * height;
@@ -553,45 +554,42 @@ async function rendering(
     dispatches: profile.renderDispatches,
     rateUnit: "million RGBA pixels/s",
   };
-  if (!compareCPU) {
-    output.destroy();
-    return {
-      result: result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, null, null,
-        "CPU comparison skipped"),
-      frame: { width, height, pixels: actual },
-    };
-  }
-
-  const expected = new Uint32Array(pixels);
-  renderSceneCPU(expected, params, 1);
-  const cpuTimes = await measureCPU(profile.samples, () => renderSceneCPU(
-    expected,
-    params,
-    profile.renderDispatches,
-  ));
-  let totalDifference = 0;
-  let maximumDifference = 0;
-  let closePixels = 0;
-  for (let i = 0; i < pixels; i++) {
-    const gpuPixel = actual[i]!;
-    const cpuPixel = expected[i]!;
-    let pixelDifference = 0;
-    for (let shift = 0; shift < 24; shift += 8) {
-      const difference = Math.abs(((gpuPixel >>> shift) & 255) - ((cpuPixel >>> shift) & 255));
-      totalDifference += difference;
-      pixelDifference = Math.max(pixelDifference, difference);
-      maximumDifference = Math.max(maximumDifference, difference);
-    }
-    if (pixelDifference <= 8) closePixels++;
-  }
-  const meanDifference = totalDifference / (pixels * 3);
-  const agreement = closePixels / pixels;
   output.destroy();
 
   return {
-    result: result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, cpuTimes,
-    meanDifference <= 2 && agreement >= 0.98,
-    `mean RGB error ${meanDifference.toFixed(3)}; ${(agreement * 100).toFixed(3)}% of pixels within 8; maximum ${maximumDifference}`),
+    measured: {
+      gpuResult: result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, null, null,
+        "CPU comparison skipped"),
+      async compare() {
+        const expected = new Uint32Array(pixels);
+        renderSceneCPU(expected, params, 1);
+        const cpuTimes = await measureCPU(profile.samples, () => renderSceneCPU(
+          expected,
+          params,
+          profile.renderDispatches,
+        ));
+        let totalDifference = 0;
+        let maximumDifference = 0;
+        let closePixels = 0;
+        for (let i = 0; i < pixels; i++) {
+          const gpuPixel = actual[i]!;
+          const cpuPixel = expected[i]!;
+          let pixelDifference = 0;
+          for (let shift = 0; shift < 24; shift += 8) {
+            const difference = Math.abs(((gpuPixel >>> shift) & 255) - ((cpuPixel >>> shift) & 255));
+            totalDifference += difference;
+            pixelDifference = Math.max(pixelDifference, difference);
+            maximumDifference = Math.max(maximumDifference, difference);
+          }
+          if (pixelDifference <= 8) closePixels++;
+        }
+        const meanDifference = totalDifference / (pixels * 3);
+        const agreement = closePixels / pixels;
+        return result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, cpuTimes,
+          meanDifference <= 2 && agreement >= 0.98,
+          `mean RGB error ${meanDifference.toFixed(3)}; ${(agreement * 100).toFixed(3)}% of pixels within 8; maximum ${maximumDifference}`);
+      },
+    },
     frame: { width, height, pixels: actual },
   };
 }
@@ -603,17 +601,29 @@ export async function runBenchmarks(
   progress: Progress,
 ): Promise<BenchmarkRun> {
   const selected = fast ? quick : full;
-  const profile = compareCPU ? selected : { ...selected, samples: 9 };
   const workloads = [particles, fractal, matrices, options] as const;
-  const results: BenchmarkResult[] = [];
-  const total = workloads.length + 1;
+  const names = ["Particle integration", "Mandelbrot escape", "Tiled matrix multiply", "Black–Scholes pricing"] as const;
+  const measured: MeasuredBenchmark[] = [];
+  const workloadCount = workloads.length + 1;
+  const total = compareCPU ? workloadCount * 2 : workloadCount;
   for (let index = 0; index < workloads.length; index++) {
     const workload = workloads[index]!;
-    progress(["Particle integration", "Mandelbrot escape", "Tiled matrix multiply", "Black–Scholes pricing"][index]!, index, total);
-    results.push(await workload(gpu, profile, compareCPU));
+    progress(`WebGPU: ${names[index]}`, index, total);
+    measured.push(await workload(gpu, selected));
   }
-  progress("Procedural RGBA composition", workloads.length, total);
-  const rendered = await rendering(gpu, profile, compareCPU);
-  results.push(rendered.result);
+  progress("WebGPU: Procedural RGBA composition", workloads.length, total);
+  const rendered = await rendering(gpu, selected);
+  measured.push(rendered.measured);
+
+  const results: BenchmarkResult[] = [];
+  if (compareCPU) {
+    for (let index = 0; index < measured.length; index++) {
+      const benchmark = measured[index]!;
+      progress(`TypeScript: ${benchmark.gpuResult.name}`, workloadCount + index, total);
+      results.push(await benchmark.compare());
+    }
+  } else {
+    results.push(...measured.map((benchmark) => benchmark.gpuResult));
+  }
   return { results, frame: rendered.frame };
 }

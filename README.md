@@ -8,8 +8,8 @@ You write this:
 
 ```tach
 export function scale[i](
-  values: buffer<f32[]>,
-  factor: uniform<f32>,
+  values: buffer<float32[]>,
+  factor: float32,
 ) {
   if (i < values.length) {
     values[i] *= factor;
@@ -72,7 +72,7 @@ That example contains the whole everyday model:
 A kernel is an exported function with one to three logical coordinates:
 
 ```tach
-export function line[i](out: buffer<u32[]>) {
+export function line[i](out: buffer<uint32[]>) {
   if (i < out.length) {
     out[i] = i;
   }
@@ -80,17 +80,17 @@ export function line[i](out: buffer<u32[]>) {
 ```
 
 The brackets are the one intentional extension to an ordinary TypeScript-like
-function declaration. `i` is an immutable `u32` supplied to each invocation.
+function declaration. `i` is an immutable `uint32` supplied to each invocation.
 It is not a host argument and it is not a provider-specific invocation object.
 
 Two-dimensional work is equally direct:
 
 ```tach
-export function image[x, y](pixels: buffer<f32x4[]>) {
+export function image[x, y](pixels: buffer<float32x4[]>) {
   const width = 1920;
   const pixel = y * width + x;
   if (pixel < pixels.length) {
-    pixels[pixel] = f32x4(f32(x) / 1920.0, f32(y) / 1080.0, 0.5, 1.0);
+    pixels[pixel] = float32x4(float32(x) / 1920.0, float32(y) / 1080.0, 0.5, 1.0);
   }
 }
 ```
@@ -104,18 +104,22 @@ await gpu.submit(image(pixels, { size: [1920, 1080] }));
 Kernel parameters describe data movement:
 
 - `buffer<T>` is storage that a kernel may read or write. Tach infers access.
-- `uniform<T>` is a small read-only value copied into the command.
+- a plain type such as `float32` or `Params` is an immutable value copied into
+  the command;
 - `T[]` is a runtime-sized array and exposes `.length` inside the kernel.
+
+That is the complete distinction: buffers are resident memory; ordinary typed
+parameters are values. Shader storage classes never appear in Tach source.
 
 Regular helper functions use the same spelling TypeScript does:
 
 ```tach
 type Particle = {
-  position: f32x4,
-  velocity: f32x4,
+  position: float32x4,
+  velocity: float32x4,
 };
 
-function advance(particle: Particle, dt: f32): Particle {
+function advance(particle: Particle, dt: float32): Particle {
   return {
     position: particle.position + particle.velocity * dt,
     velocity: particle.velocity,
@@ -129,15 +133,15 @@ export function step[i](particles: buffer<Particle[]>) {
 }
 ```
 
-Tach uses TypeScript-shaped `type`, `function`, `export`, `boolean`, `const`,
-`let`, `if`, `else`, `while`, `for`, ternaries, object literals, property
-access, indexing, and return annotations. GPU numeric types stay explicit:
-`i32`, `u32`, `f32`, and vectors such as `f32x4`. A plain `number` would hide
+Tach uses TypeScript-shaped `type`, `function`, `export`, `const`, `let`, `if`,
+`else`, `while`, `for`, ternaries, object literals, property access, indexing,
+and return annotations. GPU value types stay explicit: `bool`, `int32`,
+`uint32`, `float32`, and vectors such as `float32x4`. A plain `number` would hide
 representation decisions that buffers and GPU arithmetic need to agree on.
 
 Numeric literals have no shader suffixes. Write `0`, not `0u`; context infers
-the concrete type, and `u32(value)`, `i32(value)`, or `f32(value)` performs an
-explicit conversion when needed.
+the concrete type. Use `uint32(value)`, `int32(value)`, or `float32(value)` for
+an explicit conversion when needed.
 
 The complete source contract is in the [language guide](docs/language.md).
 
@@ -156,8 +160,8 @@ depends on its shape, usually because it uses shared memory:
 
 ```tach
 @workgroup(64)
-export function blockTotals[i](out: buffer<u32[]>) {
-  workgroup partial: u32[64];
+export function blockTotals[i](out: buffer<uint32[]>) {
+  let partial: shared<uint32[64]>;
   const lane = i % 64;
 
   partial[lane] = i;
@@ -169,7 +173,7 @@ export function blockTotals[i](out: buffer<u32[]>) {
 }
 ```
 
-`workgroup`, barriers, and atomics express real parallel-memory semantics, so
+`shared<T>`, barriers, and atomics express real parallel-memory semantics, so
 they remain explicit. Mapping coordinate arithmetic to efficient target inputs
 is the compiler's job.
 
@@ -225,8 +229,8 @@ One module produces seven artifacts:
 | `.spv` | SPIR-V 1.3 compute module |
 | `.spvasm` | disassembly of the emitted SPIR-V bytes |
 | `.js` | generated command constructors |
-| `.d.ts` | generated TypeScript interfaces and signatures |
-| `.tach.json` | layouts, resources, entry points, and launch metadata |
+| `.d.ts` | generated TypeScript object types and function signatures |
+| `.tach.json` | buffers, value parameters, layouts, entry points, and launch metadata |
 
 The useful CLI commands are:
 
@@ -251,6 +255,7 @@ Tach source
   -> parse and type-check
   -> verified target-neutral Core IR
   -> target-neutral optimization
+  -> shared parameter-block planning
        |                    |
        v                    v
      WGSL IR             SPIR-V IR
@@ -267,9 +272,10 @@ The first optimization stage reasons only about Tach semantics. Each backend
 then performs representation-specific work privately. Provider terms may
 appear in generated WGSL or SPIR-V, never in Tach source or Core IR.
 
-The compiler also owns one host layout. The same offsets and strides drive
-WGSL, SPIR-V, metadata, minimum binding sizes, and TypeScript packing. Host
-code never parses a shader to rediscover its interface.
+The compiler owns the host boundary. Storage buffers use one canonical layout;
+all plain values of a kernel are flattened into one compiler-planned parameter
+block. The same offsets drive WGSL, SPIR-V, metadata, the WebGPU runtime, and
+the native harness. Host code never parses a shader to rediscover an interface.
 
 For deeper detail:
 
@@ -279,7 +285,7 @@ For deeper detail:
   backends, bindings, and runtime fit together.
 - [Core IR guide](docs/ir.md): values, places, structured control, verification,
   and both optimization levels.
-- [ABI guide](docs/abi.md): resource identity, byte layout, launch geometry,
+- [ABI guide](docs/abi.md): buffer identity, byte layout, launch geometry,
   host values, sessions, and native caller obligations.
 
 ## Develop this repository
@@ -333,7 +339,8 @@ src/sema         checking and Core IR lowering
 src/ir           Core IR and verification
 src/opt          target-neutral optimization
 src/backend      shared backend analysis
-src/layout       canonical host layout
+src/layout       canonical buffer and physical field layout
+src/abi          names and shared parameter-block planning
 src/wgsl         WGSL lowering, optimization, emission, validation
 src/spirv        SPIR-V lowering, optimization, emission, validation
 src/bindings     metadata and JS/TypeScript generation

@@ -1,6 +1,6 @@
-export function bitwise[i](out: buffer<u32[]>) {
-  let u: u32 = 0xff00;
-  let s: i32 = -64;
+export function bitwise[i](out: buffer<uint32[]>) {
+  let u: uint32 = 0xff00;
+  let s: int32 = -64;
   const left = u << 40;
   const logical = u >> 36;
   const arithmetic = s >> 35;
@@ -8,6 +8,6 @@ export function bitwise[i](out: buffer<u32[]>) {
   mixed &= 0xffff;
   mixed <<= 33;
   if (i < out.length) {
-    out[i] = mixed | u32(arithmetic);
+    out[i] = mixed | uint32(arithmetic);
   }
 }

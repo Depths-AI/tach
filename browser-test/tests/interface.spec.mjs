@@ -4,7 +4,7 @@ const exampleNames = ["atomics", "bitwise", "control", "for", "math", "particles
 const values = {
   atomics: { counters: { total: 7 } },
   bitwise: { out: [1, 2, 3] },
-  control: { data: [1, 2, 3], params: { scale: 2, count: 3 } },
+  control: { data: [1, 2, 3], params: { scale: 2, count: 3, enabled: true } },
   for: { data: [1, 2, 3, 4] },
   math: { out: [[1, 2, 3, 4]] },
   particles: {
@@ -145,10 +145,9 @@ test("@depths/tach owns sessions and generated modules expose only direct comman
         const computeBuffers = [];
         let initialRead;
 
-        for (const parameter of kernel.resources) {
-          const resource = metadata.resources[parameter.resource];
+        for (const parameter of kernel.parameters) {
           const value = inputs[entry.name][parameter.name];
-          if (resource.kind === "storage") {
+          if (parameter.kind === "buffer") {
             const computeBuffer = gpu.buffer(value);
             initialRead ??= await computeBuffer.read();
             computeBuffers.push(computeBuffer);
@@ -166,13 +165,14 @@ test("@depths/tach owns sessions and generated modules expose only direct comman
             dispatches: 2,
           }),
         );
-        computeBuffers[0].write(inputs[entry.name][kernel.resources[0].name]);
+        const firstBuffer = kernel.parameters.find((parameter) => parameter.kind === "buffer");
+        computeBuffers[0].write(inputs[entry.name][firstBuffer.name]);
         return {
           name: entry.name,
           exports: Object.keys(generated),
           kernelName: kernel.name,
           storageCount: computeBuffers.length,
-          uniformCount: kernel.resources.length - computeBuffers.length,
+          hasParameterBlock: kernel.parameterBlock !== undefined,
           lazyBufferCount,
           initialRead,
         };
@@ -192,14 +192,14 @@ test("@depths/tach owns sessions and generated modules expose only direct comman
     expect(summary.initialRead).toBeDefined();
     expect(summary.calls.shaders).toBe(1);
     expect(summary.calls.pipelines).toBe(1);
-    expect(summary.calls.buffers).toBe(summary.storageCount + (summary.uniformCount > 0 ? 1 : 0));
-    expect(summary.calls.bindGroups).toBe(summary.uniformCount > 0 ? 2 : 1);
+    expect(summary.calls.buffers).toBe(summary.storageCount + (summary.hasParameterBlock ? 1 : 0));
+    expect(summary.calls.bindGroups).toBe(summary.hasParameterBlock ? 2 : 1);
     expect(summary.calls.dispatches).toEqual([[1, 1, 1], [2, 1, 1], [2, 1, 1]]);
     expect(summary.calls.passes).toBe(1);
     expect(summary.calls.submits).toBe(1);
     expect(summary.calls.workDone).toBe(1);
-    expect(summary.calls.writes).toBe(1 + (summary.uniformCount > 0 ? 1 : 0));
-    expect(summary.calls.destroyed).toBe(summary.storageCount + (summary.uniformCount > 0 ? 1 : 0));
+    expect(summary.calls.writes).toBe(1 + (summary.hasParameterBlock ? 1 : 0));
+    expect(summary.calls.destroyed).toBe(summary.storageCount + (summary.hasParameterBlock ? 1 : 0));
     expect(summary.calls.scopesPushed).toBe(6);
     expect(summary.calls.scopesPopped).toBe(6);
     expect(summary.calls.deviceDestroyed).toBe(1);

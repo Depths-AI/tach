@@ -17,13 +17,6 @@ type Module struct {
 	Functions []*Function
 }
 
-type ResourceKind uint8
-
-const (
-	Uniform ResourceKind = iota + 1
-	Buffer
-)
-
 type Access uint8
 
 const (
@@ -33,23 +26,22 @@ const (
 
 type Resource struct {
 	Name   string
-	Kind   ResourceKind
 	Type   *types.Type // logical resource type; runtime array is allowed for buffers
 	Access Access
 	Span   source.Span
 }
 
 type Function struct {
-	Name           string
-	Indices        []Param
-	Params         []Param
-	Return         *types.Type
-	Body           *Block
-	Compute        bool
-	Workgroup      [3]uint32
-	ResourceParams []ResourceParam
-	WorkgroupVars  []WorkgroupVar
-	Span           source.Span
+	Name          string
+	Indices       []Param
+	Params        []Param
+	Return        *types.Type
+	Body          *Block
+	Compute       bool
+	Workgroup     [3]uint32
+	KernelParams  []KernelParam
+	WorkgroupVars []WorkgroupVar
+	Span          source.Span
 }
 
 type WorkgroupVar struct {
@@ -58,8 +50,9 @@ type WorkgroupVar struct {
 	Span source.Span
 }
 
-type ResourceParam struct {
+type KernelParam struct {
 	Name     string
+	Value    ValueID // zero means this parameter names a buffer resource
 	Resource int
 }
 
@@ -351,7 +344,7 @@ const (
 
 type Atomic struct {
 	Result ValueID     // zero only for AtomicStore
-	Type   *types.Type // underlying i32/u32 result/value type
+	Type   *types.Type // underlying int32/uint32 result/value type
 	Op     AtomicKind
 	Place  PlaceID
 	Value  ValueID // zero only for AtomicLoad
@@ -427,11 +420,7 @@ func Dump(m *Module) string {
 		b.WriteString("}\n\n")
 	}
 	for i, r := range m.Resources {
-		if r.Kind == Buffer {
-			fmt.Fprintf(&b, "resource @%d %s: %s<%s> access=%s\n", i, r.Name, r.Kind, r.Type, r.Access)
-		} else {
-			fmt.Fprintf(&b, "resource @%d %s: %s<%s>\n", i, r.Name, r.Kind, r.Type)
-		}
+		fmt.Fprintf(&b, "buffer @%d %s: %s access=%s\n", i, r.Name, r.Type, r.Access)
 	}
 	if len(m.Resources) > 0 {
 		b.WriteByte('\n')
@@ -441,16 +430,6 @@ func Dump(m *Module) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
-}
-func (k ResourceKind) String() string {
-	switch k {
-	case Uniform:
-		return "uniform"
-	case Buffer:
-		return "buffer"
-	default:
-		return fmt.Sprintf("resource_kind(%d)", k)
-	}
 }
 func (a Access) String() string {
 	switch a {
@@ -550,6 +529,10 @@ func (k BarrierKind) String() string {
 	}
 }
 func dumpFunc(b *strings.Builder, f *Function) {
+	parameterTypes := make(map[ValueID]*types.Type, len(f.Params))
+	for _, parameter := range f.Params {
+		parameterTypes[parameter.ID] = parameter.Type
+	}
 	if f.Compute {
 		fmt.Fprintf(b, "compute @%s[", f.Name)
 		for i, index := range f.Indices {
@@ -558,12 +541,23 @@ func dumpFunc(b *strings.Builder, f *Function) {
 			}
 			fmt.Fprintf(b, "%s=%%%d", index.Name, index.ID)
 		}
-		fmt.Fprintf(b, "] workgroup(%d,%d,%d) {\n", f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
+		b.WriteString("](")
+		for i, p := range f.KernelParams {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if p.Value != 0 {
+				fmt.Fprintf(b, "%s=%%%d: %s", p.Name, p.Value, parameterTypes[p.Value])
+			} else {
+				fmt.Fprintf(b, "%s=@%d", p.Name, p.Resource)
+			}
+		}
+		fmt.Fprintf(b, ") workgroup(%d,%d,%d) {\n", f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
 		for i, w := range f.WorkgroupVars {
 			fmt.Fprintf(b, "  workgroup @%d %s: %s\n", i, w.Name, w.Type)
 		}
 	} else {
-		fmt.Fprintf(b, "fn @%s(", f.Name)
+		fmt.Fprintf(b, "function @%s(", f.Name)
 		for i, p := range f.Params {
 			if i > 0 {
 				b.WriteString(", ")

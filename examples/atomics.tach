@@ -1,10 +1,10 @@
 type Counters = {
-  total: atomic<u32>,
+  total: atomic<uint32>,
 };
 
 @workgroup(64)
 export function accumulate[i](counters: buffer<Counters>) {
-  workgroup scratch: atomic<u32>[64];
+  let scratch: shared<atomic<uint32>[64]>;
   const lane = i % 64;
 
   if (lane == 0) {

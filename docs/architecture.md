@@ -32,7 +32,8 @@ Tach is organized around eight invariants:
 4. Structured control stays structured until a backend needs lower-level CFG.
 5. Portable behavior is fixed before target emission.
 6. General optimization and backend representation optimization are distinct.
-7. Resource identity, host layout, and generated bindings are compiler-owned.
+7. Buffer identity, parameter packing, host layout, and generated bindings are
+   compiler-owned.
 8. Compilation succeeds only when every emitted artifact passes its owning
    validator.
 
@@ -59,6 +60,9 @@ lexer -> parser -> AST
                     v
        target-independent optimization
        + post-optimization verification
+                    |
+                    v
+       shared parameter-block planning
              /                    \
             v                      v
        WGSL lowering          SPIR-V lowering
@@ -92,7 +96,7 @@ spelling, identifiers, punctuation, keywords, and operators.
 
 `src/parser` builds `src/ast` declarations, types, statements, expressions,
 attributes, and source spans. It establishes grammatical structure but does
-not decide overloads, resource access, host layout, or target representation.
+not decide overloads, buffer access, host layout, or target representation.
 
 The AST is intentionally source-shaped. Constructs such as `for`, ternary
 expressions, compound assignment, and object-shaped struct literals still
@@ -102,13 +106,13 @@ exist there because diagnostics should refer to what the author wrote.
 
 `src/sema` is the language authority. It performs declaration collection,
 type resolution, cycle detection, literal inference, expression checking,
-overload selection, lexical-flow analysis, call-cycle rejection, resource
-validation, access inference, and Core IR construction.
+overload selection, lexical-flow analysis, call-cycle rejection, kernel
+parameter validation, buffer-access inference, and Core IR construction.
 
 Semantic analysis lowers while it checks because the decisions are coupled:
 
 - a literal enters IR only after it has one concrete type;
-- a resource projection becomes a typed place;
+- a buffer projection becomes a typed place;
 - a local rebinding becomes a new value;
 - branch rebindings become `If` results;
 - loop rebindings become loop parameters and results;
@@ -126,10 +130,10 @@ Core IR in `src/ir` separates:
 Value<T>                 immutable computed data
 Place<T>                 typed path to GPU memory
 Block + terminator       structured execution region
-Resource                 external kernel memory contract
+Buffer resource          external kernel memory contract
 ```
 
-Ordinary source locals lower to values. Buffers, uniforms, and workgroup
+Ordinary locals and plain kernel parameters lower to values. Buffers and shared
 variables lower to places. Loads, stores, atomics, and barriers remain explicit
 effects.
 
@@ -149,7 +153,7 @@ belong to later layers.
 boundary between semantic analysis, optimization, and code generation. It
 checks definition uniqueness, structured availability, exact types, place
 paths, access, calls, returns, region yields, loop carriers, intrinsics,
-atomics, barriers, runtime arrays, and workgroup declarations.
+atomics, barriers, runtime arrays, and shared-memory declarations.
 
 `src/ir/uniformity.go` derives whether each value is uniform or varying within
 a workgroup. It follows value dependencies, nested control, helper calls, and
@@ -188,13 +192,13 @@ backend passes                 target input/encoding choices
 6. dead pure definition removal to a fixed point.
 
 The pass manager verifies before and after the sequence. Its rules are based
-on Tach types, effects, structured dominance, resource access, and the
-non-aliasing resource contract. It has no WGSL or SPIR-V cases.
+on Tach types, effects, structured dominance, buffer access, and the
+non-aliasing buffer contract. It has no WGSL or SPIR-V cases.
 
 Loop promotion illustrates the intended standard. It may keep a repeated
 buffer update in a loop-carried SSA value, but only when there is one clear
 load/store path and no synchronization, early exit, atomic, or competing
-touch of that resource. It preserves zero-trip behavior by loading lazily and
+touch of that buffer. It preserves zero-trip behavior by loading lazily and
 writing back only if the loop ran.
 
 ### Backend optimization
@@ -216,26 +220,30 @@ in source syntax.
 
 ## 7. One ABI and layout engine
 
-`src/layout` computes Tach's canonical host-visible layout. It owns scalar and
-vector size/alignment, struct field offsets, nested-struct extent, fixed-array
-stride, runtime-tail offset and stride, and overflow checking.
+`src/layout` computes Tach's canonical buffer layout and the physical layouts
+used by ABI fields. It owns scalar and vector size/alignment, struct field
+offsets, nested-struct extent, fixed-array stride, runtime-tail offset and
+stride, and overflow checking.
 
 That one calculation drives:
 
-- WGSL resource wrappers;
+- WGSL buffer wrappers;
 - SPIR-V member offsets and array strides;
 - reflection metadata;
 - WebGPU minimum binding sizes; and
 - generated runtime codecs.
 
-`src/abi` owns external names. Exported kernel names preserve their source
-spelling in WGSL, SPIR-V, metadata, JavaScript, and TypeScript. Only private
-compiler symbols are mangled.
+`src/abi` owns external names and the shared immutable-parameter plan. Exported
+kernel names preserve their source spelling in WGSL, SPIR-V, metadata,
+JavaScript, and TypeScript. Only private compiler symbols are mangled.
 
-Every kernel parameter becomes one deterministic module resource. Its module
-index maps to group/descriptor set `0` and to the same binding number in both
-backends. Source has no binding annotation and host code does not allocate
-bindings itself.
+Every `buffer<T>` parameter becomes one deterministic module buffer. Plain
+parameters remain ordinary Core IR values. After Core optimization, the ABI
+planner recursively flattens those values into one fixed-size block per kernel,
+turning logical `bool` leaves into physical `uint32` fields. Both shader
+backends and host binding generation consume that exact plan. Buffer bindings
+come first; parameter blocks receive subsequent group/set `0` bindings. Source
+has no binding annotation and host code never allocates bindings itself.
 
 ## 8. WGSL backend
 
@@ -247,12 +255,14 @@ bindings itself.
 4. validate the exact emitted WGSL subset.
 
 The emitter maps values to expressions or compiler locals, places to access
-expressions, structured regions to WGSL control, resources to group/binding
+expressions, structured regions to WGSL control, buffers to group/binding
 globals, and Tach intrinsics/effects to their WGSL operations.
 
-Fixed-size host resources use compiler-generated wrappers so their binding
-size follows the Tach ABI. Runtime arrays retain their natural element stride.
-Generated private names are mangled and isolated from the public entry point.
+Fixed-size buffers use compiler-generated wrappers so their binding size
+follows the Tach ABI. Runtime arrays retain their natural element stride. Each
+kernel with plain values gets one private uniform-address-space block, and the
+entry reconstructs logical values before executing Core instructions.
+Generated private names are isolated from the public entry point.
 
 The WGSL validator reparses what Tach emits. It protects serialization shape
 and syntax; semantic guarantees already come from typed, verified Core IR.
@@ -268,14 +278,14 @@ capability and GLSL.std.450 where required. It owns:
 - entry-point interface variables and decorations;
 - structured selection and loop CFG;
 - dominance-correct phi construction;
-- resource variables, access chains, loads, and stores;
+- buffer and parameter-block variables, access chains, loads, and stores;
 - atomics, scopes, memory semantics, and barriers; and
 - extended math instructions.
 
-Host-visible Uniform and StorageBuffer aggregates use decorated physical ABI
-types. SSA values and Workgroup memory use undecorated logical types. Aggregate
-loads and stores cross this boundary field by field, so padding never becomes
-a logical value.
+Host-visible parameter and StorageBuffer aggregates use decorated physical ABI
+types. SSA values and Workgroup memory use undecorated logical types. Buffer
+aggregate loads/stores and parameter reconstruction cross this boundary field
+by field, so padding and physical bool words never become logical values.
 
 Tach promises zeroed workgroup memory. Because native SPIR-V cannot assume the
 same initialization behavior as WGSL, the backend emits a prologue in which
@@ -294,17 +304,18 @@ harness additionally runs Khronos `spirv-val` before Vulkan execution.
 layout. It emits three synchronized artifacts:
 
 - an ES module embedding WGSL and private module descriptors;
-- TypeScript interfaces and positional kernel signatures; and
+- TypeScript type aliases and positional kernel signatures; and
 - plain JSON reflection metadata.
 
-Named Tach structs become readonly TypeScript interfaces. Each exported kernel
-becomes a same-named function returning an opaque `ComputeDispatch`. Buffer
-parameters use `ComputeBuffer<T>`; uniform parameters stay ordinary values.
+Named Tach structs become readonly TypeScript object aliases. Each exported
+kernel becomes a same-named function returning an opaque `ComputeDispatch`.
+Buffer parameters use `ComputeBuffer<T>`; plain parameters stay ordinary typed
+values.
 
 The generated JavaScript contains no adapter, device, buffer, cache, or queue
 lifecycle. It imports the private executor from `@depths/tach/internal` and
 describes the compiled module. `ValidateGenerated` checks the correspondence
-among JavaScript exports, declarations, metadata, resource mappings, and
+among JavaScript exports, declarations, metadata, parameter mappings, and
 package imports before compilation succeeds.
 
 ## 11. WebGPU runtime
@@ -329,9 +340,9 @@ Both return or expose the same `Tach` session contract:
 ### Command construction and submission
 
 A generated kernel call validates argument shape, buffer ownership, and
-resource non-aliasing, snapshots and packs uniforms, and returns a command. A
-thenable trap reports accidental `await kernel(...)`; commands must go through
-`gpu.submit(...)`.
+buffer non-aliasing, snapshots its plain arguments into at most one parameter
+block, and returns a command. A thenable trap reports accidental
+`await kernel(...)`; commands must go through `gpu.submit(...)`.
 
 `submit(first, ...rest)` prepares all commands, records them in order into one
 compute pass and command buffer, and performs one queue submission. Its promise
@@ -351,9 +362,9 @@ submitted command supplies its compiler codec and layout, packs it, and creates
 the physical GPU buffer. From then on, `write` must keep the same byte length.
 
 Generated modules cache one shader module and each compute pipeline per device.
-Sessions cache bind groups by layout and resident buffer ranges. Uniform data
-uses a session-owned aligned upload buffer that grows geometrically and is
-reused under WebGPU queue ordering. Persistent sessions therefore retain the
+Sessions cache bind groups by layout and resident buffer ranges. Parameter
+blocks use a session-owned aligned upload buffer that grows geometrically and
+is reused under WebGPU queue ordering. Persistent sessions therefore retain the
 device, buffers, pipelines, layouts, and stable binding sets across frames.
 
 ### Synchronization and errors
@@ -367,7 +378,7 @@ lifecycle errors, and application exceptions are normalized to `TachError`.
 live persistent session throw `TachFailure`; an enclosing `tach(...)` scope
 converts those failures back to its result boundary.
 
-`close()` is idempotent. It destroys every live session buffer, the uniform
+`close()` is idempotent. It destroys every live session buffer, the parameter
 arena, caches, and the WebGPU device. Buffer `destroy()` is also idempotent and
 invalidates cached bind groups that referred to it.
 
@@ -383,7 +394,7 @@ Each validator answers a different question:
 | optimizer post-verify | Did optimization preserve that contract? |
 | WGSL validator | Did Tach serialize its WGSL subset correctly? |
 | SPIR-V validator | Is the binary structurally, semantically, and ABI valid? |
-| generated validator | Do JS, declarations, metadata, and resources agree? |
+| generated validator | Do JS, declarations, metadata, buffers, and values agree? |
 | browser harness | Does real WebGPU compile and execute the artifacts? |
 | native harness | Does `spirv-val` and Vulkan execute the SPIR-V correctly? |
 
@@ -403,8 +414,8 @@ src/sema         language semantics and Core IR lowering
 src/ir           IR model, dump, verification, uniformity, use counts
 src/opt          target-independent optimization
 src/backend      shared backend-lowered coordinate analysis
-src/layout       canonical host layout
-src/abi          external names and private mangling
+src/layout       canonical buffer and physical field layout
+src/abi          external names, private mangling, parameter-block planning
 src/wgsl         WGSL lowering, target pass, emission, validation
 src/spirv        SPIR-V lowering, emission, decoding, validation, disassembly
 src/bindings     metadata and JavaScript/TypeScript generation

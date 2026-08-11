@@ -36,11 +36,11 @@ func TestParticlesEndToIR(t *testing.T) {
 func TestDuplicateComputeParameterNameRejected(t *testing.T) {
 	m, err := parser.Parse("dup-param.tach", `
 @workgroup(1)
-export function first[i](shared: buffer<u32[]>) { }
+export function first[i](shared: buffer<uint32[]>) { }
 @workgroup(1)
 export function second[i](
-  shared: buffer<u32[]>,
-  shared: buffer<u32[]>
+  shared: buffer<uint32[]>,
+  shared: buffer<uint32[]>
 ) { }
 `)
 	if err != nil {
@@ -53,9 +53,9 @@ export function second[i](
 }
 
 func TestComputeKernelRequiresBuffer(t *testing.T) {
-	m, err := parser.Parse("uniform-only.tach", `
+	m, err := parser.Parse("value-only.tach", `
 @workgroup(1)
-export function invisible[i](params: uniform<u32>) { }
+export function invisible[i](params: uint32) { }
 `)
 	if err != nil {
 		t.Fatal(err)
@@ -63,5 +63,20 @@ export function invisible[i](params: uniform<u32>) { }
 	_, err = sema.CheckAndLower(m)
 	if err == nil || !strings.Contains(err.Error(), "requires at least one buffer parameter") {
 		t.Fatalf("CheckAndLower error = %v, want buffer-parameter diagnostic", err)
+	}
+}
+
+func TestKernelValueParameterIsImmutable(t *testing.T) {
+	m, err := parser.Parse("immutable-parameter.tach", `
+export function invalid[i](out: buffer<uint32[]>, value: uint32) {
+  value = i;
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sema.CheckAndLower(m)
+	if err == nil || !strings.Contains(err.Error(), "cannot assign to immutable value value") {
+		t.Fatalf("CheckAndLower error = %v, want immutable-parameter diagnostic", err)
 	}
 }

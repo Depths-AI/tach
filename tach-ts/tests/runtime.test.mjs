@@ -11,6 +11,7 @@ function fakeWebGPU({
   scopeErrors = [],
   shaderError,
 } = {}) {
+  const buffers = [];
   const calls = {
     bindGroups: 0,
     buffers: 0,
@@ -70,7 +71,8 @@ function fakeWebGPU({
     createBuffer(descriptor) {
       calls.buffers++;
       const storage = new Uint8Array(descriptor.size);
-      return {
+      const buffer = {
+        descriptor,
         size: descriptor.size,
         storage,
         destroy() { calls.buffersDestroyed++; },
@@ -78,6 +80,8 @@ function fakeWebGPU({
         async mapAsync() {},
         unmap() {},
       };
+      buffers.push(buffer);
+      return buffer;
     },
     createCommandEncoder() {
       const pass = {
@@ -105,6 +109,7 @@ function fakeWebGPU({
     async requestDevice() { return device; },
   };
   return {
+    buffers,
     calls,
     gpu: { async requestAdapter() { return adapter; } },
   };
@@ -134,7 +139,7 @@ const clear = defineModule({
     entryPoint: "clear",
     dimensions: 1,
     workgroupSize: [1, 1, 1],
-    resources: [{ name: "data", resource: 0 }],
+    parameters: [{ name: "data", resource: 0 }],
   }],
 });
 
@@ -146,7 +151,7 @@ const plane = defineModule({
     entryPoint: "plane",
     dimensions: 2,
     workgroupSize: [8, 8, 1],
-    resources: [{ name: "data", resource: 0 }],
+    parameters: [{ name: "data", resource: 0 }],
   }],
 });
 
@@ -166,23 +171,45 @@ const fill = defineModule({
       runtime: true,
       elem: { kind: "u32", size: 4 },
     },
-  }, {
-    name: "value",
-    group: 0,
-    binding: 1,
-    kind: "uniform",
-    access: "read",
-    byteSize: 16,
-    minimumByteSize: 16,
-    runtime: false,
-    layout: { kind: "u32", size: 4 },
   }],
   kernels: [{
     name: "fill",
     entryPoint: "fill",
     dimensions: 1,
     workgroupSize: [1, 1, 1],
-    resources: [{ name: "data", resource: 0 }, { name: "value", resource: 1 }],
+    parameters: [{ name: "data", resource: 0 }, { name: "value" }],
+    parameterBlock: {
+      group: 0,
+      binding: 1,
+      byteSize: 16,
+      fields: [{
+        parameter: 1,
+        path: [],
+        offset: 0,
+        layout: { kind: "u32", size: 4 },
+      }],
+    },
+  }],
+});
+
+const configure = defineModule({
+  source: "",
+  resources: [scalarBuffer],
+  kernels: [{
+    name: "configure",
+    entryPoint: "configure",
+    dimensions: 1,
+    workgroupSize: [1, 1, 1],
+    parameters: [{ name: "data", resource: 0 }, { name: "settings" }],
+    parameterBlock: {
+      group: 0,
+      binding: 1,
+      byteSize: 16,
+      fields: [
+        { parameter: 1, path: ["enabled"], offset: 0, layout: { kind: "bool", size: 4 } },
+        { parameter: 1, path: ["scale"], offset: 4, layout: { kind: "f32", size: 4 } },
+      ],
+    },
   }],
 });
 
@@ -213,7 +240,7 @@ const vectors = defineModule({
     entryPoint: "vectors",
     dimensions: 1,
     workgroupSize: [1, 1, 1],
-    resources: [{ name: "values", resource: 0 }],
+    parameters: [{ name: "values", resource: 0 }],
   }],
 });
 
@@ -239,7 +266,7 @@ const combine = defineModule({
     entryPoint: "combine",
     dimensions: 1,
     workgroupSize: [1, 1, 1],
-    resources: [
+    parameters: [
       { name: "input", resource: 0 },
       { name: "output", resource: 1 },
     ],
@@ -405,21 +432,21 @@ test("packed vector arrays stay flat typed arrays across upload and readback", a
   }
 });
 
-test("kernel resource parameters cannot alias the same compute buffer", async () => {
+test("kernel buffer parameters cannot alias the same compute buffer", async () => {
   const opened = await openTach({ gpu: fakeWebGPU().gpu });
   assert.equal(opened.ok, true);
   try {
     const data = opened.value.buffer(new Uint32Array([1]));
     assert.throws(
       () => combine.dispatch(0, [data, data]),
-      /resource parameters require distinct compute buffers/u,
+      /buffer parameters require distinct compute buffers/u,
     );
   } finally {
     opened.value.close();
   }
 });
 
-test("one pass carries multiple kernels and reuses resident uniforms and bind groups", async () => {
+test("one pass carries multiple kernels and reuses resident parameters and bind groups", async () => {
   const fake = fakeWebGPU();
   const opened = await openTach({ gpu: fake.gpu });
   assert.equal(opened.ok, true);
@@ -448,6 +475,30 @@ test("one pass carries multiple kernels and reuses resident uniforms and bind gr
     assert.equal(fake.calls.workDone, 0);
     await opened.value.idle();
     assert.equal(fake.calls.workDone, 1);
+  } finally {
+    opened.value.close();
+  }
+});
+
+test("parameter blocks pack nested values and bools into compiler-planned offsets", async () => {
+  const fake = fakeWebGPU();
+  const opened = await openTach({ gpu: fake.gpu });
+  assert.equal(opened.ok, true);
+  try {
+    const data = opened.value.buffer(new Uint32Array([0]));
+    await opened.value.submit(configure.dispatch(0, [data, { enabled: true, scale: 2.5 }]));
+    const arena = fake.buffers.find((buffer) => buffer.descriptor.label === "Tach parameter arena");
+    assert.ok(arena);
+    const view = new DataView(arena.storage.buffer);
+    assert.equal(view.getUint32(0, true), 1);
+    assert.equal(view.getFloat32(4, true), 2.5);
+    await opened.value.submit(configure.dispatch(0, [data, { enabled: false, scale: 1.5 }]));
+    assert.equal(view.getUint32(0, true), 0);
+    assert.equal(view.getFloat32(4, true), 1.5);
+    assert.throws(
+      () => configure.dispatch(0, [data, { enabled: 1, scale: 2.5 }]),
+      /configure\.settings\.enabled must be a boolean/u,
+    );
   } finally {
     opened.value.close();
   }

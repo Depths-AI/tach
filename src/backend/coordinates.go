@@ -45,7 +45,7 @@ func LowerCoordinates(f *ir.Function) (*Coordinates, error) {
 }
 
 func OptimizeCoordinates(f *ir.Function, coordinates *Coordinates) {
-	// Coefficients use u32 arithmetic, matching Core exactly. The row-major
+	// Coefficients use uint32 arithmetic, matching Core exactly. The row-major
 	// [1, size.x, size.x*size.y] form is the portable local-linear coordinate.
 	want := [3]uint32{}
 	stride := uint32(1)

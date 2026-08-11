@@ -36,10 +36,10 @@ await gpu.idle();
 ```
 
 `steps` is an ordinary suffix-free Tach loop. The target-neutral optimizer
-recognizes its safe repeated buffer update, loads position, velocity, and `dt`
-only on the first executed iteration, carries them as SSA values, and commits
-the position once after the loop. A zero-iteration loop performs no memory
-access. The loop itself remains source-visible because replacing ordered
+recognizes its safe repeated buffer update, loads position and velocity only on
+the first executed iteration, carries them and the already-resident `dt` value
+as SSA values, and commits the position once after the loop. A zero-iteration
+loop performs no memory access. The loop itself remains source-visible because replacing ordered
 dispatches with an invocation-local loop is invalid for kernels with
 cross-invocation reads, atomics, or barriers; `dispatches` retains its literal
 ordered-dispatch meaning.
@@ -56,11 +56,14 @@ their backing bytes without an element-by-element JavaScript packing pass.
 ## Measurement contract
 
 Before timing, the harness completes native compilation, WGSL module and
-pipeline creation, the initial buffer upload, uniform-arena creation,
-bind-group creation, and a warmup invocation. Each GPU sample then measures one
+pipeline creation, the initial buffer upload, parameter-arena creation,
+bind-group creation, and warmup. Each GPU sample then measures one
 application-visible `submit()` plus `idle()` pair, including command encoding,
-submission, and `queue.onSubmittedWorkDone()`. Buffer readback and correctness
-comparison happen after timing.
+submission, and `queue.onSubmittedWorkDone()`.
+
+Both full and GPU-only modes run the same five-sample GPU phase. All five GPU
+workloads and readbacks finish before full mode begins any TypeScript baseline,
+so CPU heating cannot bias later measurements on a shared CPU/iGPU package.
 
 The TypeScript baseline performs the same full repeated workload on the main
 thread. Both sides run five samples in the full profile and report medians. The
@@ -89,8 +92,8 @@ npm run benchmark:gpu --workspace=@tach/showcase-ts
 npm run benchmark --workspace=@tach/showcase-ts
 ```
 
-`benchmark:gpu` runs the same full-size WebGPU warmups and timed batches but
-skips every TypeScript reference workload and correctness comparison. It writes
+`benchmark:gpu` runs that identical full-size GPU phase but skips every
+TypeScript reference workload and correctness comparison. It writes
 the ignored `showcase-ts/test-report.md`, so rapid compiler iteration does not
 overwrite the tracked comparison baseline.
 

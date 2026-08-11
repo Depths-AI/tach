@@ -60,7 +60,7 @@ func TestParticlesSPIRV(t *testing.T) {
 func TestLogicalIndicesAreOptimizedAfterSPIRVBackendLowering(t *testing.T) {
 	bin := emitSource(t, "coordinates.tach", `
 @workgroup(16, 8)
-export function coordinates[x, y](out: buffer<u32[]>) {
+export function coordinates[x, y](out: buffer<uint32[]>) {
   const localX = x % 16;
   const localY = y % 8;
   const local = localY * 16 + localX;
@@ -96,8 +96,8 @@ func TestWorkgroupAggregatesHaveNoExplicitLayout(t *testing.T) {
 			name: "array",
 			source: `
 @workgroup(1)
-export function arrayMemory[i](out: buffer<u32>) {
-  workgroup scratch: u32[4];
+export function arrayMemory[i](out: buffer<uint32>) {
+  let scratch: shared<uint32[4]>;
   scratch[0] = 7;
   out = scratch[0];
 }`,
@@ -105,10 +105,10 @@ export function arrayMemory[i](out: buffer<u32>) {
 		{
 			name: "struct",
 			source: `
-type Pair = { x: u32, y: u32 };
+type Pair = { x: uint32, y: uint32 };
 @workgroup(1)
-export function structMemory[i](out: buffer<u32>) {
-  workgroup pair: Pair;
+export function structMemory[i](out: buffer<uint32>) {
+  let pair: shared<Pair>;
   pair = { x: 7, y: 9 };
   workgroupBarrier();
   const copy: Pair = pair;
@@ -212,10 +212,10 @@ func TestHostResourceAggregatesKeepExplicitLayout(t *testing.T) {
 
 func TestSameStructCrossesHostAndWorkgroupRepresentations(t *testing.T) {
 	bin := emitSource(t, "shared-struct.tach", `
-type Pair = { x: u32, y: u32 };
+type Pair = { x: uint32, y: uint32 };
 @workgroup(1)
 export function sharedStruct[i](io: buffer<Pair>) {
-  workgroup pair: Pair;
+  let pair: shared<Pair>;
   pair = io;
   io = pair;
 }`)
@@ -278,8 +278,8 @@ export function sharedStruct[i](io: buffer<Pair>) {
 func TestWorkgroupMemoryIsZeroInitialized(t *testing.T) {
 	bin := emitSource(t, "zero-workgroup.tach", `
 @workgroup(1)
-export function zeroWorkgroup[i](out: buffer<u32>) {
-  workgroup scratch: u32;
+export function zeroWorkgroup[i](out: buffer<uint32>) {
+  let scratch: shared<uint32>;
   out = scratch;
 }`)
 	m, err := spirv.Decode(bin)
@@ -319,9 +319,9 @@ export function zeroWorkgroup[i](out: buffer<u32>) {
 
 func TestHelpersRequestConstInlining(t *testing.T) {
 	bin := emitSource(t, "inline.tach", `
-function twice(x: f32): f32 { return x + x; }
+function twice(x: float32): float32 { return x + x; }
 @workgroup(1)
-export function useHelper[i](out: buffer<f32>) { out = twice(2.0); }
+export function useHelper[i](out: buffer<float32>) { out = twice(2.0); }
 `)
 	m, err := spirv.Decode(bin)
 	if err != nil {

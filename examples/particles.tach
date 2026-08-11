@@ -1,14 +1,14 @@
 type Params = {
-  dt: f32,
-  count: u32,
+  dt: float32,
+  count: uint32,
 };
 
 type Particle = {
-  position: f32x4,
-  velocity: f32x4,
+  position: float32x4,
+  velocity: float32x4,
 };
 
-function integrateParticle(p: Particle, dt: f32): Particle {
+function integrateParticle(p: Particle, dt: float32): Particle {
   return {
     position: p.position + p.velocity * dt,
     velocity: p.velocity,
@@ -17,7 +17,7 @@ function integrateParticle(p: Particle, dt: f32): Particle {
 
 export function integrate[i](
   particles: buffer<Particle[]>,
-  params: uniform<Params>,
+  params: Params,
 ) {
   if (i >= params.count) {
     return;

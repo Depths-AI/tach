@@ -53,20 +53,8 @@ func Verify(m *Module) error {
 		if r.Name == "" {
 			return fmt.Errorf("resource %d has empty name", i)
 		}
-		if r.Kind != Uniform && r.Kind != Buffer {
-			return fmt.Errorf("resource %s has invalid kind", r.Name)
-		}
-		if r.Kind == Uniform && types.ContainsRuntimeArray(r.Type) {
-			return fmt.Errorf("uniform resource %s cannot contain a runtime-sized array", r.Name)
-		}
-		if r.Kind == Uniform && types.ContainsAtomic(r.Type) {
-			return fmt.Errorf("uniform resource %s cannot contain atomic values", r.Name)
-		}
 		if !types.IsHostShareable(r.Type) {
-			return fmt.Errorf("resource %s type %s is not host-shareable", r.Name, r.Type)
-		}
-		if r.Kind == Uniform && r.Access != Read {
-			return fmt.Errorf("uniform resource %s must be read-only", r.Name)
+			return fmt.Errorf("buffer %s type %s is not host-shareable", r.Name, r.Type)
 		}
 	}
 	fmap := map[string]*Function{}
@@ -179,15 +167,12 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		return fmt.Errorf("missing return type")
 	}
 	if f.Compute {
-		if len(f.Params) != 0 {
-			return fmt.Errorf("compute function cannot have value parameters")
-		}
 		if len(f.Indices) < 1 || len(f.Indices) > 3 {
 			return fmt.Errorf("compute function requires 1 to 3 logical indices")
 		}
 		for _, index := range f.Indices {
 			if !types.Equal(index.Type, types.TU32) {
-				return fmt.Errorf("logical index %s has type %s, want u32", index.Name, index.Type)
+				return fmt.Errorf("logical index %s has type %s, want uint32", index.Name, index.Type)
 			}
 		}
 		if f.Return.Kind != types.Void {
@@ -204,6 +189,47 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		}
 		if len(f.WorkgroupVars) != 0 {
 			return fmt.Errorf("helper function cannot declare workgroup variables")
+		}
+		if len(f.KernelParams) != 0 {
+			return fmt.Errorf("helper function cannot have kernel parameters")
+		}
+	}
+	valueParams := map[ValueID]Param{}
+	for _, p := range f.Params {
+		valueParams[p.ID] = p
+		if f.Compute && !types.IsConstructible(p.Type) {
+			return fmt.Errorf("kernel parameter %s has invalid value type %s", p.Name, p.Type)
+		}
+	}
+	if f.Compute {
+		seenNames := map[string]bool{}
+		seenValues := map[ValueID]bool{}
+		seenBuffers := map[int]bool{}
+		for _, p := range f.KernelParams {
+			if p.Name == "" || seenNames[p.Name] {
+				return fmt.Errorf("invalid or duplicate kernel parameter name %q", p.Name)
+			}
+			seenNames[p.Name] = true
+			if p.Value != 0 {
+				value, ok := valueParams[p.Value]
+				if !ok || p.Resource != -1 || seenValues[p.Value] || value.Name != p.Name {
+					return fmt.Errorf("kernel value parameter %s has invalid mapping", p.Name)
+				}
+				seenValues[p.Value] = true
+			} else {
+				if p.Resource < 0 || p.Resource >= len(m.Resources) || seenBuffers[p.Resource] || m.Resources[p.Resource].Name != p.Name {
+					return fmt.Errorf("kernel buffer parameter %s has invalid resource", p.Name)
+				}
+				seenBuffers[p.Resource] = true
+			}
+		}
+		if len(seenBuffers) == 0 {
+			return fmt.Errorf("kernel requires at least one buffer parameter")
+		}
+		for _, parameter := range f.Params {
+			if !seenValues[parameter.ID] {
+				return fmt.Errorf("kernel value parameter %s is not mapped", parameter.Name)
+			}
 		}
 	}
 	wgnames := map[string]bool{}
@@ -300,7 +326,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("unary %s type mismatch %s -> %s", x.Op, t, x.Type)
 			}
 			if x.Op == "!" && !types.Equal(t, types.TBool) {
-				return e, fmt.Errorf("! requires boolean")
+				return e, fmt.Errorf("! requires bool")
 			}
 			if x.Op == "-" && !types.IsSignedNumeric(t) {
 				return e, fmt.Errorf("unary - requires signed/float numeric")
@@ -414,7 +440,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("vector index base is %s", bt)
 			}
 			if !types.IsInteger(it) {
-				return e, fmt.Errorf("vector index is %s, want i32 or u32", it)
+				return e, fmt.Errorf("vector index is %s, want int32 or uint32", it)
 			}
 			if !types.Equal(x.Type, bt.Elem) {
 				return e, fmt.Errorf("vector index type %s, want %s", x.Type, bt.Elem)
@@ -554,7 +580,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			if p.resource >= 0 {
 				r := m.Resources[p.resource]
-				if r.Kind != Buffer || r.Access != Mutable {
+				if r.Access != Mutable {
 					return e, fmt.Errorf("store through non-writable resource %s", r.Name)
 				}
 			}
@@ -568,7 +594,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			if p.resource >= 0 && x.Op != AtomicLoad {
 				r := m.Resources[p.resource]
-				if r.Kind != Buffer || r.Access != Mutable {
+				if r.Access != Mutable {
 					return e, fmt.Errorf("atomic operation through non-writable buffer resource %s", r.Name)
 				}
 			}
@@ -624,7 +650,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("array_length on %s", p.ty)
 			}
 			if !types.Equal(x.Type, types.TU32) {
-				return e, fmt.Errorf("array_length result must be u32")
+				return e, fmt.Errorf("array_length result must be uint32")
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
 				return e, err
@@ -694,7 +720,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			cy, ok := x.Cond.Term.(*Yield)
 			if !ok || len(cy.Values) != 1 || !types.Equal(ce.values[cy.Values[0]], types.TBool) {
-				return e, fmt.Errorf("loop condition must yield one boolean")
+				return e, fmt.Errorf("loop condition must yield one bool")
 			}
 			be, err := verifyBlock(m, f, x.Body, le.clone(), fmap, "continue")
 			if err != nil {
@@ -795,21 +821,21 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 		t := args[0]
 		baseOK := t.Kind == types.I32 || t.Kind == types.F32 || t.Kind == types.Vector && (t.Elem.Kind == types.I32 || t.Elem.Kind == types.F32)
 		if !baseOK || !types.Equal(x.Type, t) {
-			return fmt.Errorf("abs requires i32/f32 scalar or vector and preserves type")
+			return fmt.Errorf("abs requires int32/float32 scalar or vector and preserves type")
 		}
 	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicRSqrt:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("intrinsic %s requires f32 scalar/vector and preserves type", x.Kind)
+			return fmt.Errorf("intrinsic %s requires float32 scalar/vector and preserves type", x.Kind)
 		}
 	case IntrinsicPow:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !same() || !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("pow requires matching f32 scalar/vector operands")
+			return fmt.Errorf("pow requires matching float32 scalar/vector operands")
 		}
 	case IntrinsicMin, IntrinsicMax:
 		if err := need(2); err != nil {
@@ -830,35 +856,35 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 			return err
 		}
 		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, types.TF32) {
-			return fmt.Errorf("dot requires matching f32 vectors and returns f32")
+			return fmt.Errorf("dot requires matching float32 vectors and returns float32")
 		}
 	case IntrinsicLength:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !floatVec(args[0]) || !types.Equal(x.Type, types.TF32) {
-			return fmt.Errorf("length requires an f32 vector and returns f32")
+			return fmt.Errorf("length requires a float32 vector and returns float32")
 		}
 	case IntrinsicDistance:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, types.TF32) {
-			return fmt.Errorf("distance requires matching f32 vectors and returns f32")
+			return fmt.Errorf("distance requires matching float32 vectors and returns float32")
 		}
 	case IntrinsicCross:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !same() || !floatVec(args[0]) || args[0].Lanes != 3 || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("cross requires two f32x3 operands")
+			return fmt.Errorf("cross requires two float32x3 operands")
 		}
 	case IntrinsicNormalize:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !floatVec(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("normalize requires an f32 vector and preserves type")
+			return fmt.Errorf("normalize requires a float32 vector and preserves type")
 		}
 	default:
 		return fmt.Errorf("unknown intrinsic %d", x.Kind)
@@ -897,7 +923,7 @@ func verifyBinary(x *Binary, l, r *types.Type) error {
 		}
 	case "&&", "||":
 		if !types.Equal(l, types.TBool) || !types.Equal(r, types.TBool) || !types.Equal(x.Type, types.TBool) {
-			return fmt.Errorf("logical op requires booleans")
+			return fmt.Errorf("logical op requires bool operands")
 		}
 	case "&", "|", "^":
 		if !types.Equal(l, r) || !types.Equal(x.Type, l) || !types.IsIntegerLike(l) {

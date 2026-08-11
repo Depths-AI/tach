@@ -9,7 +9,8 @@ import (
 type exampleCase struct {
 	name        string
 	kernel      string
-	resources   map[string][]byte
+	buffers     map[string][]byte
+	parameters  []byte
 	invocations [3]uint32
 	check       func(map[string][]byte) error
 }
@@ -25,7 +26,7 @@ func exampleCases() []exampleCase {
 	return []exampleCase{
 		{
 			name: "atomics", kernel: "accumulate", invocations: invocations(64),
-			resources: map[string][]byte{"counters": make([]byte, 16)},
+			buffers: map[string][]byte{"counters": make([]byte, 16)},
 			check: func(output map[string][]byte) error {
 				actual, err := readU32(output, "counters")
 				if err != nil {
@@ -39,7 +40,7 @@ func exampleCases() []exampleCase {
 		},
 		{
 			name: "bitwise", kernel: "bitwise", invocations: invocations(8),
-			resources: map[string][]byte{"out": u32Bytes(make([]uint32, 8))},
+			buffers: map[string][]byte{"out": u32Bytes(make([]uint32, 8))},
 			check: func(output map[string][]byte) error {
 				actual, err := readU32(output, "out")
 				if err != nil {
@@ -56,10 +57,8 @@ func exampleCases() []exampleCase {
 		},
 		{
 			name: "control", kernel: "transform", invocations: invocations(64),
-			resources: map[string][]byte{
-				"data":   f32Bytes(controlInput),
-				"params": structBytes(16, f32Field(0, 2), u32Field(4, 64)),
-			},
+			buffers:    map[string][]byte{"data": f32Bytes(controlInput)},
+			parameters: structBytes(16, f32Field(0, 2), u32Field(4, 64), u32Field(8, 1)),
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "data")
 				if err != nil {
@@ -79,7 +78,7 @@ func exampleCases() []exampleCase {
 		},
 		{
 			name: "for", kernel: "reduceLanes", invocations: invocations(256),
-			resources: map[string][]byte{"data": u32Bytes(forInput)},
+			buffers: map[string][]byte{"data": u32Bytes(forInput)},
 			check: func(output map[string][]byte) error {
 				actual, err := readU32(output, "data")
 				if err != nil {
@@ -99,7 +98,7 @@ func exampleCases() []exampleCase {
 		},
 		{
 			name: "math", kernel: "math", invocations: invocations(4),
-			resources: map[string][]byte{"out": f32Bytes(make([]float32, 16))},
+			buffers: map[string][]byte{"out": f32Bytes(make([]float32, 16))},
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "out")
 				if err != nil {
@@ -119,13 +118,13 @@ func exampleCases() []exampleCase {
 		},
 		{
 			name: "particles", kernel: "integrate", invocations: invocations(2),
-			resources: map[string][]byte{
+			buffers: map[string][]byte{
 				"particles": f32Bytes([]float32{
 					1, 2, 3, 4, 2, 4, 6, 8,
 					-1, -2, -3, -4, 1, 2, 3, 4,
 				}),
-				"params": structBytes(16, f32Field(0, 0.5), u32Field(4, 2)),
 			},
+			parameters: structBytes(16, f32Field(0, 0.5), u32Field(4, 2)),
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "particles")
 				if err != nil {
@@ -145,10 +144,8 @@ func exampleCases() []exampleCase {
 		},
 		{
 			name: "scalars", kernel: "scale", invocations: invocations(4),
-			resources: map[string][]byte{
-				"data":   f32Bytes([]float32{1, 2, 3, 4}),
-				"factor": structBytes(16, f32Field(0, 2.5)),
-			},
+			buffers:    map[string][]byte{"data": f32Bytes([]float32{1, 2, 3, 4})},
+			parameters: structBytes(16, f32Field(0, 2.5)),
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "data")
 				if err != nil {

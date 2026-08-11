@@ -574,7 +574,7 @@ func (v *validation) validateLayoutAndDefinitions() error {
 			v.types[a[0]] = &typeInfo{kind: typeInt, width: a[1], signed: a[2] == 1}
 		case OpTypeFloat:
 			if a[1] != 32 {
-				return fmt.Errorf("Tach float type must be f32")
+				return fmt.Errorf("Tach float type must be float32")
 			}
 			v.types[a[0]] = &typeInfo{kind: typeFloat, width: a[1]}
 		case OpTypeVector:
@@ -765,7 +765,7 @@ func (v *validation) validateReferencesAndTypes() error {
 			}
 			li := v.types[lt]
 			if li == nil || li.kind != typeInt || li.signed || li.width != 32 {
-				return fmt.Errorf("%s array length must be a u32 constant", ctx)
+				return fmt.Errorf("%s array length must be a uint32 constant", ctx)
 			}
 			if _, ok := v.constants[a[2]]; !ok || v.constants[a[2]] == 0 {
 				return fmt.Errorf("%s array length must be a positive constant", ctx)
@@ -1112,7 +1112,7 @@ func (v *validation) validateArrayLength(in Instruction) error {
 		return err
 	}
 	if rt.kind != typeInt || rt.signed || rt.width != 32 {
-		return fmt.Errorf("%s result must be u32", ctx)
+		return fmt.Errorf("%s result must be uint32", ctx)
 	}
 	ptid, err := v.requireValue(a[2], ctx)
 	if err != nil {
@@ -1145,7 +1145,7 @@ func (v *validation) constantU32(id uint32, ctx string) (uint32, error) {
 	}
 	t := v.types[tid]
 	if t == nil || t.kind != typeInt || t.signed || t.width != 32 {
-		return 0, fmt.Errorf("%s requires u32 constant operand %%%d", ctx, id)
+		return 0, fmt.Errorf("%s requires uint32 constant operand %%%d", ctx, id)
 	}
 	x, ok := v.constants[id]
 	if !ok {
@@ -1415,14 +1415,14 @@ func (v *validation) validateExtInst(in Instruction) error {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s FAbs requires matching f32 scalar/vector operand and result", ctx)
+			return fmt.Errorf("%s FAbs requires matching float32 scalar/vector operand and result", ctx)
 		}
 	case GLSL450SAbs:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeInt || !base.signed {
-			return fmt.Errorf("%s SAbs requires matching signed i32 scalar/vector operand and result", ctx)
+			return fmt.Errorf("%s SAbs requires matching signed int32 scalar/vector operand and result", ctx)
 		}
 	case GLSL450Trunc, GLSL450Floor, GLSL450Ceil, GLSL450Sin, GLSL450Cos, GLSL450Tan,
 		GLSL450Exp, GLSL450Log, GLSL450Exp2, GLSL450Log2, GLSL450Sqrt, GLSL450InverseSqrt:
@@ -1430,42 +1430,42 @@ func (v *validation) validateExtInst(in Instruction) error {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s floating unary intrinsic requires matching f32 scalar/vector operand and result", ctx)
+			return fmt.Errorf("%s floating unary intrinsic requires matching float32 scalar/vector operand and result", ctx)
 		}
 	case GLSL450Pow:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s Pow requires matching f32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s Pow requires matching float32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450UMin, GLSL450UMax:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeInt || base.signed {
-			return fmt.Errorf("%s unsigned min/max requires matching u32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s unsigned min/max requires matching uint32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450SMin, GLSL450SMax:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeInt || !base.signed {
-			return fmt.Errorf("%s signed min/max requires matching i32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s signed min/max requires matching int32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450UClamp:
 		if err := need(3); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeInt || base.signed {
-			return fmt.Errorf("%s UClamp requires matching u32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s UClamp requires matching uint32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450SClamp:
 		if err := need(3); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeInt || !base.signed {
-			return fmt.Errorf("%s SClamp requires matching i32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s SClamp requires matching int32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450Length:
 		if err := need(1); err != nil {
@@ -1473,7 +1473,7 @@ func (v *validation) validateExtInst(in Instruction) error {
 		}
 		at := v.types[argTypes[0]]
 		if rt.kind != typeFloat || at == nil || at.kind != typeVector || at.elem != a[0] || baseScalar(at, v.types).kind != typeFloat {
-			return fmt.Errorf("%s Length requires f32 vector input and f32 component result", ctx)
+			return fmt.Errorf("%s Length requires float32 vector input and float32 component result", ctx)
 		}
 	case GLSL450Distance:
 		if err := need(2); err != nil {
@@ -1481,21 +1481,21 @@ func (v *validation) validateExtInst(in Instruction) error {
 		}
 		at := v.types[argTypes[0]]
 		if argTypes[0] != argTypes[1] || rt.kind != typeFloat || at == nil || at.kind != typeVector || at.elem != a[0] || baseScalar(at, v.types).kind != typeFloat {
-			return fmt.Errorf("%s Distance requires matching f32 vectors and f32 component result", ctx)
+			return fmt.Errorf("%s Distance requires matching float32 vectors and float32 component result", ctx)
 		}
 	case GLSL450Cross:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || rt.kind != typeVector || rt.lanes != 3 || base.kind != typeFloat {
-			return fmt.Errorf("%s Cross requires matching f32x3 operands and result", ctx)
+			return fmt.Errorf("%s Cross requires matching float32x3 operands and result", ctx)
 		}
 	case GLSL450Normalize:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !allResultType() || rt.kind != typeVector || base.kind != typeFloat {
-			return fmt.Errorf("%s Normalize requires matching f32 vector operand and result", ctx)
+			return fmt.Errorf("%s Normalize requires matching float32 vector operand and result", ctx)
 		}
 	default:
 		return fmt.Errorf("%s GLSL.std.450 instruction %d is outside Tach's profile", ctx, a[3])
@@ -1521,7 +1521,7 @@ func (v *validation) validateDot(in Instruction) error {
 	}
 	lt := v.types[ltID]
 	if rt.kind != typeFloat || ltID != rtID || lt == nil || lt.kind != typeVector || lt.elem != a[0] || baseScalar(lt, v.types).kind != typeFloat {
-		return fmt.Errorf("%s requires matching f32 vectors and returns their f32 component type", ctx)
+		return fmt.Errorf("%s requires matching float32 vectors and returns their float32 component type", ctx)
 	}
 	v.valueType[a[1]] = a[0]
 	return nil

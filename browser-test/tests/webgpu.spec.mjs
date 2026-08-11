@@ -48,7 +48,7 @@ const cases = [
   {
     name: "control",
     kernel: "transform",
-    resources: { data: controlInput, params: { scale: 2, count: 64 } },
+    resources: { data: controlInput, params: { scale: 2, count: 64, enabled: true } },
     readParam: "data",
     assert(value) {
       const expected = controlInput.map((item) => item > 50 ? 100 : item * 2 + 1);
@@ -131,10 +131,9 @@ async function executeCase(testCase) {
       if (!kernel) throw new Error(`kernel ${testCase.kernel} is missing`);
       const args = [];
       const computeBuffers = new Map();
-      for (const parameter of kernel.resources) {
-        const resource = metadata.resources[parameter.resource];
+      for (const parameter of kernel.parameters) {
         const value = testCase.resources[parameter.name];
-        if (resource.kind === "storage") {
+        if (parameter.kind === "buffer") {
           const computeBuffer = gpu.buffer(value);
           computeBuffers.set(parameter.name, computeBuffer);
           args.push(computeBuffer);
@@ -210,7 +209,7 @@ for (const testCase of cases) {
   });
 }
 
-test("uniform commands remain distinct within a submission and across frames", async ({ page }) => {
+test("parameter commands remain distinct within a submission and across frames", async ({ page }) => {
   await page.goto("/");
   const result = await page.evaluate(async () => {
     const { tach } = await import("@depths/tach");

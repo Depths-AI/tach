@@ -22,7 +22,7 @@ test("the showcase runs five repeated GPU workloads", async ({ page }, testInfo)
   expect(results.map((result) => result.id)).toEqual(["particles", "fractal", "matrix", "options", "render"]);
   const expectedDispatches = full || gpuOnly ? [1, 4, 4, 8, 3] : [1, 2, 2, 2, 1];
   for (const [index, result] of results.entries()) {
-    expect(result.samples).toBe(gpuOnly ? 9 : full ? 5 : 3);
+    expect(result.samples).toBe(full || gpuOnly ? 5 : 3);
     expect(result.gpuSamplesMs).toHaveLength(result.samples);
     expect(result.gpuSamplesMs.every((sample) => sample > 0)).toBe(true);
     expect(result.dispatches).toBe(expectedDispatches[index]);

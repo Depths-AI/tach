@@ -61,6 +61,7 @@ type fnBuilder struct {
 	fn    *ir.Function
 	ids   *idAllocator
 	block *ir.Block
+	top   bool
 }
 
 func (b *fnBuilder) value() ir.ValueID {
@@ -80,7 +81,7 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 
 func CheckAndLower(m *ast.Module) (*ir.Module, error) {
 	c := &Checker{ast: m, mod: &ir.Module{}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}}
-	for _, n := range []string{"void", "boolean", "i32", "u32", "f32", "f32x2", "f32x3", "f32x4", "u32x2", "u32x3", "u32x4", "i32x2", "i32x3", "i32x4"} {
+	for _, n := range []string{"void", "bool", "int32", "uint32", "float32", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
 	if err := c.collectTypes(); err != nil {
@@ -131,6 +132,9 @@ func (c *Checker) resolveTypeFields() error {
 		td, ok := d.(*ast.TypeDecl)
 		if !ok {
 			continue
+		}
+		if len(td.Fields) == 0 {
+			return diag(td.Span, "type %s requires at least one field", td.Name)
 		}
 		t := c.types[td.Name]
 		seen := map[string]bool{}
@@ -283,12 +287,15 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 		raw, _ := splitNumberLiteral(t.Count)
 		n, err := strconv.ParseUint(raw, 0, 32)
 		if err != nil || n == 0 {
-			return nil, diag(t.Span, "fixed array length must be a positive u32 constant")
+			return nil, diag(t.Span, "fixed array length must be a positive uint32 constant")
 		}
 		return types.Array(e, uint32(n)), nil
 	case *ast.GenericType:
-		if t.Name == "uniform" || t.Name == "buffer" {
-			return nil, diag(t.Span, "resource wrapper %s is only valid in kernel parameter position", t.Name)
+		if t.Name == "buffer" {
+			return nil, diag(t.Span, "buffer<T> is only valid in a kernel parameter")
+		}
+		if t.Name == "shared" {
+			return nil, diag(t.Span, "shared<T> is only valid in an uninitialized kernel-body let declaration")
 		}
 		if t.Name == "atomic" {
 			if len(t.Args) != 1 {
@@ -299,7 +306,7 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 				return nil, err
 			}
 			if e.Kind != types.I32 && e.Kind != types.U32 {
-				return nil, diag(t.Span, "atomic element type must be i32 or u32, got %s", e)
+				return nil, diag(t.Span, "atomic element type must be int32 or uint32, got %s", e)
 			}
 			return types.AtomicOf(e), nil
 		}
@@ -363,7 +370,7 @@ func inferBufferAccess(m *ir.Module) {
 
 func markBufferWritable(m *ir.Module, roots map[ir.PlaceID]int, place ir.PlaceID) {
 	resource, ok := roots[place]
-	if ok && m.Resources[resource].Kind == ir.Buffer {
+	if ok {
 		m.Resources[resource].Access = ir.Mutable
 	}
 }
@@ -372,7 +379,7 @@ func (c *Checker) lowerHelper(d *ast.FuncDecl) error {
 	sig := c.funcs[d.Name]
 	f := &ir.Function{Name: d.Name, Return: sig.ret, Body: &ir.Block{}, Span: d.Span}
 	e := newEnv()
-	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body}
+	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body, top: true}
 	for _, p := range sig.params {
 		id := b.value()
 		f.Params = append(f.Params, ir.Param{Name: p.name, ID: id, Type: p.ty})
@@ -400,7 +407,7 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	}
 	f := &ir.Function{Name: d.Name, Return: types.TVoid, Body: &ir.Block{}, Compute: true, Workgroup: wg, Span: d.Span}
 	e := newEnv()
-	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body}
+	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body, top: true}
 	for _, index := range d.Indices {
 		if _, used := e.syms[index.Name]; used {
 			return diag(index.Span, "duplicate logical index %q", index.Name)
@@ -411,20 +418,25 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	}
 	hasBuffer := false
 	for _, p := range d.Params {
-		kind, ty, access, err := c.resourceType(p.Type)
-		if err != nil {
-			return err
-		}
-		if kind == ir.Buffer {
-			hasBuffer = true
-		}
 		if _, used := e.syms[p.Name]; used {
 			return diag(p.Span, "duplicate parameter %q", p.Name)
 		}
-		idx := len(c.mod.Resources)
-		c.mod.Resources = append(c.mod.Resources, ir.Resource{Name: p.Name, Kind: kind, Type: ty, Access: access, Span: p.Span})
-		e.syms[p.Name] = symbol{name: p.Name, ty: ty, resource: idx, workgroup: -1}
-		f.ResourceParams = append(f.ResourceParams, ir.ResourceParam{Name: p.Name, Resource: idx})
+		ty, buffer, err := c.kernelParameterType(p.Type)
+		if err != nil {
+			return err
+		}
+		if buffer {
+			hasBuffer = true
+			idx := len(c.mod.Resources)
+			c.mod.Resources = append(c.mod.Resources, ir.Resource{Name: p.Name, Type: ty, Access: ir.Read, Span: p.Span})
+			e.syms[p.Name] = symbol{name: p.Name, ty: ty, resource: idx, workgroup: -1}
+			f.KernelParams = append(f.KernelParams, ir.KernelParam{Name: p.Name, Resource: idx})
+			continue
+		}
+		id := b.value()
+		f.Params = append(f.Params, ir.Param{Name: p.Name, ID: id, Type: ty})
+		e.syms[p.Name] = symbol{name: p.Name, ty: ty, value: id, resource: -1, workgroup: -1}
+		f.KernelParams = append(f.KernelParams, ir.KernelParam{Name: p.Name, Value: id, Resource: -1})
 	}
 	if !hasBuffer {
 		return diag(d.Span, "kernel %s requires at least one buffer parameter", d.Name)
@@ -438,34 +450,32 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	c.mod.Functions = append(c.mod.Functions, f)
 	return nil
 }
-func (c *Checker) resourceType(te ast.TypeExpr) (ir.ResourceKind, *types.Type, ir.Access, error) {
+func (c *Checker) kernelParameterType(te ast.TypeExpr) (*types.Type, bool, error) {
 	g, ok := te.(*ast.GenericType)
-	if !ok || (g.Name != "uniform" && g.Name != "buffer") {
-		return 0, nil, 0, diag(te.GetSpan(), "kernel parameters must be uniform<T> or buffer<T>")
+	if !ok || g.Name != "buffer" {
+		t, err := c.resolveType(te)
+		if err != nil {
+			return nil, false, err
+		}
+		if t.Kind == types.Void || !types.IsConstructible(t) {
+			return nil, false, diag(te.GetSpan(), "kernel value parameter has invalid type %s", t)
+		}
+		return t, false, nil
 	}
 	if len(g.Args) != 1 {
-		return 0, nil, 0, diag(g.Span, "%s<T> takes exactly one type argument", g.Name)
+		return nil, false, diag(g.Span, "buffer<T> takes exactly one type argument")
 	}
 	t, err := c.resolveType(g.Args[0])
 	if err != nil {
-		return 0, nil, 0, err
+		return nil, false, err
 	}
 	if !types.IsHostShareable(t) {
-		return 0, nil, 0, diag(g.Span, "resource type %s is not host-shareable", t)
+		return nil, false, diag(g.Span, "buffer type %s is not host-shareable", t)
 	}
 	if _, err := layout.Of(t); err != nil {
-		return 0, nil, 0, diag(g.Span, "resource layout: %v", err)
+		return nil, false, diag(g.Span, "buffer layout: %v", err)
 	}
-	if g.Name == "uniform" {
-		if t.Kind == types.RuntimeArray {
-			return 0, nil, 0, diag(g.Span, "uniform resources cannot be runtime-sized")
-		}
-		if types.ContainsAtomic(t) {
-			return 0, nil, 0, diag(g.Span, "uniform resources cannot contain atomic values")
-		}
-		return ir.Uniform, t, ir.Read, nil
-	}
-	return ir.Buffer, t, ir.Read, nil
+	return t, true, nil
 }
 
 func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
@@ -522,7 +532,7 @@ func constU32(e ast.Expr) (uint32, error) {
 	}
 	v, err := strconv.ParseUint(s, 0, 32)
 	if err != nil {
-		return 0, diag(e.GetSpan(), "integer literal out of u32 range")
+		return 0, diag(e.GetSpan(), "integer literal out of uint32 range")
 	}
 	return uint32(v), nil
 }
@@ -548,7 +558,10 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 	switch x := s.(type) {
 	case *ast.WorkgroupStmt:
 		if !b.fn.Compute {
-			return diag(x.Span, "workgroup variables are only valid inside kernels")
+			return diag(x.Span, "shared variables are only valid inside kernels")
+		}
+		if !b.top {
+			return diag(x.Span, "shared variables must be declared in the kernel body, not a nested block")
 		}
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
@@ -558,7 +571,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 			return err
 		}
 		if !types.IsWorkgroupStorable(ty) {
-			return diag(x.Span, "workgroup variable %s has invalid type %s", x.Name, ty)
+			return diag(x.Span, "shared variable %s has invalid type %s", x.Name, ty)
 		}
 		idx := len(b.fn.WorkgroupVars)
 		b.fn.WorkgroupVars = append(b.fn.WorkgroupVars, ir.WorkgroupVar{Name: x.Name, Type: ty, Span: x.Span})
@@ -630,7 +643,7 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 		sym, exists := e.syms[id.Name]
 		if exists && sym.resource < 0 && sym.workgroup < 0 {
 			if !sym.mutable {
-				return diag(target.GetSpan(), "cannot assign to const %s", id.Name)
+				return diag(target.GetSpan(), "cannot assign to immutable value %s", id.Name)
 			}
 			var nv ir.ValueID
 			var nt *types.Type
@@ -760,7 +773,7 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "if condition is %s, want boolean", ct)
+		return diag(x.Cond.GetSpan(), "if condition is %s, want bool", ct)
 	}
 	names := carriedNames([]*ast.BlockStmt{x.Then, x.Else}, e)
 	thenBlock := &ir.Block{}
@@ -835,7 +848,7 @@ func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "while condition is %s, want boolean", ct)
+		return diag(x.Cond.GetSpan(), "while condition is %s, want bool", ct)
 	}
 	condBlock.Term = &ir.Yield{Values: []ir.ValueID{cv}}
 	bodyBlock := &ir.Block{}
@@ -899,7 +912,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		return c.lowerNumber(b, v, expected)
 	case *ast.BoolExpr:
 		if expected != nil && !types.Equal(expected, types.TBool) {
-			return 0, nil, diag(v.Span, "boolean literal cannot be used as %s", expected)
+			return 0, nil, diag(v.Span, "bool literal cannot be used as %s", expected)
 		}
 		id := b.value()
 		raw := "false"
@@ -997,7 +1010,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return 0, nil, err
 		}
 		if !types.IsInteger(it) {
-			return 0, nil, diag(v.Index.GetSpan(), "vector index must be i32 or u32, got %s", it)
+			return 0, nil, diag(v.Index.GetSpan(), "vector index must be int32 or uint32, got %s", it)
 		}
 		result := b.value()
 		b.emit(&ir.VectorIndex{Result: result, Type: bt.Elem, Base: base, Index: index, Span: v.Span})
@@ -1056,13 +1069,13 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return 0, nil, err
 		}
 		if v.Op == "!" && !types.Equal(t, types.TBool) {
-			return 0, nil, diag(v.Span, "! requires boolean")
+			return 0, nil, diag(v.Span, "! requires bool")
 		}
 		if v.Op == "-" && !types.IsSignedNumeric(t) {
-			return 0, nil, diag(v.Span, "unary - requires i32/f32 or a vector of them")
+			return 0, nil, diag(v.Span, "unary - requires int32/float32 or a vector of them")
 		}
 		if v.Op == "~" && !types.IsIntegerLike(t) {
-			return 0, nil, diag(v.Span, "unary ~ requires i32/u32 or an integer vector")
+			return 0, nil, diag(v.Span, "unary ~ requires int32/uint32 or an integer vector")
 		}
 		r := b.value()
 		b.emit(&ir.Unary{Result: r, Type: t, Op: v.Op, X: id, Span: v.Span})
@@ -1078,7 +1091,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return 0, nil, err
 		}
 		if !types.Equal(ct, types.TBool) {
-			return 0, nil, diag(v.Cond.GetSpan(), "conditional expression requires boolean condition, got %s", ct)
+			return 0, nil, diag(v.Cond.GetSpan(), "conditional expression requires bool condition, got %s", ct)
 		}
 		thenBlock := &ir.Block{}
 		tb := b.child(thenBlock)
@@ -1132,7 +1145,7 @@ func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *types.T
 		t = types.TF32
 	} else {
 		// Whole-number literals are naturally non-negative. Unary minus selects
-		// i32 when no surrounding context supplies a type.
+		// int32 when no surrounding context supplies a type.
 		t = types.TU32
 	}
 
@@ -1142,22 +1155,22 @@ func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *types.T
 	switch t.Kind {
 	case types.U32:
 		if isFloatSpelling {
-			return 0, nil, diag(n.Span, "u32 literal must be an integer")
+			return 0, nil, diag(n.Span, "uint32 literal must be an integer")
 		}
 		v, err := strconv.ParseUint(raw, 0, 32)
 		if err != nil {
-			return 0, nil, diag(n.Span, "u32 literal out of range")
+			return 0, nil, diag(n.Span, "uint32 literal out of range")
 		}
 		canonical = strconv.FormatUint(v, 10)
 	case types.I32:
 		if isFloatSpelling {
-			return 0, nil, diag(n.Span, "i32 literal must be an integer")
+			return 0, nil, diag(n.Span, "int32 literal must be an integer")
 		}
 		// Base-prefixed literals are still value literals, not bit-pattern casts.
-		// They therefore obey the positive i32 range exactly like decimal literals.
+		// They therefore obey the positive int32 range exactly like decimal literals.
 		v, err := strconv.ParseUint(raw, 0, 31)
 		if err != nil {
-			return 0, nil, diag(n.Span, "i32 literal out of range")
+			return 0, nil, diag(n.Span, "int32 literal out of range")
 		}
 		canonical = strconv.FormatUint(v, 10)
 	case types.F32:
@@ -1166,7 +1179,7 @@ func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *types.T
 		}
 		f, err := strconv.ParseFloat(raw, 32)
 		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
-			return 0, nil, diag(n.Span, "invalid f32 literal")
+			return 0, nil, diag(n.Span, "invalid float32 literal")
 		}
 		canonical = strconv.FormatFloat(f, 'g', -1, 32)
 		if !strings.ContainsAny(canonical, ".eE") {
@@ -1184,7 +1197,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 		return 0, nil, err
 	}
 	if !types.Equal(lt, types.TBool) {
-		return 0, nil, diag(x.Left.GetSpan(), "logical operand is %s, want boolean", lt)
+		return 0, nil, diag(x.Left.GetSpan(), "logical operand is %s, want bool", lt)
 	}
 	then := &ir.Block{}
 	tb := b.child(then)
@@ -1196,7 +1209,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, err
 		}
 		if !types.Equal(rt, types.TBool) {
-			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want boolean", rt)
+			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
 		}
 		then.Term = &ir.Yield{Values: []ir.ValueID{rv}}
 		id, _, err := c.lowerExpr(eb, e.clone(), &ast.BoolExpr{Value: false, Span: x.Span}, types.TBool)
@@ -1215,7 +1228,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, err
 		}
 		if !types.Equal(rt, types.TBool) {
-			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want boolean", rt)
+			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
 		}
 		els.Term = &ir.Yield{Values: []ir.ValueID{rv}}
 	}
@@ -1233,7 +1246,7 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 		}
 		countType := types.ShiftCountType(lt)
 		if countType == nil {
-			return 0, nil, diag(x.Left.GetSpan(), "%s requires an i32/u32 scalar or integer vector on the left, got %s", x.Op, lt)
+			return 0, nil, diag(x.Left.GetSpan(), "%s requires an int32/uint32 scalar or integer vector on the left, got %s", x.Op, lt)
 		}
 		want := countType
 		if countType.Kind == types.Vector {
@@ -1323,14 +1336,14 @@ func binaryRHSExpected(left *types.Type, right ast.Expr, op string) *types.Type 
 func (c *Checker) prepareShiftCount(b *fnBuilder, value ir.ValueID, got, shifted *types.Type, span source.Span) (ir.ValueID, *types.Type, error) {
 	want := types.ShiftCountType(shifted)
 	if want == nil {
-		return 0, nil, diag(span, "shift requires an i32/u32 scalar or integer vector")
+		return 0, nil, diag(span, "shift requires an int32/uint32 scalar or integer vector")
 	}
 	if want.Kind == types.Vector && types.Equal(got, types.TU32) {
 		value = c.splat(b, value, want, span)
 		got = want
 	}
 	if !types.Equal(got, want) {
-		return 0, nil, diag(span, "shift count is %s, want u32 or %s", got, want)
+		return 0, nil, diag(span, "shift count is %s, want uint32 or %s", got, want)
 	}
 	value, got = c.normalizeShiftCount(b, value, got, span)
 	return value, got, nil
@@ -1400,7 +1413,7 @@ func (c *Checker) emitBinary(b *fnBuilder, op string, l ir.ValueID, lt *types.Ty
 		out = lt
 	case "&", "|", "^":
 		if !types.Equal(lt, rt) || !types.IsIntegerLike(lt) {
-			return 0, nil, diag(span, "%s requires matching i32/u32 scalar or integer-vector operands; got %s and %s", op, lt, rt)
+			return 0, nil, diag(span, "%s requires matching int32/uint32 scalar or integer-vector operands; got %s and %s", op, lt, rt)
 		}
 		out = lt
 	case "<<", ">>":
@@ -1500,7 +1513,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 
 	firstExpected := expected
 	if kind == ir.IntrinsicDot || kind == ir.IntrinsicLength || kind == ir.IntrinsicDistance {
-		firstExpected = nil // result f32 does not determine vector width
+		firstExpected = nil // result float32 does not determine vector width
 	}
 	v, t, err := c.lowerExpr(b, e, x.Args[0], firstExpected)
 	if err != nil {
@@ -1543,15 +1556,15 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		t := argTypes[0]
 		ok := t.Kind == types.I32 || t.Kind == types.F32 || t.Kind == types.Vector && (t.Elem.Kind == types.I32 || t.Elem.Kind == types.F32)
 		if !ok {
-			return 0, nil, diag(x.Span, "abs requires i32/f32 scalar or vector, got %s", t)
+			return 0, nil, diag(x.Span, "abs requires int32/float32 scalar or vector, got %s", t)
 		}
 	case ir.IntrinsicFloor, ir.IntrinsicCeil, ir.IntrinsicTrunc, ir.IntrinsicSin, ir.IntrinsicCos, ir.IntrinsicTan, ir.IntrinsicExp, ir.IntrinsicExp2, ir.IntrinsicLog, ir.IntrinsicLog2, ir.IntrinsicSqrt, ir.IntrinsicRSqrt:
 		if !types.IsFloatLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "%s requires f32 scalar/vector, got %s", kind, argTypes[0])
+			return 0, nil, diag(x.Span, "%s requires float32 scalar/vector, got %s", kind, argTypes[0])
 		}
 	case ir.IntrinsicPow:
 		if !same() || !types.IsFloatLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "pow requires matching f32 scalar/vector operands")
+			return 0, nil, diag(x.Span, "pow requires matching float32 scalar/vector operands")
 		}
 	case ir.IntrinsicMin, ir.IntrinsicMax:
 		// DECISION: Float bounds stay unavailable until Tach defines NaN and
@@ -1566,26 +1579,26 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		}
 	case ir.IntrinsicDot:
 		if !same() || !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "dot requires matching f32 vectors")
+			return 0, nil, diag(x.Span, "dot requires matching float32 vectors")
 		}
 		out = types.TF32
 	case ir.IntrinsicLength:
 		if !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "length requires an f32 vector")
+			return 0, nil, diag(x.Span, "length requires a float32 vector")
 		}
 		out = types.TF32
 	case ir.IntrinsicDistance:
 		if !same() || !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "distance requires matching f32 vectors")
+			return 0, nil, diag(x.Span, "distance requires matching float32 vectors")
 		}
 		out = types.TF32
 	case ir.IntrinsicCross:
 		if !same() || !floatVec(argTypes[0]) || argTypes[0].Lanes != 3 {
-			return 0, nil, diag(x.Span, "cross requires two f32x3 operands")
+			return 0, nil, diag(x.Span, "cross requires two float32x3 operands")
 		}
 	case ir.IntrinsicNormalize:
 		if !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "normalize requires an f32 vector")
+			return 0, nil, diag(x.Span, "normalize requires a float32 vector")
 		}
 	default:
 		return 0, nil, diag(x.Span, "unsupported intrinsic %s", kind)
@@ -1644,7 +1657,7 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 			return 0, nil, err
 		}
 		if pt.Kind != types.Atomic || (pt.Elem.Kind != types.I32 && pt.Elem.Kind != types.U32) {
-			return 0, nil, diag(x.Args[0].GetSpan(), "%s requires an atomic<i32> or atomic<u32> place, got %s", id.Name, pt)
+			return 0, nil, diag(x.Args[0].GetSpan(), "%s requires an atomic<int32> or atomic<uint32> place, got %s", id.Name, pt)
 		}
 		var value ir.ValueID
 		if op != ir.AtomicLoad {
@@ -1868,7 +1881,7 @@ func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *type
 			return 0, nil, err
 		}
 		if !types.Equal(it, types.TU32) && !types.Equal(it, types.TI32) {
-			return 0, nil, diag(v.Index.GetSpan(), "array index must be i32 or u32, got %s", it)
+			return 0, nil, diag(v.Index.GetSpan(), "array index must be int32 or uint32, got %s", it)
 		}
 		p := b.place()
 		b.emit(&ir.PlaceIndex{Result: p, Type: bt.Elem, Base: bp, Index: iv, Span: v.Span})
