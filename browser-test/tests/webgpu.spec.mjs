@@ -33,21 +33,21 @@ forInput.splice(0, 4, 1, 2, 3, 4);
 const cases = [
   {
     name: "atomics",
-    kernel: "accumulate",
+		program: "accumulate",
     resources: { counters: { total: 0 } },
     readParam: "counters",
     assert(value) { expect(value.total).toBe(64); },
   },
   {
     name: "bitwise",
-    kernel: "bitwise",
+		program: "bitwise",
     resources: { out: Array(8).fill(0) },
     readParam: "out",
     assert(value) { expect(value).toEqual(Array(8).fill(expectedBitwise())); },
   },
   {
     name: "control",
-    kernel: "transform",
+		program: "transform",
     resources: { data: controlInput, params: { scale: 2, count: 64, enabled: true } },
     readParam: "data",
     assert(value) {
@@ -57,7 +57,7 @@ const cases = [
   },
   {
     name: "for",
-    kernel: "reduceLanes",
+		program: "reduceLanes",
     resources: { data: forInput },
     readParam: "data",
     assert(value) {
@@ -66,9 +66,23 @@ const cases = [
       expect(value).toEqual(expected);
     },
   },
+	{
+		name: "fusion",
+		program: "transform",
+		resources: { input: [1, 2, 3, 4], output: [0, 0, 0, 0], factor: 2, bias: 1 },
+		readParam: "output",
+		assert(value) { expect(value).toEqual([3, 5, 7, 9]); },
+	},
+	{
+		name: "fusion",
+		program: "neighbor",
+		resources: { values: [1, 2, 3, 4] },
+		readParam: "values",
+		assert(value) { expect(value).toEqual([5, 7, 9, 5]); },
+	},
   {
     name: "math",
-    kernel: "math",
+		program: "math",
     resources: { out: Array.from({ length: 4 }, () => [0, 0, 0, 0]) },
     readParam: "out",
     assert(value) {
@@ -82,7 +96,7 @@ const cases = [
   },
   {
     name: "particles",
-    kernel: "integrate",
+		program: "integrate",
     resources: {
       particles: [
         { position: [1, 2, 3, 4], velocity: [2, 4, 6, 8] },
@@ -100,7 +114,7 @@ const cases = [
   },
   {
     name: "scalars",
-    kernel: "scale",
+		program: "scale",
     resources: { data: [1, 2, 3, 4], factor: 2.5 },
     readParam: "data",
     assert(value) { expect(value).toEqual([2.5, 5, 7.5, 10]); },
@@ -128,11 +142,11 @@ async function executeCase(testCase) {
           .filter((message) => message.type === "error")
           .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`);
 
-        const kernel = metadata.kernels.find((item) => item.name === testCase.kernel);
-        if (!kernel) throw new Error(`kernel ${testCase.kernel} is missing`);
+				const program = metadata.programs.find((item) => item.name === testCase.program);
+				if (!program) throw new Error(`program ${testCase.program} is missing`);
         const args = [];
         const computeBuffers = new Map();
-        for (const parameter of kernel.parameters) {
+				for (const parameter of program.parameters) {
           const value = testCase.resources[parameter.name];
           if (parameter.kind === "buffer") {
             const computeBuffer = gpu.buffer(value);
@@ -145,7 +159,7 @@ async function executeCase(testCase) {
 
         const output = computeBuffers.get(testCase.readParam);
         if (!output) throw new Error(`readback resource ${testCase.readParam} is missing`);
-        await gpu.submit(generated[testCase.kernel](...args));
+				await gpu.submit(generated[testCase.program](...args));
         const value = await output.read();
 
         const info = gpu.adapter.info ?? {};
@@ -164,6 +178,14 @@ async function executeCase(testCase) {
           },
           value,
           compilationErrors,
+					plan: (() => {
+						const index = metadata.programs.indexOf(program);
+						const plan = metadata.targets.web.programs[index];
+						return {
+							dispatches: plan.steps.filter((step) => step.kind === "dispatch").length,
+							transients: plan.transients.length,
+						};
+					})(),
         };
       } finally {
         gpu.device.removeEventListener("uncapturederror", onUncaptured);
@@ -184,7 +206,7 @@ async function executeCase(testCase) {
 
 test.describe.configure({ mode: "serial" });
 for (const testCase of cases) {
-  test(`${testCase.name} executes and returns expected typed data`, async ({ page }, testInfo) => {
+	test(`${testCase.name}/${testCase.program} executes and returns expected typed data`, async ({ page }, testInfo) => {
     await page.goto("/");
     const payload = { ...testCase };
     delete payload.assert;
@@ -206,6 +228,12 @@ for (const testCase of cases) {
       console.log(`WebGPU execution: ${result.adapter.mode} (${adapterLabel})`);
     }
     testCase.assert(result.value);
+		if (testCase.name === "fusion" && testCase.program === "transform") {
+			expect(result.plan).toEqual({ dispatches: 1, transients: 0 });
+		}
+		if (testCase.name === "fusion" && testCase.program === "neighbor") {
+			expect(result.plan.dispatches).toBe(2);
+		}
   });
 }
 

@@ -5,161 +5,94 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/backend"
+	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
 	"tach/src/wgsl"
 )
 
-func compileBindings(t *testing.T, source string) (*Artifacts, *Metadata) {
+func generateSource(t *testing.T, source string, includeSPIRV bool) (*Artifacts, *Metadata) {
 	t.Helper()
-	a, err := parser.Parse("test.tach", source)
+	a, err := parser.Parse("bindings.tach", source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	logical, err := sema.CheckAndLower(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := wgsl.Emit(m)
+	if err := opt.OptimizeLogical(logical); err != nil {
+		t.Fatal(err)
+	}
+	web, err := wgsl.Lower(logical)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Generate(m, w)
+	wgslSource, err := wgsl.Emit(web)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var meta Metadata
-	if err := json.Unmarshal(out.MetadataJSON, &meta); err != nil {
-		t.Fatal(err)
-	}
-	return out, &meta
-}
-
-func TestValuesShareOnePhysicalParameterBlock(t *testing.T) {
-	out, meta := compileBindings(t, `
-@workgroup(32)
-export function scale[i](data: buffer<float32[]>, factor: float32, enabled: bool) {
-  if (enabled && i < data.length) { data[i] *= factor; }
-}`)
-	if len(meta.Resources) != 1 {
-		t.Fatalf("resources = %d", len(meta.Resources))
-	}
-	block := meta.Kernels[0].ParameterBlock
-	if block == nil || block.Binding != 1 || block.ByteSize != 16 || len(block.Fields) != 2 {
-		t.Fatalf("parameter block = %+v", block)
-	}
-	if !strings.Contains(out.JavaScript, `"parameterBlock":{"group":0,"binding":1,"byteSize":16`) ||
-		!strings.Contains(out.JavaScript, `"kind":"bool"`) {
-		t.Fatal("generated JS does not carry the packed value block and bool codec")
-	}
-}
-
-func TestDirectRuntimeResourceCarriesHostLayout(t *testing.T) {
-	out, _ := compileBindings(t, `
-@workgroup(1)
-export function clear[i](data: buffer<uint32[]>) {
-  if (i < data.length) { data[i] = 0; }
-}`)
-	if !strings.Contains(out.JavaScript, `"kind":"runtime"`) ||
-		!strings.Contains(out.JavaScript, `from "@depths/tach/internal"`) {
-		t.Fatal("runtime compute-buffer descriptor missing")
-	}
-}
-
-func TestAtomicResourceUsesUnderlyingHostRepresentation(t *testing.T) {
-	out, _ := compileBindings(t, `
-type Counters = { total: atomic<uint32> };
-@workgroup(1)
-export function increment[i](counters: buffer<Counters>) {
-  atomicAdd(counters.total, 1);
-}`)
-	if !strings.Contains(out.JavaScript, `"name":"total","offset":0,"type":{"kind":"u32"`) {
-		t.Fatal("atomic resource does not use its underlying uint32 host representation")
-	}
-}
-
-func TestRuntimeResourceDescriptorRecordsMinimumBindingSize(t *testing.T) {
-	out, meta := compileBindings(t, `
-@workgroup(1)
-export function clear[i](data: buffer<uint32[]>) {
-  if (i < data.length) { data[i] = 0; }
-}`)
-	if meta.Resources[0].MinimumByteSize != 4 {
-		t.Fatalf("runtime uint32 MinimumByteSize = %d, want 4", meta.Resources[0].MinimumByteSize)
-	}
-	if !strings.Contains(out.JavaScript, `"minimumByteSize":4`) {
-		t.Fatal("runtime resource descriptor omits Tach's minimum binding size")
-	}
-}
-
-func TestGeneratedSurfaceMirrorsSource(t *testing.T) {
-	out, meta := compileBindings(t, `
-@workgroup(64)
-export function scale[i](data: buffer<float32[]>, factor: float32) {
-  if (i < data.length) { data[i] *= factor; }
-}`)
-	if len(meta.Kernels) != 1 || meta.Kernels[0].Name != "scale" || meta.Kernels[0].EntryPoint != "scale" || meta.Kernels[0].Dimensions != 1 {
-		t.Fatalf("kernel metadata = %+v", meta.Kernels)
-	}
-	for _, want := range []string{
-		"import { defineModule as $defineModule } from \"@depths/tach/internal\"",
-		"const $tach = $defineModule({",
-		"export function scale(data, factor, $launch)",
-		"return $tach.command(0",
-		"import type { ComputeBuffer, ComputeCommand, LaunchOptions } from \"@depths/tach\"",
-		"data: ComputeBuffer<Float32Array | readonly number[]>",
-		"factor: number",
-		"$launch?: LaunchOptions<number>",
-		"): ComputeCommand",
-	} {
-		if !strings.Contains(out.JavaScript+out.Declarations, want) {
-			t.Fatalf("generated bindings missing %q", want)
+	var spv *backend.Executable
+	if includeSPIRV {
+		spv, err = backend.Lower(logical, backend.SPIRVProfile)
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
+	artifacts, err := Generate(logical, web, spv, wgslSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata Metadata
+	if err := json.Unmarshal(artifacts.MetadataJSON, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	return artifacts, &metadata
 }
 
-func TestKernelMayBeNamedBuffer(t *testing.T) {
-	out, _ := compileBindings(t, `
-@workgroup(1)
-export function buffer[i](data: buffer<uint32[]>) {
-  if (i < data.length) { data[i] = 0; }
-}`)
-	if !strings.Contains(out.JavaScript, "export function buffer(data, $launch)") ||
-		!strings.Contains(out.Declarations, "export function buffer(") {
-		t.Fatal("source kernel named buffer was not preserved")
+func TestGenerateBaselineProgram(t *testing.T) {
+	artifacts, metadata := generateSource(t, `export function scale[i](values: buffer<float32[]>, factor: float32) { if (i < values.length) { values[i] *= factor; } }`, true)
+	if metadata.Schema != 1 || len(metadata.Programs) != 1 || metadata.Programs[0].Name != "scale" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if metadata.Targets.Web == nil || metadata.Targets.SPIRV == nil || len(metadata.Targets.Web.Kernels) != 1 {
+		t.Fatalf("targets = %#v", metadata.Targets)
+	}
+	if got := metadata.Targets.Web.Kernels[0].EntryPoint; got != "_tach_k0" {
+		t.Fatalf("entry = %q", got)
+	}
+	if !strings.Contains(artifacts.Declarations, "LaunchOptions<number>") || !strings.Contains(artifacts.JavaScript, "$tach.command(0") {
+		t.Fatalf("generated artifacts:\n%s\n%s", artifacts.Declarations, artifacts.JavaScript)
 	}
 }
 
-func TestPackedRuntimeArraysExposeTypedHostRepresentations(t *testing.T) {
-	out, _ := compileBindings(t, `
-@workgroup(1)
-export function arrays[i](
-  signed: buffer<int32[]>,
-  unsigned: buffer<uint32[]>,
-  floats: buffer<float32[]>,
-  vectors: buffer<float32x4[]>,
-) { }
-`)
-	for _, want := range []string{
-		"signed: ComputeBuffer<Int32Array | readonly number[]>",
-		"unsigned: ComputeBuffer<Uint32Array | readonly number[]>",
-		"floats: ComputeBuffer<Float32Array | readonly number[]>",
-		"vectors: ComputeBuffer<Float32Array | ReadonlyArray<readonly [number, number, number, number]>>",
-	} {
-		if !strings.Contains(out.Declarations, want) {
-			t.Fatalf("generated declarations missing %q", want)
-		}
+func TestGenerateOrchestrationUsesCommandOptionsAndEliminatesTransient(t *testing.T) {
+	artifacts, metadata := generateSource(t, `
+function copy[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i]; }
+function twice[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i] * 2.0; }
+export function transform(input: buffer<float32[]>, output: buffer<float32[]>) {
+  const count = min(input.length, output.length);
+  const temporary = transient<float32>(count);
+  run copy(input, temporary) over count;
+  run twice(temporary, output) over count;
+}`, false)
+	plan := metadata.Targets.Web.Programs[0]
+	if len(plan.Steps) != 1 || len(plan.Transients) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if !strings.Contains(artifacts.Declarations, "$options?: CommandOptions") {
+		t.Fatalf("declarations:\n%s", artifacts.Declarations)
+	}
+	if metadata.Targets.SPIRV != nil {
+		t.Fatal("unexpected SPIR-V target")
 	}
 }
 
-func TestSourceOwnedTachPrefixIsNotReserved(t *testing.T) {
-	out, _ := compileBindings(t, `
-type TachBuffer = { value: uint32 };
-@workgroup(1)
-export function preserve[i](data: buffer<TachBuffer>) { }
-`)
-	if !strings.Contains(out.Declarations, "export type TachBuffer") ||
-		!strings.Contains(out.Declarations, "data: ComputeBuffer<TachBuffer>") {
-		t.Fatal("source-owned TachBuffer name was not preserved exactly")
+func TestValidateMetadataRejectsDanglingPlan(t *testing.T) {
+	_, metadata := generateSource(t, `export function fill[i](out: buffer<uint32[]>) { if (i < out.length) { out[i] = i; } }`, false)
+	metadata.Targets.Web.Programs[0].Steps[0].Kernel = 99
+	if err := ValidateMetadata(metadata); err == nil {
+		t.Fatal("accepted dangling physical kernel")
 	}
 }

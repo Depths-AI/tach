@@ -80,9 +80,9 @@ func TestExamplesVulkan(t *testing.T) {
 	t.Logf("Vulkan execution: %s (%s, %s)", harness.adapter.Mode, harness.adapter.Name, harness.adapter.Type)
 
 	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
+		t.Run(testCase.name+"/"+testCase.program, func(t *testing.T) {
 			started := time.Now()
-			result := caseResult{name: testCase.name, status: "passed"}
+			result := caseResult{name: testCase.name + "/" + testCase.program, status: "passed"}
 			defer func() {
 				result.duration = time.Since(started)
 				report.results = append(report.results, result)
@@ -105,13 +105,11 @@ func TestExamplesVulkan(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			output, err := harness.dispatch(
+			output, err := harness.executeProgram(
 				compilation.SPIRV,
 				compilation.Metadata,
-				testCase.kernel,
-				testCase.buffers,
-				testCase.parameters,
-				testCase.invocations,
+				testCase.program,
+				programArguments{Buffers: testCase.buffers, Values: testCase.values, Launch: testCase.launch, Repeat: testCase.repeat},
 			)
 			if err == nil {
 				err = testCase.check(output)
@@ -145,9 +143,13 @@ func checkExampleCoverage(cases []exampleCase) error {
 	for i, entry := range entries {
 		sources[i] = strings.TrimSuffix(filepath.Base(entry), ".tach")
 	}
-	tests := make([]string, len(cases))
-	for i, testCase := range cases {
-		tests[i] = testCase.name
+	covered := map[string]bool{}
+	for _, testCase := range cases {
+		covered[testCase.name] = true
+	}
+	tests := make([]string, 0, len(covered))
+	for name := range covered {
+		tests = append(tests, name)
 	}
 	sort.Strings(sources)
 	sort.Strings(tests)

@@ -3,6 +3,7 @@ export {
   tach,
   type ComputeBuffer,
   type ComputeCommand,
+	type CommandOptions,
   type LaunchOptions,
   type LaunchSize,
   type Tach,

@@ -2,9 +2,65 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import * as tachAPI from "../dist/index.js";
-import { defineModule } from "../dist/internal.js";
+import { defineModule as defineRuntimeModule } from "../dist/internal.js";
 
 const { tach } = tachAPI;
+
+function defineModule({ source, resources, kernels }) {
+  const kernel = kernels[0];
+  const publicParameters = kernel.parameters.map((parameter) => parameter.resource === undefined
+    ? { name: parameter.name, kind: "value", type: "uint32" }
+    : { name: parameter.name, kind: "buffer", type: "uint32[]", resource: parameter.resource });
+  const external = resources.map((resource) => ({ ...resource, type: "uint32[]" }));
+  const bindings = resources.map((resource, binding) => ({
+    group: 0,
+    binding,
+    access: resource.access,
+    type: "uint32[]",
+    minimumByteSize: resource.minimumByteSize,
+  }));
+  const block = kernel.parameterBlock && {
+    group: 0,
+    binding: kernel.parameterBlock.binding,
+    byteSize: kernel.parameterBlock.byteSize,
+    fields: kernel.parameterBlock.fields.map((field) => ({
+      type: field.layout.kind === "f32" ? "float32" : field.layout.kind === "bool" ? "bool" : "uint32",
+      byteOffset: field.offset,
+      layout: field.layout,
+    })),
+  };
+  const values = kernel.parameterBlock?.fields.map((field) => ({
+    kind: "parameter",
+    parameter: field.parameter,
+    path: field.path,
+  })) ?? [];
+  return defineRuntimeModule({
+    shader: source,
+    schema: 1,
+    types: [],
+    programs: [{
+      name: kernel.name,
+      parameters: publicParameters,
+      resources: external,
+      launch: { dimensions: kernel.dimensions, inferFromResource: kernel.dimensions === 1 ? 0 : undefined },
+    }],
+    target: {
+      kernels: [{ entryPoint: kernel.entryPoint, workgroupSize: kernel.workgroupSize, bindings, parameterBlock: block }],
+      programs: [{
+        program: 0,
+        transients: [],
+        steps: [{
+          kind: "dispatch",
+          kernel: 0,
+          domain: Array.from({ length: kernel.dimensions }, (_, axis) => ({ op: "launchAxis", axis })),
+          resources: resources.map((_, binding) => ({ kind: "external", binding, resource: binding })),
+          parameters: values,
+        }],
+        repeat: "program",
+      }],
+    },
+  });
+}
 
 function fakeWebGPU({
   failCopy = false,
@@ -280,6 +336,61 @@ const combine = defineModule({
   }],
 });
 
+const graph = defineRuntimeModule({
+  shader: "",
+  schema: 1,
+  types: [],
+  programs: [{
+    name: "graph",
+    parameters: [{ name: "data", kind: "buffer", type: "uint32[]", resource: 0 }],
+    resources: [{ ...scalarBuffer, type: "uint32[]" }],
+  }],
+  target: {
+    kernels: [0, 1].map((index) => ({
+      entryPoint: `_tach_k${index}`,
+      workgroupSize: [1, 1, 1],
+      bindings: [0, 1].map((binding) => ({
+        group: 0,
+        binding,
+        access: "read_write",
+        type: "uint32[]",
+        minimumByteSize: 4,
+      })),
+    })),
+    programs: [{
+      program: 0,
+      transients: [{
+        type: "uint32[]",
+        stride: 4,
+        alignment: 4,
+        minimumByteSize: 4,
+        length: { op: "resourceLength", resource: 0 },
+        color: 0,
+        firstStep: 0,
+        lastStep: 1,
+      }],
+      steps: [{
+        kind: "dispatch",
+        kernel: 0,
+        domain: [{ op: "resourceLength", resource: 0 }],
+        resources: [
+          { kind: "external", binding: 0, resource: 0 },
+          { kind: "transient", binding: 1, resource: 0 },
+        ],
+      }, {
+        kind: "dispatch",
+        kernel: 1,
+        domain: [{ op: "resourceLength", resource: 0 }],
+        resources: [
+          { kind: "transient", binding: 0, resource: 0 },
+          { kind: "external", binding: 1, resource: 0 },
+        ],
+      }],
+      repeat: "program",
+    }],
+  },
+});
+
 test("the public runtime has one entry point and one error type", () => {
   assert.deepEqual(Object.keys(tachAPI).sort(), ["TachError", "tach"]);
 });
@@ -488,6 +599,27 @@ test("one pass carries multiple kernels and reuses resident parameters and bind 
   }
 });
 
+test("one command records a repeated multi-step plan with reusable growing scratch", async () => {
+  const fake = fakeWebGPU();
+  const gpu = await tach({ gpu: fake.gpu });
+  try {
+    await gpu.submit(graph.command(0, [gpu.buffer(new Uint32Array(1))], { repeat: 3 }));
+    assert.equal(fake.calls.pipelines, 2);
+    assert.equal(fake.calls.dispatches, 6);
+    assert.equal(fake.calls.passes, 1);
+    assert.equal(fake.calls.submitted, 1);
+    assert.equal(fake.buffers.filter((buffer) => buffer.descriptor.label === "Tach scratch 0").length, 1);
+
+    await gpu.submit(graph.command(0, [gpu.buffer(new Uint32Array(2048))]));
+    assert.equal(fake.buffers.filter((buffer) => buffer.descriptor.label === "Tach scratch 0").length, 2);
+    assert.equal(fake.calls.buffersDestroyed, 0);
+    await gpu.idle();
+    assert.equal(fake.calls.buffersDestroyed, 1);
+  } finally {
+    gpu.close();
+  }
+});
+
 test("parameter blocks pack nested values and bools into compiler-planned offsets", async () => {
   const fake = fakeWebGPU();
   const gpu = await tach({ gpu: fake.gpu });
@@ -532,8 +664,8 @@ test("launch size must match the kernel's logical rank", async () => {
   const gpu = await tach({ gpu: fakeWebGPU().gpu });
   try {
     const data = gpu.buffer(new Uint32Array([1]));
-    await assert.rejects(
-      gpu.submit(clear.command(0, [data], { size: [1, 1] })),
+		assert.throws(
+			() => clear.command(0, [data], { size: [1, 1] }),
       /exact 1D launch size/u,
     );
   } finally {
@@ -548,8 +680,8 @@ test("multidimensional dispatch does not infer a shape from flat storage", async
     const data = gpu.buffer(new Uint32Array(64));
     await gpu.submit(plane.command(0, [data]));
     await gpu.submit(plane.command(0, [data], { size: [16, 8] }));
-    await assert.rejects(
-      gpu.submit(plane.command(0, [data], { size: 64 })),
+		assert.throws(
+			() => plane.command(0, [data], { size: 64 }),
       /exact 2D launch size/u,
     );
     assert.equal(fake.calls.dispatches, 2);

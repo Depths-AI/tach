@@ -27,21 +27,21 @@ export function scale[i](data: buffer<float32[]>, factor: float32) {
     await build(source, { cwd: directory });
     const generated = await readFile(join(directory, "build", "scale.js"), "utf8");
     assert.match(generated, /from "@depths\/tach\/internal"/u);
-    assert.match(generated, /export function scale\(data, factor, \$launch\)/u);
+		assert.match(generated, /export function scale\(\.\.\.\$args\)/u);
     assert.doesNotMatch(generated, /export const buffer/u);
     assert.deepEqual((await readdir(join(directory, "build"))).sort(), ["scale.d.ts", "scale.js", "scale.wgsl"]);
 
     const spirv = await build(source, { cwd: directory, target: "spirv" });
     assert.equal(spirv.stderr, "");
-    assert.deepEqual(await readdir(join(directory, "build")), ["scale.spv"]);
+		assert.deepEqual((await readdir(join(directory, "build"))).sort(), ["scale.spv", "scale.tach.json"]);
 
     const checked = await runCompiler(["check", source], { cwd: directory });
-    assert.match(checked.stdout, /WGSL:.*bindings:/su);
+		assert.match(checked.stdout, /WGSL:.*programs:/su);
     assert.doesNotMatch(checked.stdout, /SPIR-V:/u);
 
     const checkedSPIRV = await runCompiler(["check", "--target", "spirv", source], { cwd: directory });
     assert.match(checkedSPIRV.stdout, /SPIR-V:/u);
-    assert.doesNotMatch(checkedSPIRV.stdout, /WGSL:|bindings:/u);
+		assert.doesNotMatch(checkedSPIRV.stdout, /WGSL:|programs:/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

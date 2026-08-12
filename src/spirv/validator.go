@@ -1726,7 +1726,7 @@ func (v *validation) validateDecorationsAndABI() error {
 		}
 	}
 
-	pairs := map[[2]uint32]uint32{}
+	pairs := map[[2]uint32][]uint32{}
 	for id, storage := range v.globalVars {
 		d := v.decoration(id)
 		vt := v.types[v.valueType[id]]
@@ -1751,10 +1751,14 @@ func (v *validation) validateDecorationsAndABI() error {
 				return fmt.Errorf("descriptor variable %%%d requires DescriptorSet and Binding", id)
 			}
 			pair := [2]uint32{*d.set, *d.binding}
-			if prev, ok := pairs[pair]; ok {
-				return fmt.Errorf("descriptor variables %%%d and %%%d share set=%d binding=%d", prev, id, pair[0], pair[1])
+			for _, prev := range pairs[pair] {
+				for _, function := range v.functions {
+					if v.functionUsesGlobal(function, prev) && v.functionUsesGlobal(function, id) {
+						return fmt.Errorf("descriptor variables %%%d and %%%d share set=%d binding=%d in function %%%d", prev, id, pair[0], pair[1], function.id)
+					}
+				}
 			}
-			pairs[pair] = id
+			pairs[pair] = append(pairs[pair], id)
 			st := v.types[vt.elem]
 			if st == nil || st.kind != typeStruct || !v.decoration(vt.elem).block {
 				return fmt.Errorf("descriptor variable %%%d must point to Block struct", id)
@@ -1780,6 +1784,19 @@ func (v *validation) validateDecorationsAndABI() error {
 		}
 	}
 	return nil
+}
+
+func (v *validation) functionUsesGlobal(function *functionInfo, global uint32) bool {
+	for _, label := range function.order {
+		for _, index := range function.blocks[label].insts {
+			for _, operand := range valueUses(v.m.Instructions[index]) {
+				if v.pointerRoot[operand] == global {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (v *validation) requireHostABILayout(id uint32, seen map[uint32]bool) error {

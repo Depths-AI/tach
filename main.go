@@ -23,7 +23,7 @@ Usage:
 Commands:
   build      compile for WebGPU by default; use --target for SPIR-V or diagnostics
   check      validate the WebGPU pipeline by default; use --target for SPIR-V or all
-  ir         print structured SSA-ish Tach IR
+	 ir         print Flow IR, Kernel IR, and both target executable plans
   wgsl       print generated WGSL
   spirv-dis  print Tach's disassembly of generated SPIR-V
   version    print the Tach CLI version
@@ -98,17 +98,17 @@ func check(args []string) error {
 	fmt.Printf("ok: %s\n", r.SourceName)
 	if target == compiler.TargetWeb || target == compiler.TargetAll {
 		fmt.Printf("  WGSL: %d bytes, validated\n", len(r.WGSL))
-		fmt.Printf("  bindings: %d JS bytes, %d declaration bytes, validated\n", len(r.JavaScript), len(r.TypeScript))
+		fmt.Printf("  programs: %d metadata bytes; WGSL executable and bindings validated\n", len(r.Metadata))
 	}
 	if target == compiler.TargetSPIRV || target == compiler.TargetAll {
 		summary, err := spirv.Summary(r.SPIRV)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("  SPIR-V: %d bytes, %s\n", len(r.SPIRV), summary)
+		fmt.Printf("  SPIR-V: %d bytes, %s; executable metadata validated\n", len(r.SPIRV), summary)
 	}
 	if target == compiler.TargetAll {
-		fmt.Printf("  diagnostics: Tach IR and SPIR-V disassembly generated\n")
+		fmt.Printf("  diagnostics: optimized Flow/Kernel IR, target plans, and SPIR-V disassembly generated\n")
 	}
 	return nil
 }

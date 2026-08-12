@@ -6,7 +6,8 @@ import (
 	"strings"
 	"unicode"
 
-	"tach/src/abi"
+	"tach/src/backend"
+	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/layout"
 	"tach/src/types"
@@ -18,254 +19,552 @@ type Artifacts struct {
 	MetadataJSON []byte
 }
 
-// Metadata is a plain description of a compiled Tach module. Generated
-// bindings and metadata are rebuilt together directly from Tach source.
 type Metadata struct {
-	Types     []TypeMetadata `json:"types"`
-	Resources []ResourceMeta `json:"resources"`
-	Kernels   []KernelMeta   `json:"kernels"`
+	Schema   int                 `json:"schema"`
+	Types    []TypeMetadata      `json:"types"`
+	Programs []PublicProgramMeta `json:"programs"`
+	Targets  TargetMetadata      `json:"targets"`
 }
-
 type TypeMetadata struct {
 	Name   string      `json:"name"`
 	Fields []FieldMeta `json:"fields"`
 }
-
 type FieldMeta struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
 }
-
-type ResourceMeta struct {
-	Name            string `json:"name"`
-	Group           uint32 `json:"group"`
-	Binding         uint32 `json:"binding"`
-	Kind            string `json:"kind"`
-	Access          string `json:"access"`
-	Type            string `json:"type"`
-	ByteSize        uint32 `json:"byteSize,omitempty"`
-	Alignment       uint32 `json:"alignment"`
-	Runtime         bool   `json:"runtime"`
-	RuntimeOffset   uint32 `json:"runtimeOffset,omitempty"`
-	RuntimeStride   uint32 `json:"runtimeStride,omitempty"`
-	MinimumByteSize uint32 `json:"minimumByteSize"`
+type PublicProgramMeta struct {
+	Name       string                 `json:"name"`
+	Parameters []PublicParameterMeta  `json:"parameters"`
+	Resources  []ExternalResourceMeta `json:"resources"`
+	Launch     *LaunchMeta            `json:"launch,omitempty"`
 }
-
-type KernelMeta struct {
-	Name           string                `json:"name"`
-	EntryPoint     string                `json:"entryPoint"`
-	Dimensions     uint32                `json:"dimensions"`
-	WorkgroupSize  [3]uint32             `json:"workgroupSize"`
-	Parameters     []KernelParameterMeta `json:"parameters"`
-	ParameterBlock *ParameterBlockMeta   `json:"parameterBlock,omitempty"`
-}
-
-type KernelParameterMeta struct {
+type PublicParameterMeta struct {
 	Name     string `json:"name"`
 	Kind     string `json:"kind"`
 	Type     string `json:"type"`
 	Resource *int   `json:"resource,omitempty"`
 }
-
+type LaunchMeta struct {
+	Dimensions        int  `json:"dimensions"`
+	InferFromResource *int `json:"inferFromResource,omitempty"`
+}
+type ExternalResourceMeta struct {
+	Name            string      `json:"name"`
+	Type            string      `json:"type"`
+	ByteSize        uint32      `json:"byteSize,omitempty"`
+	Alignment       uint32      `json:"alignment"`
+	Runtime         bool        `json:"runtime"`
+	RuntimeOffset   uint32      `json:"runtimeOffset,omitempty"`
+	RuntimeStride   uint32      `json:"runtimeStride,omitempty"`
+	MinimumByteSize uint32      `json:"minimumByteSize"`
+	Layout          *HostLayout `json:"layout"`
+}
+type TargetMetadata struct {
+	Web   *TargetPlanMeta `json:"web,omitempty"`
+	SPIRV *TargetPlanMeta `json:"spirv,omitempty"`
+}
+type TargetPlanMeta struct {
+	Kernels  []PhysicalKernelMeta `json:"kernels"`
+	Programs []ProgramPlanMeta    `json:"programs"`
+}
+type PhysicalKernelMeta struct {
+	EntryPoint     string              `json:"entryPoint"`
+	WorkgroupSize  [3]uint32           `json:"workgroupSize"`
+	Bindings       []BindingMeta       `json:"bindings"`
+	ParameterBlock *ParameterBlockMeta `json:"parameterBlock,omitempty"`
+}
+type BindingMeta struct {
+	Group           uint32 `json:"group"`
+	Binding         uint32 `json:"binding"`
+	Access          string `json:"access"`
+	Type            string `json:"type"`
+	MinimumByteSize uint32 `json:"minimumByteSize"`
+}
 type ParameterBlockMeta struct {
 	Group    uint32               `json:"group"`
 	Binding  uint32               `json:"binding"`
 	ByteSize uint32               `json:"byteSize"`
 	Fields   []ParameterFieldMeta `json:"fields"`
 }
-
 type ParameterFieldMeta struct {
-	Parameter  int      `json:"parameter"`
-	Path       []string `json:"path"`
-	Type       string   `json:"type"`
-	ByteOffset uint32   `json:"byteOffset"`
+	Type       string      `json:"type"`
+	ByteOffset uint32      `json:"byteOffset"`
+	Layout     *HostLayout `json:"layout"`
+}
+type ProgramPlanMeta struct {
+	Program       int             `json:"program"`
+	Transients    []TransientMeta `json:"transients"`
+	Steps         []StepMeta      `json:"steps"`
+	RepeatBarrier *StepMeta       `json:"repeatBarrier,omitempty"`
+	Repeat        string          `json:"repeat"`
+}
+type TransientMeta struct {
+	Type            string          `json:"type"`
+	Stride          uint32          `json:"stride"`
+	Alignment       uint32          `json:"alignment"`
+	MinimumByteSize uint32          `json:"minimumByteSize"`
+	Length          ShapeExpression `json:"length"`
+	Color           int             `json:"color"`
+	FirstStep       int             `json:"firstStep"`
+	LastStep        int             `json:"lastStep"`
+}
+type StepMeta struct {
+	Kind       string               `json:"kind"`
+	Kernel     int                  `json:"kernel"`
+	Domain     []ShapeExpression    `json:"domain,omitempty"`
+	Resources  []ResourceSourceMeta `json:"resources"`
+	Parameters []ValueSource        `json:"parameters,omitempty"`
+}
+type ResourceSourceMeta struct {
+	Binding  uint32 `json:"binding"`
+	Kind     string `json:"kind"`
+	Resource int    `json:"resource"`
+}
+type ShapeExpression struct {
+	Op        string           `json:"op"`
+	Value     uint32           `json:"value,omitempty"`
+	Parameter int              `json:"parameter"`
+	Resource  int              `json:"resource"`
+	Path      []string         `json:"path,omitempty"`
+	Axis      uint8            `json:"axis"`
+	Left      *ShapeExpression `json:"left,omitempty"`
+	Right     *ShapeExpression `json:"right,omitempty"`
+}
+type ValueSource struct {
+	Kind       string           `json:"kind"`
+	Parameter  int              `json:"parameter"`
+	Path       []string         `json:"path,omitempty"`
+	Value      any              `json:"value,omitempty"`
+	Expression *ShapeExpression `json:"expression,omitempty"`
 }
 
-// Generate emits a JavaScript module whose public surface is a direct
-// translation of Tach: named types become TypeScript object types and exported
-// compute kernels become functions with positional parameters. The generated
-// module delegates WebGPU lifecycle and host-data plumbing to @depths/tach.
-func Generate(m *ir.Module, wgslSource string) (*Artifacts, error) {
-	if err := ir.Verify(m); err != nil {
-		return nil, err
-	}
-	parameters, err := abi.PlanParameters(m)
-	if err != nil {
-		return nil, err
-	}
-	meta, err := buildMetadata(m, parameters)
-	if err != nil {
-		return nil, err
-	}
-	metaJSON, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	js, err := emitJavaScript(m, wgslSource, meta)
-	if err != nil {
-		return nil, err
-	}
-	dts, err := emitDeclarations(m, meta)
-	if err != nil {
-		return nil, err
-	}
-	if err := ValidateGenerated(js, dts, metaJSON); err != nil {
-		return nil, fmt.Errorf("Tach binding self-validation failed: %w", err)
-	}
-	return &Artifacts{
-		JavaScript:   js,
-		Declarations: dts,
-		MetadataJSON: append(metaJSON, '\n'),
-	}, nil
-}
-
-func buildMetadata(m *ir.Module, parameters *abi.ParameterPlan) (*Metadata, error) {
-	out := &Metadata{
-		Types:     []TypeMetadata{},
-		Resources: []ResourceMeta{},
-		Kernels:   []KernelMeta{},
-	}
-	for _, t := range m.Structs {
-		item := TypeMetadata{
-			Name:   t.Name,
-			Fields: []FieldMeta{},
-		}
-		for _, field := range t.Fields {
-			item.Fields = append(item.Fields, FieldMeta{
-				Name: field.Name,
-				Type: field.Type.String(),
-			})
-		}
-		out.Types = append(out.Types, item)
-	}
-	for resourceIndex, resource := range m.Resources {
-		l, err := layout.Of(resource.Type)
-		if err != nil {
-			return nil, fmt.Errorf("resource %s: %w", resource.Name, err)
-		}
-		item := ResourceMeta{
-			Name:      resource.Name,
-			Group:     0,
-			Binding:   uint32(resourceIndex),
-			Type:      resource.Type.String(),
-			Alignment: l.Align,
-			Runtime:   l.Runtime,
-		}
-		item.Kind = "storage"
-		if resource.Access == ir.Mutable || types.ContainsAtomic(resource.Type) {
-			item.Access = "read_write"
-		} else {
-			item.Access = "read"
-		}
-		if l.Runtime {
-			offset, stride, err := runtimeTail(resource.Type)
-			if err != nil {
-				return nil, err
-			}
-			item.RuntimeOffset = offset
-			item.RuntimeStride = stride
-			item.MinimumByteSize = offset + stride
-		} else {
-			// Both shader backends wrap fixed resources to this portable size.
-			item.ByteSize = roundUp(16, l.Size)
-			item.MinimumByteSize = item.ByteSize
-		}
-		out.Resources = append(out.Resources, item)
-	}
-	for _, function := range m.Functions {
-		if !function.Compute {
-			continue
-		}
-		item := KernelMeta{
-			Name:          function.Name,
-			EntryPoint:    abi.KernelEntry(function.Name),
-			Dimensions:    uint32(len(function.Indices)),
-			WorkgroupSize: function.Workgroup,
-			Parameters:    []KernelParameterMeta{},
-		}
-		valueTypes := map[ir.ValueID]*types.Type{}
-		for _, parameter := range function.Params {
-			valueTypes[parameter.ID] = parameter.Type
-		}
-		valuePositions := map[ir.ValueID]int{}
-		for position, parameter := range function.KernelParams {
-			entry := KernelParameterMeta{Name: parameter.Name}
-			if parameter.Value != 0 {
-				entry.Kind = "value"
-				entry.Type = valueTypes[parameter.Value].String()
-				valuePositions[parameter.Value] = position
-			} else {
-				if parameter.Resource < 0 || parameter.Resource >= len(m.Resources) {
-					return nil, fmt.Errorf("kernel %s resource index out of range", function.Name)
-				}
-				resource := parameter.Resource
-				entry.Kind = "buffer"
-				entry.Type = m.Resources[resource].Type.String()
-				entry.Resource = &resource
-			}
-			item.Parameters = append(item.Parameters, entry)
-		}
-		if block := parameters.For(function); block != nil {
-			item.ParameterBlock = &ParameterBlockMeta{Group: 0, Binding: block.Binding, ByteSize: block.Layout.Size, Fields: []ParameterFieldMeta{}}
-			for _, field := range block.Fields {
-				value := function.Params[field.Parameter]
-				item.ParameterBlock.Fields = append(item.ParameterBlock.Fields, ParameterFieldMeta{
-					Parameter: valuePositions[value.ID],
-					Path:      append([]string{}, field.Path...), Type: field.Logical.String(), ByteOffset: field.Offset,
-				})
-			}
-		}
-		out.Kernels = append(out.Kernels, item)
-	}
-	return out, nil
-}
-
-func roundUp(align, n uint32) uint32 {
-	if align == 0 {
-		return n
-	}
-	return (n + align - 1) / align * align
-}
-
-func runtimeTail(t *types.Type) (offset, stride uint32, err error) {
-	l, err := layout.Of(t)
-	if err != nil {
-		return 0, 0, err
-	}
-	if t.Kind == types.RuntimeArray {
-		return 0, l.Stride, nil
-	}
-	if t.Kind != types.Struct || len(t.Fields) == 0 {
-		return 0, 0, fmt.Errorf("runtime host type %s has no trailing runtime array", t)
-	}
-	last := len(t.Fields) - 1
-	if t.Fields[last].Type.Kind != types.RuntimeArray {
-		return 0, 0, fmt.Errorf("runtime host type %s violates Tach's trailing-array invariant", t)
-	}
-	field := l.Fields[last]
-	return field.Offset, field.Layout.Stride, nil
-}
-
-type hostLayout struct {
+type HostLayout struct {
 	Kind    string            `json:"kind"`
 	Size    uint32            `json:"size,omitempty"`
 	Stride  uint32            `json:"stride,omitempty"`
 	Count   uint32            `json:"count,omitempty"`
 	Runtime bool              `json:"runtime,omitempty"`
-	Elem    *hostLayout       `json:"elem,omitempty"`
-	Fields  []hostLayoutField `json:"fields,omitempty"`
+	Elem    *HostLayout       `json:"elem,omitempty"`
+	Fields  []HostLayoutField `json:"fields,omitempty"`
 }
-
-type hostLayoutField struct {
+type HostLayoutField struct {
 	Name   string      `json:"name"`
 	Offset uint32      `json:"offset"`
-	Type   *hostLayout `json:"type"`
+	Type   *HostLayout `json:"type"`
 }
 
-func describeHostLayout(t *types.Type) (*hostLayout, error) {
-	if t == nil {
-		return nil, fmt.Errorf("nil host type")
+func Generate(logical *flow.Module, web, spirv *backend.Executable, wgslSource string) (*Artifacts, error) {
+	if err := flow.Verify(logical); err != nil {
+		return nil, err
 	}
+	metadata, err := buildMetadata(logical, web, spirv)
+	if err != nil {
+		return nil, err
+	}
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	metadataJSON = append(metadataJSON, '\n')
+	artifacts := &Artifacts{MetadataJSON: metadataJSON}
+	if web != nil {
+		artifacts.JavaScript, err = emitJavaScript(metadata, wgslSource)
+		if err != nil {
+			return nil, err
+		}
+		artifacts.Declarations, err = emitDeclarations(logical)
+		if err != nil {
+			return nil, err
+		}
+		if err := ValidateGenerated(artifacts.JavaScript, artifacts.Declarations, metadataJSON); err != nil {
+			return nil, fmt.Errorf("Tach binding self-validation failed: %w", err)
+		}
+	} else if err := ValidateMetadata(metadata); err != nil {
+		return nil, err
+	}
+	return artifacts, nil
+}
+
+func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metadata, error) {
+	metadata := &Metadata{Schema: 1, Types: []TypeMetadata{}, Programs: []PublicProgramMeta{}}
+	for _, t := range logical.Kernel.Structs {
+		item := TypeMetadata{Name: t.Name, Fields: []FieldMeta{}}
+		for _, field := range t.Fields {
+			item.Fields = append(item.Fields, FieldMeta{Name: field.Name, Type: field.Type.String()})
+		}
+		metadata.Types = append(metadata.Types, item)
+	}
+	for _, program := range logical.Programs {
+		item := PublicProgramMeta{Name: program.Name, Parameters: []PublicParameterMeta{}, Resources: []ExternalResourceMeta{}}
+		external := map[flow.ResourceID]int{}
+		for _, resource := range program.Resources {
+			if resource.Kind != flow.External {
+				continue
+			}
+			index := len(item.Resources)
+			external[resource.ID] = index
+			description, err := externalResource(resource)
+			if err != nil {
+				return nil, err
+			}
+			item.Resources = append(item.Resources, description)
+		}
+		for _, parameter := range program.Parameters {
+			p := PublicParameterMeta{Name: parameter.Name, Type: parameter.Type.String()}
+			if parameter.Kind == flow.BufferParameter {
+				p.Kind = "buffer"
+				index := external[parameter.Resource]
+				p.Resource = &index
+			} else {
+				p.Kind = "value"
+			}
+			item.Parameters = append(item.Parameters, p)
+		}
+		if program.Indexed {
+			item.Launch = &LaunchMeta{Dimensions: program.Rank}
+			if program.Rank == 1 {
+				for i, resource := range item.Resources {
+					if resource.Runtime {
+						index := i
+						item.Launch.InferFromResource = &index
+						break
+					}
+				}
+			}
+		}
+		metadata.Programs = append(metadata.Programs, item)
+	}
+	var err error
+	if web != nil {
+		metadata.Targets.Web, err = targetMetadata(web)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if spirv != nil {
+		metadata.Targets.SPIRV, err = targetMetadata(spirv)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := ValidateMetadata(metadata); err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+func externalResource(resource flow.Resource) (ExternalResourceMeta, error) {
+	l, err := layout.Of(resource.Type)
+	if err != nil {
+		return ExternalResourceMeta{}, err
+	}
+	host, err := describeHostLayout(resource.Type)
+	if err != nil {
+		return ExternalResourceMeta{}, err
+	}
+	out := ExternalResourceMeta{Name: resource.Name, Type: resource.Type.String(), Alignment: l.Align, Runtime: l.Runtime, Layout: host}
+	if l.Runtime {
+		out.RuntimeOffset, out.RuntimeStride, err = runtimeTail(resource.Type)
+		out.MinimumByteSize = out.RuntimeOffset + out.RuntimeStride
+	} else {
+		out.ByteSize = roundUp(16, l.Size)
+		out.MinimumByteSize = out.ByteSize
+	}
+	return out, err
+}
+
+func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
+	if err := backend.Verify(executable); err != nil {
+		return nil, err
+	}
+	target := &TargetPlanMeta{Kernels: []PhysicalKernelMeta{}, Programs: []ProgramPlanMeta{}}
+	for _, kernel := range executable.PhysicalKernels {
+		item := PhysicalKernelMeta{EntryPoint: kernel.Entry, WorkgroupSize: kernel.Workgroup, Bindings: []BindingMeta{}}
+		for _, binding := range kernel.Bindings {
+			access := "read"
+			if binding.Access == ir.Mutable || types.ContainsAtomic(binding.Type) {
+				access = "read_write"
+			}
+			item.Bindings = append(item.Bindings, BindingMeta{Group: 0, Binding: binding.Binding, Access: access, Type: binding.Type.String(), MinimumByteSize: binding.MinimumByteSize})
+		}
+		if block := kernel.Parameters; block != nil {
+			item.ParameterBlock = &ParameterBlockMeta{Group: 0, Binding: block.Binding, ByteSize: block.Layout.Size, Fields: []ParameterFieldMeta{}}
+			for _, field := range block.Fields {
+				host, err := parameterLayout(field.Logical)
+				if err != nil {
+					return nil, err
+				}
+				item.ParameterBlock.Fields = append(item.ParameterBlock.Fields, ParameterFieldMeta{Type: field.Logical.String(), ByteOffset: field.Offset, Layout: host})
+			}
+		}
+		target.Kernels = append(target.Kernels, item)
+	}
+	for _, plan := range executable.Programs {
+		program := executable.Logical.Programs[plan.Program]
+		item := ProgramPlanMeta{Program: plan.Program, Transients: []TransientMeta{}, Steps: []StepMeta{}, Repeat: "program"}
+		if plan.Repeat == backend.RepeatInvocationLoop {
+			item.Repeat = "invocation-loop"
+		}
+		for _, transient := range plan.Transients {
+			expression, err := shapeExpression(program, transient.Length)
+			if err != nil {
+				return nil, err
+			}
+			item.Transients = append(item.Transients, TransientMeta{Type: transient.Type.String(), Stride: transient.Stride, Alignment: transient.Alignment, MinimumByteSize: transient.MinimumByteSize, Length: expression, Color: transient.Color, FirstStep: transient.FirstStep, LastStep: transient.LastStep})
+		}
+		for _, step := range plan.Steps {
+			description, err := stepMetadata(program, executable.PhysicalKernels, step)
+			if err != nil {
+				return nil, err
+			}
+			item.Steps = append(item.Steps, description)
+		}
+		if len(plan.RepeatBarrier) > 0 {
+			description := barrierMetadata(plan.RepeatBarrier)
+			item.RepeatBarrier = &description
+		}
+		target.Programs = append(target.Programs, item)
+	}
+	return target, nil
+}
+
+func stepMetadata(program *flow.Program, kernels []backend.PhysicalKernel, step backend.Step) (StepMeta, error) {
+	if step.Kind == backend.BarrierStepKind {
+		return barrierMetadata(step.Barrier), nil
+	}
+	out := StepMeta{Kind: "dispatch", Kernel: step.Kernel, Domain: []ShapeExpression{}, Resources: []ResourceSourceMeta{}, Parameters: []ValueSource{}}
+	for _, id := range step.Domain {
+		expression, err := shapeExpression(program, id)
+		if err != nil {
+			return out, err
+		}
+		out.Domain = append(out.Domain, expression)
+	}
+	for _, resource := range step.Resources {
+		kind := "external"
+		if resource.Kind == backend.TransientSource {
+			kind = "transient"
+		}
+		out.Resources = append(out.Resources, ResourceSourceMeta{Binding: resource.Binding, Kind: kind, Resource: resource.Resource})
+	}
+	block := kernels[step.Kernel].Parameters
+	if block != nil {
+		for _, field := range block.Fields {
+			if field.Parameter < 0 || field.Parameter >= len(step.Parameters) {
+				return out, fmt.Errorf("kernel parameter field references missing dispatch value")
+			}
+			source, err := valueSource(program, step.Parameters[field.Parameter], field.Path)
+			if err != nil {
+				return out, err
+			}
+			out.Parameters = append(out.Parameters, source)
+		}
+	}
+	return out, nil
+}
+
+func barrierMetadata(resources []backend.BarrierResource) StepMeta {
+	out := StepMeta{Kind: "barrier", Resources: []ResourceSourceMeta{}}
+	for _, resource := range resources {
+		kind := "external"
+		if resource.Kind == backend.TransientSource {
+			kind = "transient"
+		}
+		out.Resources = append(out.Resources, ResourceSourceMeta{Kind: kind, Resource: resource.Resource})
+	}
+	return out
+}
+
+func shapeExpression(program *flow.Program, id flow.ShapeID) (ShapeExpression, error) {
+	shape := program.Shape(id)
+	if shape == nil {
+		return ShapeExpression{}, fmt.Errorf("invalid shape %d", id)
+	}
+	out := ShapeExpression{Path: append([]string(nil), shape.Path...)}
+	switch shape.Op {
+	case flow.ShapeConstant:
+		out.Op, out.Value = "constant", shape.Value
+	case flow.ShapeParameter:
+		out.Op, out.Parameter = "parameter", shape.Parameter
+	case flow.ShapeResourceLength:
+		out.Op, out.Resource = "resourceLength", externalResourceIndex(program, shape.Resource)
+	case flow.ShapeLaunchAxis:
+		out.Op, out.Axis = "launchAxis", shape.Axis
+	default:
+		out.Op = shape.Op.String()
+		left, err := shapeExpression(program, shape.Left)
+		if err != nil {
+			return out, err
+		}
+		right, err := shapeExpression(program, shape.Right)
+		if err != nil {
+			return out, err
+		}
+		out.Left, out.Right = &left, &right
+	}
+	return out, nil
+}
+
+func externalResourceIndex(program *flow.Program, id flow.ResourceID) int {
+	index := 0
+	for _, resource := range program.Resources {
+		if resource.Kind == flow.External {
+			if resource.ID == id {
+				return index
+			}
+			index++
+		}
+	}
+	return -1
+}
+
+func valueSource(program *flow.Program, argument flow.ValueArgument, fieldPath []string) (ValueSource, error) {
+	switch argument.Kind {
+	case flow.ValueParameterRef:
+		return ValueSource{Kind: "parameter", Parameter: argument.Parameter, Path: append(append([]string(nil), argument.Path...), fieldPath...)}, nil
+	case flow.ValueBool:
+		return ValueSource{Kind: "bool", Value: argument.Bits != 0}, nil
+	case flow.ValueI32:
+		return ValueSource{Kind: "i32", Value: int32(argument.Bits)}, nil
+	case flow.ValueU32:
+		return ValueSource{Kind: "u32", Value: argument.Bits}, nil
+	case flow.ValueF32Bits:
+		return ValueSource{Kind: "f32Bits", Value: argument.Bits}, nil
+	case flow.ValueShape:
+		expression, err := shapeExpression(program, argument.Shape)
+		return ValueSource{Kind: "shape", Expression: &expression}, err
+	case flow.ValueRepeat:
+		return ValueSource{Kind: "repeat"}, nil
+	default:
+		return ValueSource{}, fmt.Errorf("invalid value source")
+	}
+}
+
+func emitJavaScript(metadata *Metadata, wgsl string) (string, error) {
+	definition := struct {
+		Shader   string              `json:"shader"`
+		Schema   int                 `json:"schema"`
+		Types    []TypeMetadata      `json:"types"`
+		Programs []PublicProgramMeta `json:"programs"`
+		Target   *TargetPlanMeta     `json:"target"`
+	}{wgsl, metadata.Schema, metadata.Types, metadata.Programs, metadata.Targets.Web}
+	encoded, err := json.Marshal(definition)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("// Generated by Tach.\nimport { defineModule as $defineModule } from \"@depths/tach/internal\";\n\nconst $tach = $defineModule(")
+	b.Write(encoded)
+	b.WriteString(");\n\n")
+	for index, program := range metadata.Programs {
+		if err := validateExportName(program.Name); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "export function %s(...$args) { const $options = $args.length > %d ? $args.pop() : undefined; return $tach.command(%d, $args, $options); }\n", program.Name, len(program.Parameters), index)
+	}
+	return b.String(), nil
+}
+
+func emitDeclarations(logical *flow.Module) (string, error) {
+	var b strings.Builder
+	b.WriteString("// Generated by Tach. Typed WebGPU module.\n\nimport type { CommandOptions, ComputeBuffer, ComputeCommand, LaunchOptions } from \"@depths/tach\";\n\n")
+	for _, t := range logical.Kernel.Structs {
+		if err := validateExportName(t.Name); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "export type %s = {\n", t.Name)
+		for _, field := range t.Fields {
+			fmt.Fprintf(&b, "  readonly %s: %s;\n", tsProperty(field.Name), tsType(field.Type))
+		}
+		b.WriteString("};\n\n")
+	}
+	for _, program := range logical.Programs {
+		if err := validateExportName(program.Name); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "export function %s(\n", program.Name)
+		for _, parameter := range program.Parameters {
+			t := tsType(parameter.Type)
+			if parameter.Kind == flow.BufferParameter {
+				t = "ComputeBuffer<" + t + ">"
+			}
+			fmt.Fprintf(&b, "  %s: %s,\n", parameter.Name, t)
+		}
+		if program.Indexed {
+			size := []string{"", "number", "readonly [x: number, y: number]", "readonly [x: number, y: number, z: number]"}[program.Rank]
+			fmt.Fprintf(&b, "  $launch?: LaunchOptions<%s>,\n", size)
+		} else {
+			b.WriteString("  $options?: CommandOptions,\n")
+		}
+		b.WriteString("): ComputeCommand;\n\n")
+	}
+	return b.String(), nil
+}
+
+func ValidateGenerated(js, declarations string, metadataJSON []byte) error {
+	var metadata Metadata
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		return err
+	}
+	if err := ValidateMetadata(&metadata); err != nil {
+		return err
+	}
+	if !strings.Contains(js, "defineModule as $defineModule") || !strings.Contains(declarations, "CommandOptions, ComputeBuffer, ComputeCommand, LaunchOptions") {
+		return fmt.Errorf("generated module is missing runtime contract")
+	}
+	for _, program := range metadata.Programs {
+		needle := "export function " + program.Name + "("
+		if !strings.Contains(js, "export function "+program.Name) || !strings.Contains(declarations, needle) {
+			return fmt.Errorf("missing public program %s", program.Name)
+		}
+	}
+	return nil
+}
+
+func ValidateMetadata(metadata *Metadata) error {
+	if metadata == nil || metadata.Schema != 1 {
+		return fmt.Errorf("metadata schema/programs are invalid")
+	}
+	if metadata.Targets.Web == nil && metadata.Targets.SPIRV == nil {
+		return fmt.Errorf("metadata contains no target plan")
+	}
+	for _, target := range []*TargetPlanMeta{metadata.Targets.Web, metadata.Targets.SPIRV} {
+		if target == nil {
+			continue
+		}
+		if len(target.Programs) != len(metadata.Programs) {
+			return fmt.Errorf("target program count mismatch")
+		}
+		for i, program := range target.Programs {
+			if program.Program != i || (program.Repeat != "program" && program.Repeat != "invocation-loop") {
+				return fmt.Errorf("invalid target program %d", i)
+			}
+			for _, step := range program.Steps {
+				if step.Kind == "dispatch" {
+					if step.Kernel < 0 || step.Kernel >= len(target.Kernels) {
+						return fmt.Errorf("invalid kernel reference")
+					}
+				} else if step.Kind != "barrier" {
+					return fmt.Errorf("invalid step kind")
+				}
+			}
+		}
+		for i, kernel := range target.Kernels {
+			if kernel.EntryPoint != fmt.Sprintf("_tach_k%d", i) || kernel.WorkgroupSize[0] == 0 || kernel.WorkgroupSize[1] == 0 || kernel.WorkgroupSize[2] == 0 {
+				return fmt.Errorf("invalid physical kernel %d", i)
+			}
+			for j, binding := range kernel.Bindings {
+				if binding.Group != 0 || binding.Binding != uint32(j) {
+					return fmt.Errorf("kernel %d bindings are not dense", i)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func describeHostLayout(t *types.Type) (*HostLayout, error) {
 	if t.Kind == types.Atomic {
 		return describeHostLayout(t.Elem)
 	}
@@ -273,329 +572,69 @@ func describeHostLayout(t *types.Type) (*hostLayout, error) {
 	if err != nil {
 		return nil, err
 	}
-	description := &hostLayout{
-		Size:    l.Size,
-		Stride:  l.Stride,
-		Runtime: l.Runtime,
-	}
+	out := &HostLayout{Size: l.Size, Stride: l.Stride, Runtime: l.Runtime}
 	switch t.Kind {
+	case types.Bool:
+		out.Kind = "bool"
+		out.Size = 4
 	case types.I32:
-		description.Kind = "i32"
+		out.Kind = "i32"
 	case types.U32:
-		description.Kind = "u32"
+		out.Kind = "u32"
 	case types.F32:
-		description.Kind = "f32"
+		out.Kind = "f32"
 	case types.Vector:
-		description.Kind = "vector"
-		description.Count = uint32(t.Lanes)
-		description.Elem, err = describeHostLayout(t.Elem)
+		out.Kind = "vector"
+		out.Count = uint32(t.Lanes)
+		out.Elem, err = describeHostLayout(t.Elem)
 	case types.FixedArray:
-		description.Kind = "array"
-		description.Count = t.Count
-		description.Elem, err = describeHostLayout(t.Elem)
+		out.Kind = "array"
+		out.Count = t.Count
+		out.Elem, err = describeHostLayout(t.Elem)
 	case types.RuntimeArray:
-		description.Kind = "runtime"
-		description.Elem, err = describeHostLayout(t.Elem)
+		out.Kind = "runtime"
+		out.Elem, err = describeHostLayout(t.Elem)
 	case types.Struct:
-		description.Kind = "struct"
-		description.Fields = []hostLayoutField{}
-		for index, field := range t.Fields {
-			fieldDescription, fieldErr := describeHostLayout(field.Type)
-			if fieldErr != nil {
-				return nil, fieldErr
+		out.Kind = "struct"
+		out.Fields = []HostLayoutField{}
+		for i, field := range t.Fields {
+			child, e := describeHostLayout(field.Type)
+			if e != nil {
+				return nil, e
 			}
-			description.Fields = append(description.Fields, hostLayoutField{
-				Name:   field.Name,
-				Offset: l.Fields[index].Offset,
-				Type:   fieldDescription,
-			})
+			out.Fields = append(out.Fields, HostLayoutField{Name: field.Name, Offset: l.Fields[i].Offset, Type: child})
 		}
 	default:
 		return nil, fmt.Errorf("cannot describe host type %s", t)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return description, nil
+	return out, err
 }
-
-type runtimeResource struct {
-	Name            string      `json:"name"`
-	Group           uint32      `json:"group"`
-	Binding         uint32      `json:"binding"`
-	Kind            string      `json:"kind"`
-	Access          string      `json:"access"`
-	ByteSize        uint32      `json:"byteSize,omitempty"`
-	MinimumByteSize uint32      `json:"minimumByteSize"`
-	Runtime         bool        `json:"runtime"`
-	Layout          *hostLayout `json:"layout"`
+func parameterLayout(t *types.Type) (*HostLayout, error) {
+	if t.Kind == types.Bool {
+		return &HostLayout{Kind: "bool", Size: 4}, nil
+	}
+	return describeHostLayout(t)
 }
-
-type runtimeKernelParameter struct {
-	Name     string `json:"name"`
-	Resource *int   `json:"resource,omitempty"`
+func runtimeTail(t *types.Type) (uint32, uint32, error) {
+	l, e := layout.Of(t)
+	if e != nil {
+		return 0, 0, e
+	}
+	if t.Kind == types.RuntimeArray {
+		return 0, l.Stride, nil
+	}
+	if t.Kind != types.Struct || len(t.Fields) == 0 {
+		return 0, 0, fmt.Errorf("runtime type %s has no tail", t)
+	}
+	i := len(t.Fields) - 1
+	return l.Fields[i].Offset, l.Fields[i].Layout.Stride, nil
 }
-
-type runtimeParameterField struct {
-	Parameter int         `json:"parameter"`
-	Path      []string    `json:"path"`
-	Offset    uint32      `json:"offset"`
-	Layout    *hostLayout `json:"layout"`
+func roundUp(a, n uint32) uint32 {
+	if a == 0 {
+		return n
+	}
+	return (n + a - 1) / a * a
 }
-
-type runtimeParameterBlock struct {
-	Group    uint32                  `json:"group"`
-	Binding  uint32                  `json:"binding"`
-	ByteSize uint32                  `json:"byteSize"`
-	Fields   []runtimeParameterField `json:"fields"`
-}
-
-type runtimeKernel struct {
-	Name           string                   `json:"name"`
-	EntryPoint     string                   `json:"entryPoint"`
-	Dimensions     uint32                   `json:"dimensions"`
-	WorkgroupSize  [3]uint32                `json:"workgroupSize"`
-	Parameters     []runtimeKernelParameter `json:"parameters"`
-	ParameterBlock *runtimeParameterBlock   `json:"parameterBlock,omitempty"`
-}
-
-func runtimeResources(m *ir.Module, meta *Metadata) ([]runtimeResource, error) {
-	out := make([]runtimeResource, len(m.Resources))
-	for index, resource := range m.Resources {
-		description, err := describeHostLayout(resource.Type)
-		if err != nil {
-			return nil, fmt.Errorf("resource %s: %w", resource.Name, err)
-		}
-		item := meta.Resources[index]
-		out[index] = runtimeResource{
-			Name:            item.Name,
-			Group:           item.Group,
-			Binding:         item.Binding,
-			Kind:            item.Kind,
-			Access:          item.Access,
-			ByteSize:        item.ByteSize,
-			MinimumByteSize: item.MinimumByteSize,
-			Runtime:         item.Runtime,
-			Layout:          description,
-		}
-	}
-	return out, nil
-}
-
-func jsQuote(s string) string {
-	value, _ := json.Marshal(s)
-	return string(value)
-}
-
-func runtimeKernels(metadata *Metadata) ([]runtimeKernel, error) {
-	out := make([]runtimeKernel, 0, len(metadata.Kernels))
-	for _, item := range metadata.Kernels {
-		kernel := runtimeKernel{
-			Name: item.Name, EntryPoint: item.EntryPoint, Dimensions: item.Dimensions,
-			WorkgroupSize: item.WorkgroupSize, Parameters: []runtimeKernelParameter{},
-		}
-		for _, parameter := range item.Parameters {
-			kernel.Parameters = append(kernel.Parameters, runtimeKernelParameter{Name: parameter.Name, Resource: parameter.Resource})
-		}
-		if block := item.ParameterBlock; block != nil {
-			kernel.ParameterBlock = &runtimeParameterBlock{Group: block.Group, Binding: block.Binding, ByteSize: block.ByteSize, Fields: []runtimeParameterField{}}
-			for _, field := range block.Fields {
-				logical := types.ParseBuiltin(field.Type)
-				if logical == nil {
-					return nil, fmt.Errorf("kernel %s has invalid parameter field type %s", item.Name, field.Type)
-				}
-				var description *hostLayout
-				if logical.Kind == types.Bool {
-					description = &hostLayout{Kind: "bool", Size: 4}
-				} else {
-					var err error
-					description, err = describeHostLayout(logical)
-					if err != nil {
-						return nil, err
-					}
-				}
-				kernel.ParameterBlock.Fields = append(kernel.ParameterBlock.Fields, runtimeParameterField{
-					Parameter: field.Parameter, Path: append([]string{}, field.Path...), Offset: field.ByteOffset, Layout: description,
-				})
-			}
-		}
-		out = append(out, kernel)
-	}
-	return out, nil
-}
-
-func emitJavaScript(m *ir.Module, wgslSource string, meta *Metadata) (string, error) {
-	resources, err := runtimeResources(m, meta)
-	if err != nil {
-		return "", err
-	}
-	resourcesJSON, err := json.Marshal(resources)
-	if err != nil {
-		return "", err
-	}
-	kernels, err := runtimeKernels(meta)
-	if err != nil {
-		return "", err
-	}
-	kernelsJSON, err := json.Marshal(kernels)
-	if err != nil {
-		return "", err
-	}
-	for _, kernel := range kernels {
-		if err := validateKernelExportName(kernel.Name); err != nil {
-			return "", err
-		}
-		hasBuffer := false
-		for _, parameter := range kernel.Parameters {
-			if !isASCIIIdentifier(parameter.Name) || typeScriptKeywords[parameter.Name] {
-				return "", fmt.Errorf(
-					"Tach parameter name %q is not a portable JavaScript identifier",
-					parameter.Name,
-				)
-			}
-			if parameter.Resource != nil {
-				hasBuffer = true
-			}
-		}
-		if !hasBuffer {
-			return "", fmt.Errorf("Tach kernel %q has no buffer parameter to carry its GPUDevice", kernel.Name)
-		}
-	}
-
-	var b strings.Builder
-	b.WriteString("// Generated by Tach. Typed WebGPU module.\n")
-	b.WriteString("// Rebuild this file from its .tach source; its public API mirrors that source.\n\n")
-	b.WriteString("import { defineModule as $defineModule } from \"@depths/tach/internal\";\n\n")
-	b.WriteString("const $tach = $defineModule({\n")
-	fmt.Fprintf(&b, "  source: %s,\n", jsQuote(wgslSource))
-	fmt.Fprintf(&b, "  resources: %s,\n", resourcesJSON)
-	fmt.Fprintf(&b, "  kernels: %s,\n", kernelsJSON)
-	b.WriteString("});\n\n")
-	for index, kernel := range kernels {
-		fmt.Fprintf(&b, "export function %s(", kernel.Name)
-		for parameterIndex, parameter := range kernel.Parameters {
-			if parameterIndex > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(parameter.Name)
-		}
-		if len(kernel.Parameters) > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString("$launch) {\n")
-		fmt.Fprintf(&b, "  return $tach.command(%d, [", index)
-		for parameterIndex, parameter := range kernel.Parameters {
-			if parameterIndex > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(parameter.Name)
-		}
-		b.WriteString("], $launch);\n}\n\n")
-	}
-	return b.String(), nil
-}
-
-var typeScriptKeywords = map[string]bool{
-	"any": true, "as": true, "asserts": true, "async": true, "await": true, "bigint": true,
-	"boolean": true, "break": true, "case": true, "catch": true, "class": true, "const": true,
-	"constructor": true, "continue": true, "declare": true, "default": true, "delete": true,
-	"do": true, "else": true, "enum": true, "export": true, "extends": true, "false": true,
-	"finally": true, "for": true, "from": true, "function": true, "get": true, "if": true,
-	"implements": true, "import": true, "in": true, "infer": true, "instanceof": true,
-	"interface": true, "is": true, "keyof": true, "let": true, "module": true, "namespace": true,
-	"never": true, "new": true, "null": true, "number": true, "object": true, "of": true,
-	"package": true, "private": true, "protected": true, "public": true, "readonly": true,
-	"require": true, "return": true, "set": true, "static": true, "string": true, "super": true,
-	"switch": true, "symbol": true, "this": true, "throw": true, "true": true, "try": true,
-	"type": true, "typeof": true, "undefined": true, "unique": true, "unknown": true,
-	"using": true, "var": true, "void": true, "while": true, "with": true, "yield": true,
-}
-
-func isASCIIIdentifier(s string) bool {
-	if s == "" {
-		return false
-	}
-	for index, r := range s {
-		if r >= 128 || !(r == '_' || unicode.IsLetter(r) || index > 0 && unicode.IsDigit(r)) {
-			return false
-		}
-	}
-	return true
-}
-
-func typeScriptTypeName(name string) (string, error) {
-	if !isASCIIIdentifier(name) || typeScriptKeywords[name] {
-		return "", fmt.Errorf("Tach type name %q is not a portable TypeScript type identifier", name)
-	}
-	if name == "ComputeBuffer" || name == "ComputeCommand" || name == "LaunchOptions" {
-		return "", fmt.Errorf("Tach type name %q conflicts with an imported runtime type", name)
-	}
-	return name, nil
-}
-
-func validateKernelExportName(name string) error {
-	if !isASCIIIdentifier(name) || typeScriptKeywords[name] {
-		return fmt.Errorf("Tach kernel name %q is not a portable JavaScript export name", name)
-	}
-	return nil
-}
-
-func tsProperty(name string) string {
-	if isASCIIIdentifier(name) {
-		return name
-	}
-	return jsQuote(name)
-}
-
-func emitDeclarations(m *ir.Module, meta *Metadata) (string, error) {
-	for _, t := range m.Structs {
-		if _, err := typeScriptTypeName(t.Name); err != nil {
-			return "", err
-		}
-	}
-	for _, kernel := range meta.Kernels {
-		if err := validateKernelExportName(kernel.Name); err != nil {
-			return "", err
-		}
-	}
-
-	var b strings.Builder
-	b.WriteString("// Generated by Tach. Typed WebGPU module.\n\n")
-	b.WriteString("import type { ComputeBuffer, ComputeCommand, LaunchOptions } from \"@depths/tach\";\n\n")
-	for _, t := range m.Structs {
-		name, _ := typeScriptTypeName(t.Name)
-		fmt.Fprintf(&b, "export type %s = {\n", name)
-		for _, field := range t.Fields {
-			fmt.Fprintf(&b, "  readonly %s: %s;\n", tsProperty(field.Name), tsType(field.Type))
-		}
-		b.WriteString("};\n\n")
-	}
-	for _, kernel := range meta.Kernels {
-		function := m.Function(kernel.Name)
-		if function == nil {
-			return "", fmt.Errorf("unknown kernel %s", kernel.Name)
-		}
-		valueTypes := map[ir.ValueID]*types.Type{}
-		for _, value := range function.Params {
-			valueTypes[value.ID] = value.Type
-		}
-		fmt.Fprintf(&b, "export function %s(\n", kernel.Name)
-		for _, parameter := range function.KernelParams {
-			parameterType := ""
-			if parameter.Value == 0 {
-				parameterType = "ComputeBuffer<" + tsType(m.Resources[parameter.Resource].Type) + ">"
-			} else {
-				parameterType = tsType(valueTypes[parameter.Value])
-			}
-			fmt.Fprintf(&b, "  %s: %s,\n", parameter.Name, parameterType)
-		}
-		launchSize := []string{"", "number", "readonly [x: number, y: number]", "readonly [x: number, y: number, z: number]"}[kernel.Dimensions]
-		fmt.Fprintf(&b, "  $launch?: LaunchOptions<%s>,\n", launchSize)
-		b.WriteString("): ComputeCommand;\n\n")
-	}
-	return b.String(), nil
-}
-
 func tsType(t *types.Type) string {
 	switch t.Kind {
 	case types.Bool:
@@ -604,8 +643,8 @@ func tsType(t *types.Type) string {
 		return "number"
 	case types.Vector:
 		parts := make([]string, t.Lanes)
-		for index := range parts {
-			parts[index] = "number"
+		for i := range parts {
+			parts[i] = "number"
 		}
 		return "readonly [" + strings.Join(parts, ", ") + "]"
 	case types.Struct:
@@ -619,14 +658,10 @@ func tsType(t *types.Type) string {
 			}
 			return typed + " | readonly " + tsType(t.Elem) + "[]"
 		}
-		if t.Elem.Kind == types.Vector {
-			return "ReadonlyArray<" + tsType(t.Elem) + ">"
-		}
 		return "readonly " + tsType(t.Elem) + "[]"
 	}
 	return "never"
 }
-
 func tsTypedArray(t *types.Type) string {
 	if t.Kind == types.Atomic {
 		t = t.Elem
@@ -647,71 +682,29 @@ func tsTypedArray(t *types.Type) string {
 	}
 	return ""
 }
-
-// ValidateGenerated checks the compiler-owned cross-artifact invariants. It is
-// intentionally scoped to generated output rather than arbitrary JavaScript.
-func ValidateGenerated(js, dts string, metaJSON []byte) error {
-	var metadata Metadata
-	if err := json.Unmarshal(metaJSON, &metadata); err != nil {
-		return fmt.Errorf("metadata JSON: %w", err)
+func tsProperty(name string) string {
+	if isASCIIIdentifier(name) {
+		return name
 	}
-	for _, needle := range []string{
-		"import { defineModule as $defineModule } from \"@depths/tach/internal\"",
-		"const $tach = $defineModule({",
-	} {
-		if !strings.Contains(js, needle) {
-			return fmt.Errorf("JavaScript missing %q", needle)
-		}
-	}
-	if !strings.Contains(dts, "import type { ComputeBuffer, ComputeCommand, LaunchOptions } from \"@depths/tach\"") {
-		return fmt.Errorf("TypeScript declarations are missing runtime type imports")
-	}
-	pairs := map[[2]uint32]bool{}
-	for _, resource := range metadata.Resources {
-		pair := [2]uint32{resource.Group, resource.Binding}
-		if pairs[pair] {
-			return fmt.Errorf("duplicate metadata binding %v", pair)
-		}
-		pairs[pair] = true
-		if resource.Runtime &&
-			resource.MinimumByteSize != resource.RuntimeOffset+resource.RuntimeStride {
-			return fmt.Errorf(
-				"runtime resource %s minimum byte-size invariant failed",
-				resource.Name,
-			)
-		}
-		if !resource.Runtime &&
-			(resource.ByteSize == 0 ||
-				resource.MinimumByteSize != resource.ByteSize ||
-				resource.ByteSize%16 != 0) {
-			return fmt.Errorf("fixed resource %s byte-size invariant failed", resource.Name)
-		}
-	}
-	for index, kernel := range metadata.Kernels {
-		if kernel.Dimensions < 1 || kernel.Dimensions > 3 {
-			return fmt.Errorf("kernel %s has invalid logical dimension count %d", kernel.Name, kernel.Dimensions)
-		}
-		if kernel.EntryPoint != kernel.Name {
-			return fmt.Errorf("kernel %s has mangled entry point %q", kernel.Name, kernel.EntryPoint)
-		}
-		if block := kernel.ParameterBlock; block != nil {
-			pair := [2]uint32{block.Group, block.Binding}
-			if pairs[pair] {
-				return fmt.Errorf("duplicate metadata binding %v", pair)
-			}
-			pairs[pair] = true
-			if block.ByteSize == 0 || block.ByteSize%16 != 0 {
-				return fmt.Errorf("kernel %s has invalid parameter block size %d", kernel.Name, block.ByteSize)
-			}
-		}
-		export := "export function " + kernel.Name + "("
-		if !strings.Contains(js, export) || !strings.Contains(dts, export) {
-			return fmt.Errorf("generated bindings are missing kernel function %s", kernel.Name)
-		}
-		command := fmt.Sprintf("return $tach.command(%d", index)
-		if !strings.Contains(js, command) {
-			return fmt.Errorf("generated binding %s does not construct a compute command", kernel.Name)
-		}
+	encoded, _ := json.Marshal(name)
+	return string(encoded)
+}
+func validateExportName(name string) error {
+	if !isASCIIIdentifier(name) || typeScriptKeywords[name] {
+		return fmt.Errorf("%q is not a valid generated export", name)
 	}
 	return nil
 }
+func isASCIIIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r > unicode.MaxASCII || !(r == '_' || r == '$' || unicode.IsLetter(r) || i > 0 && unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
+}
+
+var typeScriptKeywords = map[string]bool{"break": true, "case": true, "class": true, "const": true, "continue": true, "default": true, "delete": true, "do": true, "else": true, "export": true, "extends": true, "false": true, "finally": true, "for": true, "function": true, "if": true, "import": true, "in": true, "instanceof": true, "new": true, "null": true, "return": true, "super": true, "switch": true, "this": true, "throw": true, "true": true, "try": true, "typeof": true, "var": true, "void": true, "while": true, "with": true, "yield": true}

@@ -1,31 +1,51 @@
-import type { ComputeCommand, Tach } from "@depths/tach";
+import type { ComputeBuffer, ComputeCommand, Tach } from "@depths/tach";
 import {
-  integrateParticles,
-  mandelbrot,
-  multiplyMatrices,
-  priceOptions,
-  proceduralScene,
-  type FractalParams,
-  type RenderParams,
+  fractal,
+  fractalColor,
+  fractalOrbit,
+  matrices,
+  matrixActivate,
+  matrixProduct,
+  optionPrice,
+  optionRisk,
+  options,
+  particleCommit,
+  particlePredict,
+  particles,
+  render,
+  renderColor,
+  renderField,
+  type CountParams,
+  type ImageParams,
+  type ParticleParams,
 } from "../build/benchmarks.js";
+
+type NumericArray = Float32Array | Uint32Array;
+export type BenchmarkProfile = "gpu-large" | "gpu-cpu-medium";
 
 export interface BenchmarkResult {
   readonly id: string;
   readonly name: string;
-  readonly description: string;
   readonly problem: string;
   readonly samples: number;
-  readonly dispatches: number;
-  readonly gpuMs: number;
-  readonly gpuSamplesMs: readonly number[];
+  readonly logicalStages: number;
+  readonly fusedDispatches: 1;
+  readonly unfusedDispatches: 2;
+  readonly fusedMs: number;
+  readonly unfusedMs: number;
+  readonly fusionSpeedup: number;
+  readonly fusedSamplesMs: readonly number[];
+  readonly unfusedSamplesMs: readonly number[];
   readonly cpuMs: number | null;
-  readonly cpuSamplesMs: readonly number[] | null;
-  readonly speedup: number | null;
-  readonly gpuRate: number;
-  readonly cpuRate: number | null;
-  readonly rateUnit: string;
-  readonly correct: boolean | null;
+  readonly gpuVsCpu: number | null;
+  readonly correct: boolean;
   readonly check: string;
+  readonly millionElementsPerSecond: number;
+}
+
+export interface BenchmarkReport {
+  readonly profile: BenchmarkProfile;
+  readonly results: readonly BenchmarkResult[];
 }
 
 export interface RenderedFrame {
@@ -34,596 +54,426 @@ export interface RenderedFrame {
   readonly pixels: Uint32Array;
 }
 
-export interface BenchmarkRun {
-  readonly results: readonly BenchmarkResult[];
-  readonly frame: RenderedFrame;
-}
-
-interface MeasuredBenchmark {
-  readonly gpuResult: BenchmarkResult;
-  compare(): Promise<BenchmarkResult>;
-}
-
 interface Profile {
+  readonly name: BenchmarkProfile;
   readonly samples: number;
+  readonly cpu: boolean;
   readonly particleCount: number;
-  readonly particleSteps: number;
+  readonly particleIterations: number;
   readonly fractalSize: number;
   readonly fractalIterations: number;
-  readonly fractalDispatches: number;
-  readonly matrixSize: number;
-  readonly matrixDispatches: number;
+  readonly matrixCells: number;
+  readonly matrixIterations: number;
   readonly optionCount: number;
-  readonly optionDispatches: number;
-  readonly renderDispatches: number;
+  readonly optionIterations: number;
+  readonly renderSize: number;
+  readonly renderIterations: number;
 }
 
-const full: Profile = {
-  samples: 5,
-  particleCount: 1 << 18,
-  particleSteps: 128,
-  fractalSize: 768,
-  fractalIterations: 192,
-  fractalDispatches: 4,
-  matrixSize: 256,
-  matrixDispatches: 4,
-  optionCount: 1 << 20,
-  optionDispatches: 8,
-  renderDispatches: 3,
+const profiles: Record<BenchmarkProfile, Profile> = {
+  "gpu-large": {
+    name: "gpu-large",
+    samples: 5,
+    cpu: false,
+	particleCount: 16_000_000,
+    particleIterations: 16,
+    fractalSize: 3072,
+    fractalIterations: 4,
+    matrixCells: 1 << 23,
+    matrixIterations: 8,
+    optionCount: 1 << 22,
+    optionIterations: 4,
+    renderSize: 3072,
+    renderIterations: 16,
+  },
+  "gpu-cpu-medium": {
+    name: "gpu-cpu-medium",
+    samples: 3,
+    cpu: true,
+    particleCount: 1 << 20,
+    particleIterations: 4,
+    fractalSize: 768,
+    fractalIterations: 1,
+    matrixCells: 1 << 19,
+    matrixIterations: 2,
+    optionCount: 1 << 18,
+    optionIterations: 1,
+    renderSize: 1024,
+    renderIterations: 4,
+  },
 };
 
-const quick: Profile = {
-  samples: 3,
-  particleCount: 1 << 16,
-  particleSteps: 2,
-  fractalSize: 128,
-  fractalIterations: 64,
-  fractalDispatches: 2,
-  matrixSize: 96,
-  matrixDispatches: 2,
-  optionCount: 1 << 16,
-  optionDispatches: 2,
-  renderDispatches: 1,
-};
+interface Workload {
+  readonly id: string;
+  readonly name: string;
+  readonly problem: string;
+  readonly elements: number;
+  readonly iterations: number;
+  readonly fused: ComputeCommand;
+  readonly unfused: readonly [ComputeCommand, ComputeCommand];
+  readonly fusedOutput: ComputeBuffer<NumericArray>;
+  readonly unfusedOutput: ComputeBuffer<NumericArray>;
+  readonly buffers: readonly ComputeBuffer<unknown>[];
+  readonly cpu?: () => NumericArray;
+  readonly cpuTolerance: number;
+}
 
-type Progress = (name: string, index: number, total: number) => void;
+interface CompletedWorkload {
+  readonly result: BenchmarkResult;
+  readonly output: NumericArray;
+}
 
 function median(values: readonly number[]): number {
-  const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.floor(sorted.length / 2)] ?? Number.NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)]!;
 }
 
-function nextFrame(): Promise<void> {
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
-
-async function measureGPU(samples: number, work: () => Promise<void>): Promise<number[]> {
-  const times: number[] = [];
-  await nextFrame();
-  await work();
-  await work();
-  for (let sample = 0; sample < samples; sample++) {
-    const start = performance.now();
-    await work();
-    times.push(performance.now() - start);
-  }
-  return times;
-}
-
-async function complete(gpu: Tach, command: ComputeCommand): Promise<void> {
-  await gpu.submit(command);
+async function complete(gpu: Tach, first: ComputeCommand, second?: ComputeCommand): Promise<void> {
+  await (second === undefined ? gpu.submit(first) : gpu.submit(first, second));
   await gpu.idle();
 }
 
-async function measureCPU(samples: number, work: () => void): Promise<number[]> {
+async function timed(work: () => Promise<void>): Promise<number> {
+  const start = performance.now();
+  await work();
+  return performance.now() - start;
+}
+
+async function measureGPU(
+  samples: number,
+  fused: () => Promise<void>,
+  unfused: () => Promise<void>,
+): Promise<{ fused: number[]; unfused: number[] }> {
+  await fused();
+  await unfused();
+  const result = { fused: [] as number[], unfused: [] as number[] };
+  for (let sample = 0; sample < samples; sample++) {
+    if (sample % 2 === 0) {
+      result.fused.push(await timed(fused));
+      result.unfused.push(await timed(unfused));
+    } else {
+      result.unfused.push(await timed(unfused));
+      result.fused.push(await timed(fused));
+    }
+  }
+  return result;
+}
+
+function measureCPU(samples: number, work: () => NumericArray): number {
+  work();
   const times: number[] = [];
   for (let sample = 0; sample < samples; sample++) {
-    await nextFrame();
     const start = performance.now();
     work();
     times.push(performance.now() - start);
   }
-  return times;
+  return median(times);
 }
 
-function result(
-  identity: Pick<BenchmarkResult, "id" | "name" | "description" | "problem" | "dispatches" | "rateUnit">,
-  samples: number,
-  work: number,
-  rateScale: number,
-  gpuTimes: readonly number[],
-  cpuTimes: readonly number[] | null,
-  correct: boolean | null,
-  check: string,
-): BenchmarkResult {
-  const gpuMs = median(gpuTimes);
-  const cpuMs = cpuTimes === null ? null : median(cpuTimes);
-  return {
-    ...identity,
-    samples,
-    gpuMs,
-    gpuSamplesMs: [...gpuTimes],
-    cpuMs,
-    cpuSamplesMs: cpuTimes === null ? null : [...cpuTimes],
-    speedup: cpuMs === null ? null : cpuMs / gpuMs,
-    gpuRate: work / (gpuMs / 1000) / rateScale,
-    cpuRate: cpuMs === null ? null : work / (cpuMs / 1000) / rateScale,
-    correct,
-    check,
-  };
+function maxDifference(left: NumericArray, right: NumericArray): number {
+  let maximum = 0;
+  if (left instanceof Uint32Array && right instanceof Uint32Array) {
+    for (let i = 0; i < left.length; i++) {
+      for (let shift = 0; shift < 32; shift += 8) {
+        maximum = Math.max(maximum, Math.abs(((left[i]! >>> shift) & 255) - ((right[i]! >>> shift) & 255)));
+      }
+    }
+    return maximum;
+  }
+  for (let i = 0; i < left.length; i++) maximum = Math.max(maximum, Math.abs(left[i]! - right[i]!));
+  return maximum;
 }
 
-async function particles(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
+async function execute(gpu: Tach, profile: Profile, workload: Workload): Promise<CompletedWorkload> {
+  try {
+    const samples = await measureGPU(
+      profile.samples,
+      () => complete(gpu, workload.fused),
+      () => complete(gpu, workload.unfused[0], workload.unfused[1]),
+    );
+    const fusedMs = median(samples.fused);
+    const unfusedMs = median(samples.unfused);
+    const fusedOutput = await workload.fusedOutput.read();
+    const unfusedOutput = await workload.unfusedOutput.read();
+    const gpuError = maxDifference(fusedOutput, unfusedOutput);
+    let cpuMs: number | null = null;
+    let cpuError: number | null = null;
+    if (profile.cpu && workload.cpu !== undefined) {
+      cpuMs = measureCPU(profile.samples, workload.cpu);
+      cpuError = maxDifference(fusedOutput, workload.cpu());
+    }
+    const correct = gpuError === 0 && (cpuError === null || cpuError <= workload.cpuTolerance);
+    return {
+      output: fusedOutput,
+      result: {
+        id: workload.id,
+        name: workload.name,
+        problem: workload.problem,
+        samples: profile.samples,
+        logicalStages: workload.iterations * 2,
+        fusedDispatches: 1,
+        unfusedDispatches: 2,
+        fusedMs,
+        unfusedMs,
+        fusionSpeedup: unfusedMs / fusedMs,
+        fusedSamplesMs: samples.fused,
+        unfusedSamplesMs: samples.unfused,
+        cpuMs,
+        gpuVsCpu: cpuMs === null ? null : cpuMs / fusedMs,
+        correct,
+        check: `fused/unfused max error ${gpuError}${cpuError === null ? "" : `; CPU max error ${cpuError}`}`,
+        millionElementsPerSecond: workload.elements * workload.iterations / (fusedMs / 1000) / 1e6,
+      },
+    };
+  } finally {
+    for (const buffer of workload.buffers) buffer.destroy();
+  }
+}
+
+function particleWorkload(gpu: Tach, profile: Profile): Workload {
   const count = profile.particleCount;
-  const values = count * 4;
-  const positions = new Float32Array(values);
-  const velocities = new Float32Array(values);
-  for (let i = 0; i < values; i++) {
+  const positions = new Float32Array(count);
+  const velocities = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
     positions[i] = (i % 1024) * 0.001;
     velocities[i] = ((i * 17) % 257 - 128) * 0.0001;
   }
   const gpuPositions = gpu.buffer(positions);
   const gpuVelocities = gpu.buffer(velocities);
-  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, integrateParticles(
-    gpuPositions,
-    gpuVelocities,
-    { dt: 0.001, count: values, steps: profile.particleSteps },
-    { size: values },
-  )));
-  const identity = {
-    id: "particles",
-    name: "Particle integration",
-    description: "One dispatch keeps each position resident in a register across every integration step.",
-    problem: `${count.toLocaleString()} particles × ${profile.particleSteps} fused steps`,
-    dispatches: 1,
-    rateUnit: "million component updates/s",
+  const predicted = gpu.buffer(new Float32Array(count));
+  const fusedOutput = gpu.buffer(new Float32Array(count));
+  const unfusedOutput = gpu.buffer(new Float32Array(count));
+  const params: ParticleParams = { count, dt: 0.001 };
+  const cpuOutput = new Float32Array(count);
+  const cpu = (): Float32Array => {
+    for (let iteration = 0; iteration < profile.particleIterations; iteration++) {
+      for (let i = 0; i < count; i++) cpuOutput[i] = (positions[i]! + velocities[i]! * params.dt) * 0.99991 + 0.00003;
+    }
+    return cpuOutput;
   };
-  const actual = await gpuPositions.read();
-  gpuPositions.destroy();
-  gpuVelocities.destroy();
-
   return {
-    gpuResult: result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, null, null,
-      "CPU comparison skipped"),
-    async compare() {
-      const expected = positions.slice();
-      const integrateCPU = (steps: number): void => {
-        for (let step = 0; step < steps; step++) {
-          for (let i = 0; i < values; i++) expected[i] = expected[i]! + velocities[i]! * 0.001;
-        }
-      };
-      integrateCPU(profile.particleSteps * 2);
-      const cpuTimes = await measureCPU(profile.samples, () => integrateCPU(profile.particleSteps));
-      let maxError = 0;
-      for (let i = 0; i < values; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
-      return result(identity, profile.samples, values * profile.particleSteps, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
-        `maximum absolute error ${maxError.toExponential(2)}`);
-    },
+    id: "particles",
+    name: "Particle prediction",
+    problem: `${count.toLocaleString()} components × ${profile.particleIterations} iterations`,
+    elements: count,
+    iterations: profile.particleIterations,
+    fused: particles(gpuPositions, gpuVelocities, fusedOutput, params, { repeat: profile.particleIterations }),
+    unfused: [
+      particlePredict(gpuPositions, gpuVelocities, predicted, params, { repeat: profile.particleIterations }),
+      particleCommit(predicted, unfusedOutput, { repeat: profile.particleIterations }),
+    ],
+    fusedOutput,
+    unfusedOutput,
+    buffers: [gpuPositions, gpuVelocities, predicted, fusedOutput, unfusedOutput],
+    cpu,
+    cpuTolerance: 1e-5,
   };
 }
 
-function mandelbrotCPU(output: Uint32Array, params: FractalParams, dispatches: number): void {
-  const f32 = Math.fround;
-  for (let dispatch = 0; dispatch < dispatches; dispatch++) {
+function fractalCPU(params: ImageParams, iterations: number): Uint32Array {
+  const output = new Uint32Array(params.width * params.height);
+	const f32 = Math.fround;
+  for (let repeat = 0; repeat < iterations; repeat++) {
     for (let y = 0; y < params.height; y++) {
-      const cy = f32(f32(f32(y - params.height * 0.5) * params.scale) + params.centerY);
       for (let x = 0; x < params.width; x++) {
-        const cx = f32(f32(f32(x - params.width * 0.5) * params.scale) + params.centerX);
+		const cx = f32(f32(f32(x - f32(params.width * 0.5)) * params.scale) - 0.6);
+		const cy = f32(f32(y - f32(params.height * 0.5)) * params.scale);
         let zx = 0;
         let zy = 0;
-        let iteration = 0;
-        while (iteration < params.maxIterations && f32(f32(zx * zx) + f32(zy * zy)) <= 4) {
-          const nextX = f32(f32(f32(zx * zx) - f32(zy * zy)) + cx);
-          zy = f32(f32(f32(2 * zx) * zy) + cy);
-          zx = nextX;
-          iteration++;
-        }
-        output[y * params.width + x] = iteration;
+		for (let step = 0; step < 16; step++) [zx, zy] = [f32(f32(f32(zx * zx) - f32(zy * zy)) + cx), f32(f32(f32(2 * zx) * zy) + cy)];
+		const magnitude = f32(f32(zx * zx) + f32(zy * zy));
+		const raw = f32(Math.log2(f32(magnitude + 1)) * 24);
+		const value = Number.isNaN(raw) ? 0 : Math.trunc(Math.min(255, Math.max(0, raw)));
+        output[y * params.width + x] = (value | ((value * 3) << 8) | ((255 - value) << 16) | (255 << 24)) >>> 0;
       }
     }
   }
+  return output;
 }
 
-async function fractal(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
-  const width = profile.fractalSize;
-  const height = profile.fractalSize;
-  const pixels = width * height;
-  const params: FractalParams = {
-    width,
-    height,
-    maxIterations: profile.fractalIterations,
-    scale: 3.2 / width,
-    centerX: -0.6,
-    centerY: 0,
-  };
-  const output = gpu.buffer(new Uint32Array(pixels));
-  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, mandelbrot(
-    output,
-    params,
-    { size: [width, height], repeat: profile.fractalDispatches },
-  )));
-  const identity = {
-    id: "fractal",
-    name: "Mandelbrot escape",
-    description: "A divergent, data-dependent loop computes every pixel independently with float32 arithmetic.",
-    problem: `${width} × ${height}, limit ${params.maxIterations} × ${profile.fractalDispatches} renders`,
-    dispatches: profile.fractalDispatches,
-    rateUnit: "million pixel-dispatches/s",
-  };
-  const actual = await output.read();
-  output.destroy();
-
+function fractalWorkload(gpu: Tach, profile: Profile): Workload {
+  const size = profile.fractalSize;
+  const count = size * size;
+  const orbit = gpu.buffer(new Float32Array(count));
+  const fusedOutput = gpu.buffer(new Uint32Array(count));
+  const unfusedOutput = gpu.buffer(new Uint32Array(count));
+  const params: ImageParams = { width: size, height: size, scale: 3.2 / size, time: 0 };
+  const launch = { size: count, repeat: profile.fractalIterations };
   return {
-    gpuResult: result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, null, null,
-      "CPU comparison skipped"),
-    async compare() {
-      const expected = new Uint32Array(pixels);
-      mandelbrotCPU(expected, params, 1);
-      const cpuTimes = await measureCPU(profile.samples, () => mandelbrotCPU(
-        expected,
-        params,
-        profile.fractalDispatches,
-      ));
-      let close = 0;
-      let maxDifference = 0;
-      for (let i = 0; i < pixels; i++) {
-        const difference = Math.abs(actual[i]! - expected[i]!);
-        if (difference <= 1) close++;
-        maxDifference = Math.max(maxDifference, difference);
-      }
-      const agreement = close / pixels;
-      return result(identity, profile.samples, pixels * profile.fractalDispatches, 1e6, gpuTimes, cpuTimes, agreement >= 0.995,
-        `${(agreement * 100).toFixed(3)}% within one iteration; maximum difference ${maxDifference}`);
-    },
+    id: "fractal",
+    name: "Fixed-depth fractal",
+    problem: `${size} × ${size} pixels × 16 orbit steps × ${profile.fractalIterations} iterations`,
+    elements: count,
+    iterations: profile.fractalIterations,
+    fused: fractal(fusedOutput, params, { repeat: profile.fractalIterations }),
+    unfused: [fractalOrbit(orbit, params, launch), fractalColor(orbit, unfusedOutput, launch)],
+    fusedOutput,
+    unfusedOutput,
+    buffers: [orbit, fusedOutput, unfusedOutput],
+    cpu: () => fractalCPU(params, profile.fractalIterations),
+    cpuTolerance: 32,
   };
 }
 
-function multiplyCPU(
-  left: Float32Array,
-  right: Float32Array,
-  output: Float32Array,
-  size: number,
-  dispatches: number,
-): void {
-  const f32 = Math.fround;
-  for (let dispatch = 0; dispatch < dispatches; dispatch++) {
-    for (let row = 0; row < size; row++) {
-      for (let column = 0; column < size; column++) {
-        let sum = 0;
-        for (let k = 0; k < size; k++) {
-          sum = f32(sum + f32(left[row * size + k]! * right[k * size + column]!));
-        }
-        output[row * size + column] = sum;
-      }
-    }
-  }
-}
-
-async function matrices(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
-  const size = profile.matrixSize;
-  const cells = size * size;
-  const left = new Float32Array(cells);
-  const right = new Float32Array(cells);
-  for (let i = 0; i < cells; i++) {
+function matrixWorkload(gpu: Tach, profile: Profile): Workload {
+  const count = profile.matrixCells;
+  const left = new Float32Array(count);
+  const right = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
     left[i] = ((i * 13) % 31 - 15) / 16;
     right[i] = ((i * 7) % 29 - 14) / 15;
   }
   const gpuLeft = gpu.buffer(left);
   const gpuRight = gpu.buffer(right);
-  const gpuOutput = gpu.buffer(new Float32Array(cells));
-  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, multiplyMatrices(
-    gpuLeft,
-    gpuRight,
-    gpuOutput,
-    { size },
-    { size: [size, size], repeat: profile.matrixDispatches },
-  )));
-  const identity = {
-    id: "matrix",
-    name: "Tiled matrix multiply",
-    description: "16 × 16 tiles reuse two Workgroup arrays and synchronize twice per tile.",
-    problem: `${size} × ${size} matrices × ${profile.matrixDispatches} products`,
-    dispatches: profile.matrixDispatches,
-    rateUnit: "GFLOP/s",
+  const product = gpu.buffer(new Float32Array(count));
+  const fusedOutput = gpu.buffer(new Float32Array(count));
+  const unfusedOutput = gpu.buffer(new Float32Array(count));
+  const params: CountParams = { count };
+  const cpuOutput = new Float32Array(count);
+  const cpu = (): Float32Array => {
+    for (let repeat = 0; repeat < profile.matrixIterations; repeat++) {
+      for (let i = 0; i < count; i++) {
+        const base = Math.trunc(i / 16) * 16;
+        const cell = i % 16;
+        const row = Math.trunc(cell / 4);
+        const column = cell % 4;
+        const value = left[base + row * 4]! * right[base + column]! +
+          left[base + row * 4 + 1]! * right[base + 4 + column]! +
+          left[base + row * 4 + 2]! * right[base + 8 + column]! +
+          left[base + row * 4 + 3]! * right[base + 12 + column]!;
+        cpuOutput[i] = value / (1 + Math.abs(value));
+      }
+    }
+    return cpuOutput;
   };
-  const actual = await gpuOutput.read();
-  gpuLeft.destroy();
-  gpuRight.destroy();
-  gpuOutput.destroy();
-
   return {
-    gpuResult: result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
-      gpuTimes, null, null, "CPU comparison skipped"),
-    async compare() {
-      const expected = new Float32Array(cells);
-      multiplyCPU(left, right, expected, size, 1);
-      const cpuTimes = await measureCPU(profile.samples, () => multiplyCPU(
-        left,
-        right,
-        expected,
-        size,
-        profile.matrixDispatches,
-      ));
-      let maxError = 0;
-      for (let i = 0; i < cells; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
-      return result(identity, profile.samples, 2 * size * size * size * profile.matrixDispatches, 1e9,
-        gpuTimes, cpuTimes, maxError < 0.01, `maximum absolute error ${maxError.toExponential(2)}`);
-    },
+    id: "matrices",
+    name: "Batched 4 × 4 matrices",
+    problem: `${(count / 16).toLocaleString()} products × ${profile.matrixIterations} iterations`,
+    elements: count,
+    iterations: profile.matrixIterations,
+    fused: matrices(gpuLeft, gpuRight, fusedOutput, params, { repeat: profile.matrixIterations }),
+    unfused: [
+      matrixProduct(gpuLeft, gpuRight, product, { repeat: profile.matrixIterations }),
+      matrixActivate(product, unfusedOutput, { repeat: profile.matrixIterations }),
+    ],
+    fusedOutput,
+    unfusedOutput,
+    buffers: [gpuLeft, gpuRight, product, fusedOutput, unfusedOutput],
+    cpu,
+    cpuTolerance: 1e-5,
   };
 }
 
 function normalCDF(x: number): number {
-  const magnitude = Math.abs(x);
-  const t = 1 / (1 + 0.2316419 * magnitude);
-  const polynomial = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-  const positive = 1 - 0.398942280 * Math.exp(-0.5 * magnitude * magnitude) * polynomial;
-  return x < 0 ? 1 - positive : positive;
+  const a = Math.abs(x);
+  const t = 1 / (1 + 0.2316419 * a);
+  const p = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const y = 1 - 0.398942280 * Math.exp(-0.5 * a * a) * p;
+  return x < 0 ? 1 - y : y;
 }
 
-function priceOptionsCPU(output: Float32Array, dispatches: number): void {
-  for (let dispatch = 0; dispatch < dispatches; dispatch++) {
-    for (let i = 0; i < output.length; i++) {
-      const spot = 80 + (i % 400) * 0.1;
-      const strike = 90 + (i % 200) * 0.1;
-      const years = 0.25 + (i % 365) / 365;
-      const volatility = 0.15 + (i % 100) * 0.001;
-      const rate = 0.03;
-      const sigmaRootTime = volatility * Math.sqrt(years);
-      const d1 = (Math.log(spot / strike) + (rate + 0.5 * volatility * volatility) * years) / sigmaRootTime;
-      const d2 = d1 - sigmaRootTime;
-      output[i] = spot * normalCDF(d1) - strike * Math.exp(-rate * years) * normalCDF(d2);
-    }
-  }
-}
-
-async function options(gpu: Tach, profile: Profile): Promise<MeasuredBenchmark> {
+function optionWorkload(gpu: Tach, profile: Profile): Workload {
   const count = profile.optionCount;
-  const output = gpu.buffer(new Float32Array(count));
-  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, priceOptions(
-    output,
-    { count },
-    { size: count, repeat: profile.optionDispatches },
-  )));
-  const identity = {
+  const prices = gpu.buffer(new Float32Array(count));
+  const fusedOutput = gpu.buffer(new Float32Array(count));
+  const unfusedOutput = gpu.buffer(new Float32Array(count));
+  const params: CountParams = { count };
+  const cpuOutput = new Float32Array(count);
+  const cpu = (): Float32Array => {
+    for (let repeat = 0; repeat < profile.optionIterations; repeat++) {
+      for (let i = 0; i < count; i++) {
+        const spot = 80 + (i % 400) * 0.1;
+        const strike = 90 + (i % 200) * 0.1;
+        const years = 0.25 + (i % 365) / 365;
+        const volatility = 0.15 + (i % 100) * 0.001;
+        const root = volatility * Math.sqrt(years);
+        const d1 = (Math.log(spot / strike) + (0.03 + 0.5 * volatility * volatility) * years) / root;
+        const price = spot * normalCDF(d1) - strike * Math.exp(-0.03 * years) * normalCDF(d1 - root);
+        cpuOutput[i] = price + Math.sqrt(Math.abs(price)) * 0.01;
+      }
+    }
+    return cpuOutput;
+  };
+  return {
     id: "options",
     name: "Black–Scholes pricing",
-    description: "Independent option prices stress log, exp, sqrt, branching, and a generated helper function.",
-    problem: `${count.toLocaleString()} options × ${profile.optionDispatches} valuations`,
-    dispatches: profile.optionDispatches,
-    rateUnit: "million option valuations/s",
-  };
-  const actual = await output.read();
-  output.destroy();
-
-  return {
-    gpuResult: result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, null, null,
-      "CPU comparison skipped"),
-    async compare() {
-      const expected = new Float32Array(count);
-      priceOptionsCPU(expected, 1);
-      const cpuTimes = await measureCPU(profile.samples, () => priceOptionsCPU(expected, profile.optionDispatches));
-      let maxError = 0;
-      for (let i = 0; i < count; i++) maxError = Math.max(maxError, Math.abs(actual[i]! - expected[i]!));
-      return result(identity, profile.samples, count * profile.optionDispatches, 1e6, gpuTimes, cpuTimes, maxError < 0.002,
-        `maximum absolute error ${maxError.toExponential(2)}`);
-    },
+    problem: `${count.toLocaleString()} options × ${profile.optionIterations} iterations`,
+    elements: count,
+    iterations: profile.optionIterations,
+    fused: options(fusedOutput, params, { repeat: profile.optionIterations }),
+    unfused: [
+      optionPrice(prices, params, { repeat: profile.optionIterations }),
+      optionRisk(prices, unfusedOutput, { repeat: profile.optionIterations }),
+    ],
+    fusedOutput,
+    unfusedOutput,
+    buffers: [prices, fusedOutput, unfusedOutput],
+    cpu,
+    cpuTolerance: 0.002,
   };
 }
 
-function saturate(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-function smoothRange(edge0: number, edge1: number, value: number): number {
-  const t = saturate((value - edge0) / (edge1 - edge0));
-  return t * t * (3 - 2 * t);
-}
-
-function blend(base: number, layer: number, amount: number): number {
-  return base + (layer - base) * saturate(amount);
-}
-
-function hashPixel(x: number, y: number): number {
-  let value = (Math.imul(x, 374_761_393) + Math.imul(y, 668_265_263)) >>> 0;
-  value = Math.imul(value ^ (value >>> 13), 1_274_126_177) >>> 0;
-  value = (value ^ (value >>> 16)) >>> 0;
-  return (value & 65_535) / 65_535;
-}
-
-function renderSceneCPU(output: Uint32Array, params: RenderParams, dispatches: number): void {
-  const { width, height, time } = params;
-  const aspect = width / height;
-  for (let dispatch = 0; dispatch < dispatches; dispatch++) {
-    for (let y = 0; y < height; y++) {
-      const v = (y + 0.5) / height;
-      const py = 0.5 - v;
-      for (let x = 0; x < width; x++) {
-        const u = (x + 0.5) / width;
-        const px = (u - 0.5) * aspect;
-        let red = 0.015 + 0.18 * v;
-        let green = 0.025 + 0.06 * v;
-        let blue = 0.11 + 0.22 * (1 - v);
-
-        const cloudWave = 0.5 + 0.5 * Math.sin(px * 5 + Math.sin(py * 9 + time) * 1.7);
-        const auroraHeight = 0.14 + 0.055 * Math.sin(px * 3.2 + time * 0.7) +
-          0.025 * Math.sin(px * 11 - time);
-        const aurora = Math.exp(-Math.abs(py - auroraHeight) * 20) * (0.35 + 0.65 * cloudWave);
-        red += aurora * 0.08;
-        green += aurora * 0.42;
-        blue += aurora * 0.48;
-
-        const sunX = px - 0.33;
-        const sunY = py - 0.12;
-        const sunDistance = Math.sqrt(sunX * sunX + sunY * sunY);
-        const halo = Math.exp(-sunDistance * 7);
-        const disk = smoothRange(0.145, 0.125, sunDistance);
-        const rings = Math.exp(-Math.abs(sunDistance - 0.205) * 95) +
-          0.55 * Math.exp(-Math.abs(sunDistance - 0.255) * 120);
-        red += halo * 0.38 + rings * 0.55;
-        green += halo * 0.08 + rings * 0.12;
-        blue += halo * 0.16 + rings * 0.68;
-        red = blend(red, 1, disk * 0.96);
-        green = blend(green, 0.44 + 0.3 * (sunY / 0.145 + 0.5), disk * 0.96);
-        blue = blend(blue, 0.16, disk * 0.96);
-
-        const cellSize = 12;
-        const cellX = Math.trunc(x / cellSize);
-        const cellY = Math.trunc(y / cellSize);
-        const seed = hashPixel(cellX, cellY);
-        if (seed > 0.91 && py > -0.06) {
-          const centerX = 2 + hashPixel(cellX + 17, cellY + 31) * 8;
-          const centerY = 2 + hashPixel(cellX + 47, cellY + 11) * 8;
-          const starX = x % cellSize - centerX;
-          const starY = y % cellSize - centerY;
-          const core = Math.exp(-(starX * starX + starY * starY) * 1.7);
-          const rays = 0.22 * Math.exp(-Math.abs(starX) * 4 - Math.abs(starY) * 0.45) +
-            0.22 * Math.exp(-Math.abs(starY) * 4 - Math.abs(starX) * 0.45);
-          const sparkle = (core + rays) * (0.45 + seed * 0.8);
-          red += sparkle;
-          green += sparkle * 0.88;
-          blue += sparkle * 1.15;
-        }
-
-        const distantHeight = -0.075 + 0.045 * Math.sin(px * 6.5 + 0.4) +
-          0.022 * Math.sin(px * 16 - 1.3);
-        const distant = smoothRange(distantHeight + 0.018, distantHeight - 0.012, py);
-        red = blend(red, 0.075, distant);
-        green = blend(green, 0.045, distant);
-        blue = blend(blue, 0.16, distant);
-        const ridge = Math.exp(-Math.abs(py - distantHeight) * 150);
-        red += ridge * 0.24;
-        blue += ridge * 0.38;
-
-        const nearHeight = -0.19 + 0.065 * Math.sin(px * 4.3 - 0.8) +
-          0.038 * Math.sin(px * 12.5 + 1.7);
-        const near = smoothRange(nearHeight + 0.014, nearHeight - 0.018, py);
-        red = blend(red, 0.018, near);
-        green = blend(green, 0.025, near);
-        blue = blend(blue, 0.055, near);
-
-        const ground = smoothRange(-0.20, -0.235, py);
-        const perspective = 0.57 + py;
-        const verticalGrid = Math.exp(-Math.abs(Math.sin(px * 14 / perspective)) * 22);
-        const horizontalGrid = Math.exp(-Math.abs(Math.sin(1.35 / perspective + time * 0.35)) * 24);
-        const grid = saturate(verticalGrid + horizontalGrid);
-        const reflection = Math.exp(-Math.abs(px - 0.33) * 7) *
-          (0.45 + 0.55 * Math.sin(py * 210 + Math.sin(px * 19) * 2));
-        red = blend(red, 0.018 + grid * 0.55 + reflection * 0.32, ground);
-        green = blend(green, 0.035 + grid * 0.12 + reflection * 0.06, ground);
-        blue = blend(blue, 0.09 + grid * 0.72 + reflection * 0.42, ground);
-
-        const vignette = saturate(1 - (px * px * 0.5 + (v - 0.5) * (v - 0.5)) * 1.35);
-        const grain = 0.97 + hashPixel(x + 101, y + 79) * 0.06;
-        const scanline = 0.975 + 0.025 * Math.sin(y * 1.65);
-        const exposure = (0.62 + 0.38 * vignette) * grain * scanline;
-        red *= exposure;
-        green *= exposure;
-        blue *= exposure;
-        const alpha = 0.94 + 0.06 * vignette;
-
-        const red8 = Math.trunc(saturate(red) * 255 + 0.5);
-        const green8 = Math.trunc(saturate(green) * 255 + 0.5);
-        const blue8 = Math.trunc(saturate(blue) * 255 + 0.5);
-        const alpha8 = Math.trunc(saturate(alpha) * 255 + 0.5);
-        output[y * width + x] = (red8 | (green8 << 8) | (blue8 << 16) | (alpha8 << 24)) >>> 0;
+function renderCPU(params: ImageParams, iterations: number): Uint32Array {
+  const output = new Uint32Array(params.width * params.height);
+  for (let repeat = 0; repeat < iterations; repeat++) {
+    for (let y = 0; y < params.height; y++) {
+      const v = (y + 0.5) / params.height - 0.5;
+      for (let x = 0; x < params.width; x++) {
+        const u = (x + 0.5) / params.width - 0.5;
+        const wave = Math.sin(u * 31 + params.time) * Math.cos(v * 23 - params.time);
+        const field = Math.exp(-Math.sqrt(u * u + v * v) * 4) + wave * 0.35;
+        const value = Math.min(1, Math.max(0, field * 0.5 + 0.5));
+        const red = Math.trunc(value * 255);
+        const green = Math.trunc(Math.sqrt(value) * 255);
+        const blue = Math.trunc((1 - value) * 255);
+        output[y * params.width + x] = (red | (green << 8) | (blue << 16) | (255 << 24)) >>> 0;
       }
     }
   }
+  return output;
 }
 
-async function rendering(
-  gpu: Tach,
-  profile: Profile,
-): Promise<{ readonly measured: MeasuredBenchmark; readonly frame: RenderedFrame }> {
-  const width = 1920;
-  const height = 1080;
-  const pixels = width * height;
-  const params: RenderParams = { width, height, time: 1.7 };
-  const output = gpu.buffer(new Uint32Array(pixels));
-  const gpuTimes = await measureGPU(profile.samples, () => complete(gpu, proceduralScene(
-    output,
-    params,
-    { size: [width, height], repeat: profile.renderDispatches },
-  )));
-  const actual = await output.read();
-  const identity = {
-    id: "render",
-    name: "Procedural RGBA composition",
-    description: "A full-HD scene composes gradients, aurora, stars, rings, mountains, a perspective grid, reflection, grain, and RGBA packing per pixel.",
-    problem: `${width} × ${height} RGBA × ${profile.renderDispatches} frames`,
-    dispatches: profile.renderDispatches,
-    rateUnit: "million RGBA pixels/s",
-  };
-  output.destroy();
-
+function renderWorkload(gpu: Tach, profile: Profile): Workload {
+  const size = profile.renderSize;
+  const count = size * size;
+  const field = gpu.buffer(new Float32Array(count));
+  const fusedOutput = gpu.buffer(new Uint32Array(count));
+  const unfusedOutput = gpu.buffer(new Uint32Array(count));
+  const params: ImageParams = { width: size, height: size, scale: 0, time: 1.7 };
+  const launch = { size: count, repeat: profile.renderIterations };
   return {
-    measured: {
-      gpuResult: result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, null, null,
-        "CPU comparison skipped"),
-      async compare() {
-        const expected = new Uint32Array(pixels);
-        renderSceneCPU(expected, params, 1);
-        const cpuTimes = await measureCPU(profile.samples, () => renderSceneCPU(
-          expected,
-          params,
-          profile.renderDispatches,
-        ));
-        let totalDifference = 0;
-        let maximumDifference = 0;
-        let closePixels = 0;
-        for (let i = 0; i < pixels; i++) {
-          const gpuPixel = actual[i]!;
-          const cpuPixel = expected[i]!;
-          let pixelDifference = 0;
-          for (let shift = 0; shift < 24; shift += 8) {
-            const difference = Math.abs(((gpuPixel >>> shift) & 255) - ((cpuPixel >>> shift) & 255));
-            totalDifference += difference;
-            pixelDifference = Math.max(pixelDifference, difference);
-            maximumDifference = Math.max(maximumDifference, difference);
-          }
-          if (pixelDifference <= 8) closePixels++;
-        }
-        const meanDifference = totalDifference / (pixels * 3);
-        const agreement = closePixels / pixels;
-        return result(identity, profile.samples, pixels * profile.renderDispatches, 1e6, gpuTimes, cpuTimes,
-          meanDifference <= 2 && agreement >= 0.98,
-          `mean RGB error ${meanDifference.toFixed(3)}; ${(agreement * 100).toFixed(3)}% of pixels within 8; maximum ${maximumDifference}`);
-      },
-    },
-    frame: { width, height, pixels: actual },
+    id: "render",
+    name: "Procedural rendering",
+    problem: `${size} × ${size} pixels × ${profile.renderIterations} iterations`,
+    elements: count,
+    iterations: profile.renderIterations,
+    fused: render(fusedOutput, params, { repeat: profile.renderIterations }),
+    unfused: [renderField(field, params, launch), renderColor(field, unfusedOutput, launch)],
+    fusedOutput,
+    unfusedOutput,
+    buffers: [field, fusedOutput, unfusedOutput],
+    cpu: () => renderCPU(params, profile.renderIterations),
+    cpuTolerance: 2,
   };
 }
 
 export async function runBenchmarks(
   gpu: Tach,
-  fast: boolean,
-  compareCPU: boolean,
-  progress: Progress,
-): Promise<BenchmarkRun> {
-  const selected = fast ? quick : full;
-  const workloads = [particles, fractal, matrices, options] as const;
-  const names = ["Particle integration", "Mandelbrot escape", "Tiled matrix multiply", "Black–Scholes pricing"] as const;
-  const measured: MeasuredBenchmark[] = [];
-  const workloadCount = workloads.length + 1;
-  const total = compareCPU ? workloadCount * 2 : workloadCount;
-  for (let index = 0; index < workloads.length; index++) {
-    const workload = workloads[index]!;
-    progress(`WebGPU: ${names[index]}`, index, total);
-    measured.push(await workload(gpu, selected));
-  }
-  progress("WebGPU: Procedural RGBA composition", workloads.length, total);
-  const rendered = await rendering(gpu, selected);
-  measured.push(rendered.measured);
-
+  profileName: BenchmarkProfile,
+  progress: (name: string, index: number) => void,
+): Promise<{ report: BenchmarkReport; frame: RenderedFrame }> {
+  const profile = profiles[profileName];
+  const factories = [particleWorkload, fractalWorkload, matrixWorkload, optionWorkload, renderWorkload] as const;
   const results: BenchmarkResult[] = [];
-  if (compareCPU) {
-    for (let index = 0; index < measured.length; index++) {
-      const benchmark = measured[index]!;
-      progress(`TypeScript: ${benchmark.gpuResult.name}`, workloadCount + index, total);
-      results.push(await benchmark.compare());
-    }
-  } else {
-    results.push(...measured.map((benchmark) => benchmark.gpuResult));
+  let frame: RenderedFrame | undefined;
+  for (let index = 0; index < factories.length; index++) {
+    const workload = factories[index]!(gpu, profile);
+    progress(workload.name, index);
+    const completed = await execute(gpu, profile, workload);
+    results.push(completed.result);
+    if (workload.id === "render") frame = { width: profile.renderSize, height: profile.renderSize, pixels: completed.output as Uint32Array };
   }
-  return { results, frame: rendered.frame };
+  if (frame === undefined) throw new Error("render benchmark did not produce a frame");
+  return { report: { profile: profile.name, results }, frame };
 }

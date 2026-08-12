@@ -7,8 +7,8 @@ import (
 )
 
 type placeInfo struct {
-	ty       *types.Type
-	resource int
+	ty     *types.Type
+	buffer int
 }
 
 type verifyEnv struct {
@@ -47,14 +47,6 @@ func Verify(m *Module) error {
 				return fmt.Errorf("duplicate field %s.%s", s.Name, f.Name)
 			}
 			fn[f.Name] = true
-		}
-	}
-	for i, r := range m.Resources {
-		if r.Name == "" {
-			return fmt.Errorf("resource %d has empty name", i)
-		}
-		if !types.IsHostShareable(r.Type) {
-			return fmt.Errorf("buffer %s type %s is not host-shareable", r.Name, r.Type)
 		}
 	}
 	fmap := map[string]*Function{}
@@ -152,6 +144,10 @@ func verifyUniqueIDs(f *Function) error {
 				if err := walk(x.Body, region+"/loop.body"); err != nil {
 					return err
 				}
+			case *Scope:
+				if err := walk(x.Body, region+"/scope"); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -166,7 +162,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	if f.Return == nil {
 		return fmt.Errorf("missing return type")
 	}
-	if f.Compute {
+	if f.Kind == Stage {
 		if len(f.Indices) < 1 || len(f.Indices) > 3 {
 			return fmt.Errorf("compute function requires 1 to 3 logical indices")
 		}
@@ -178,49 +174,56 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		if f.Return.Kind != types.Void {
 			return fmt.Errorf("compute function must return void")
 		}
-		for _, n := range f.Workgroup {
-			if n == 0 {
-				return fmt.Errorf("workgroup size must be positive")
+		if f.Workgroup.Explicit {
+			for _, n := range f.Workgroup.Size {
+				if n == 0 {
+					return fmt.Errorf("workgroup size must be positive")
+				}
 			}
 		}
 	} else {
+		if f.Kind != Helper {
+			return fmt.Errorf("invalid function kind")
+		}
 		if len(f.Indices) != 0 {
 			return fmt.Errorf("helper function cannot have logical indices")
 		}
 		if len(f.WorkgroupVars) != 0 {
 			return fmt.Errorf("helper function cannot declare workgroup variables")
 		}
-		if len(f.KernelParams) != 0 {
-			return fmt.Errorf("helper function cannot have kernel parameters")
+		if len(f.SourceParams) != 0 || len(f.BufferParams) != 0 {
+			return fmt.Errorf("helper function cannot have stage parameters")
 		}
 	}
 	valueParams := map[ValueID]Param{}
 	for _, p := range f.Params {
 		valueParams[p.ID] = p
-		if f.Compute && !types.IsConstructible(p.Type) {
+		if f.Kind == Stage && !types.IsConstructible(p.Type) {
 			return fmt.Errorf("kernel parameter %s has invalid value type %s", p.Name, p.Type)
 		}
 	}
-	if f.Compute {
+	if f.Kind == Stage {
 		seenNames := map[string]bool{}
 		seenValues := map[ValueID]bool{}
 		seenBuffers := map[int]bool{}
-		for _, p := range f.KernelParams {
+		for _, p := range f.SourceParams {
 			if p.Name == "" || seenNames[p.Name] {
 				return fmt.Errorf("invalid or duplicate kernel parameter name %q", p.Name)
 			}
 			seenNames[p.Name] = true
-			if p.Value != 0 {
+			if p.Kind == SourceValue {
 				value, ok := valueParams[p.Value]
-				if !ok || p.Resource != -1 || seenValues[p.Value] || value.Name != p.Name {
+				if !ok || p.Buffer != -1 || seenValues[p.Value] || value.Name != p.Name {
 					return fmt.Errorf("kernel value parameter %s has invalid mapping", p.Name)
 				}
 				seenValues[p.Value] = true
-			} else {
-				if p.Resource < 0 || p.Resource >= len(m.Resources) || seenBuffers[p.Resource] || m.Resources[p.Resource].Name != p.Name {
-					return fmt.Errorf("kernel buffer parameter %s has invalid resource", p.Name)
+			} else if p.Kind == SourceBuffer {
+				if p.Buffer < 0 || p.Buffer >= len(f.BufferParams) || seenBuffers[p.Buffer] || f.BufferParams[p.Buffer].Name != p.Name {
+					return fmt.Errorf("stage buffer parameter %s has invalid mapping", p.Name)
 				}
-				seenBuffers[p.Resource] = true
+				seenBuffers[p.Buffer] = true
+			} else {
+				return fmt.Errorf("stage parameter %s has invalid kind", p.Name)
 			}
 		}
 		if len(seenBuffers) == 0 {
@@ -231,10 +234,15 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 				return fmt.Errorf("kernel value parameter %s is not mapped", parameter.Name)
 			}
 		}
+		for i, buffer := range f.BufferParams {
+			if buffer.Name == "" || !types.IsHostShareable(buffer.Type) || (buffer.Access != Read && buffer.Access != Mutable) || !seenBuffers[i] {
+				return fmt.Errorf("invalid stage buffer parameter %d", i)
+			}
+		}
 	}
 	wgnames := map[string]bool{}
 	for i, w := range f.WorkgroupVars {
-		if !f.Compute {
+		if f.Kind != Stage {
 			return fmt.Errorf("workgroup variable %d used outside compute function", i)
 		}
 		if w.Name == "" || wgnames[w.Name] {
@@ -262,7 +270,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	if err != nil {
 		return err
 	}
-	if f.Compute {
+	if f.Kind == Stage {
 		if err := verifyUniformity(m, f, fmap); err != nil {
 			return err
 		}
@@ -468,7 +476,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if callee == nil {
 				return e, fmt.Errorf("call to unknown function %s", x.Function)
 			}
-			if callee.Compute {
+			if callee.Kind == Stage {
 				return e, fmt.Errorf("compute entry point %s cannot be called", x.Function)
 			}
 			if len(x.Args) != len(callee.Params) {
@@ -492,18 +500,18 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				}
 			}
 		case *PlaceRoot:
-			if x.Resource < 0 || x.Resource >= len(m.Resources) {
-				return e, fmt.Errorf("invalid resource %d", x.Resource)
+			if x.Buffer < 0 || x.Buffer >= len(f.BufferParams) {
+				return e, fmt.Errorf("invalid buffer %d", x.Buffer)
 			}
-			r := m.Resources[x.Resource]
+			r := f.BufferParams[x.Buffer]
 			if !types.Equal(x.Type, r.Type) {
-				return e, fmt.Errorf("resource place type %s, want %s", x.Type, r.Type)
+				return e, fmt.Errorf("buffer place type %s, want %s", x.Type, r.Type)
 			}
-			if err := defPlace(x.Result, placeInfo{x.Type, x.Resource}); err != nil {
+			if err := defPlace(x.Result, placeInfo{x.Type, x.Buffer}); err != nil {
 				return e, err
 			}
 		case *PlaceWorkgroup:
-			if !f.Compute || x.Workgroup < 0 || x.Workgroup >= len(f.WorkgroupVars) {
+			if f.Kind != Stage || x.Workgroup < 0 || x.Workgroup >= len(f.WorkgroupVars) {
 				return e, fmt.Errorf("invalid workgroup place %d", x.Workgroup)
 			}
 			w := f.WorkgroupVars[x.Workgroup]
@@ -525,7 +533,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !types.Equal(want, x.Type) {
 				return e, fmt.Errorf("field place type %s, want %s", x.Type, want)
 			}
-			if err := defPlace(x.Result, placeInfo{x.Type, bp.resource}); err != nil {
+			if err := defPlace(x.Result, placeInfo{x.Type, bp.buffer}); err != nil {
 				return e, err
 			}
 		case *PlaceIndex:
@@ -546,7 +554,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !types.Equal(x.Type, bp.ty.Elem) {
 				return e, fmt.Errorf("index result %s, want %s", x.Type, bp.ty.Elem)
 			}
-			if err := defPlace(x.Result, placeInfo{x.Type, bp.resource}); err != nil {
+			if err := defPlace(x.Result, placeInfo{x.Type, bp.buffer}); err != nil {
 				return e, err
 			}
 		case *Load:
@@ -578,10 +586,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !types.IsConstructible(p.ty) {
 				return e, fmt.Errorf("place of type %s cannot be stored as a whole value", p.ty)
 			}
-			if p.resource >= 0 {
-				r := m.Resources[p.resource]
+			if p.buffer >= 0 {
+				r := f.BufferParams[p.buffer]
 				if r.Access != Mutable {
-					return e, fmt.Errorf("store through non-writable resource %s", r.Name)
+					return e, fmt.Errorf("store through non-writable buffer %s", r.Name)
 				}
 			}
 		case *Atomic:
@@ -592,8 +600,8 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if p.ty.Kind != types.Atomic || !types.Equal(p.ty.Elem, x.Type) || (x.Type.Kind != types.I32 && x.Type.Kind != types.U32) {
 				return e, fmt.Errorf("atomic operation type %s does not match place %s", x.Type, p.ty)
 			}
-			if p.resource >= 0 && x.Op != AtomicLoad {
-				r := m.Resources[p.resource]
+			if p.buffer >= 0 && x.Op != AtomicLoad {
+				r := f.BufferParams[p.buffer]
 				if r.Access != Mutable {
 					return e, fmt.Errorf("atomic operation through non-writable buffer resource %s", r.Name)
 				}
@@ -635,7 +643,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("unknown atomic operation %d", x.Op)
 			}
 		case *Barrier:
-			if !f.Compute {
+			if f.Kind != Stage {
 				return e, fmt.Errorf("barrier outside compute function")
 			}
 			if x.Kind != BarrierWorkgroup && x.Kind != BarrierBuffer {
@@ -742,6 +750,13 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 					return e, err
 				}
 			}
+		case *Scope:
+			if f.Kind != Stage {
+				return e, fmt.Errorf("scope outside stage")
+			}
+			if _, err := verifyBlock(m, f, x.Body, e.clone(), fmap, "exit_scope"); err != nil {
+				return e, fmt.Errorf("scope: %w", err)
+			}
 		default:
 			return e, fmt.Errorf("unknown instruction %T", in)
 		}
@@ -789,6 +804,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 		}
 	case *Unreachable:
 		// Structured constructs whose every path exits can leave an unreachable merge.
+	case *ExitScope:
+		if termKind != "exit_scope" && termKind != "yield" && termKind != "continue" {
+			return e, fmt.Errorf("exit_scope outside scope")
+		}
 	default:
 		return e, fmt.Errorf("unknown terminator %T", b.Term)
 	}

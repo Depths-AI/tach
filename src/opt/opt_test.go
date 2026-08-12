@@ -24,14 +24,14 @@ export function dead[i](out: buffer<float32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := ir.Dump(m)
+	before := ir.Dump(m.Kernel)
 	if !strings.Contains(before, "intrinsic sin") || !strings.Contains(before, "intrinsic cos") {
 		t.Fatal("test setup produced no dead intrinsic tree")
 	}
-	if err := opt.Run(m); err != nil {
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	after := ir.Dump(m)
+	after := ir.Dump(m.Kernel)
 	if strings.Contains(after, "intrinsic sin") || strings.Contains(after, "intrinsic cos") {
 		t.Fatalf("dead intrinsic tree survived optimization:\n%s", after)
 	}
@@ -52,10 +52,10 @@ export function common[i](out: buffer<uint32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Run(m); err != nil {
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m)
+	dump := ir.Dump(m.Kernel)
 	if got := strings.Count(dump, " = + %1,"); got != 1 {
 		t.Fatalf("repeated index expression was emitted %d times, want one:\n%s", got, dump)
 	}
@@ -84,10 +84,10 @@ export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Run(m); err != nil {
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m)
+	dump := ir.Dump(m.Kernel)
 	if got := strings.Count(dump, "load"); got != 3 {
 		t.Fatalf("got %d loads, want one immutable-buffer and two ordered mutable-buffer loads:\n%s", got, dump)
 	}
@@ -113,10 +113,10 @@ export function dead[i](out: buffer<float32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Run(m); err != nil {
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m)
+	dump := ir.Dump(m.Kernel)
 	for _, dead := range []string{"array.length", "load", "call @square"} {
 		if strings.Contains(dump, dead) {
 			t.Fatalf("dead %s survived:\n%s", dead, dump)
@@ -146,11 +146,11 @@ export function integrate[i](
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Run(m); err != nil {
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m)
-	outer, ok := m.Functions[0].Body.Instrs[len(m.Functions[0].Body.Instrs)-1].(*ir.If)
+	dump := ir.Dump(m.Kernel)
+	outer, ok := m.Kernel.Functions[0].Body.Instrs[len(m.Kernel.Functions[0].Body.Instrs)-1].(*ir.If)
 	if !ok {
 		t.Fatalf("test setup has no bounds guard:\n%s", dump)
 	}
@@ -205,10 +205,10 @@ export function synchronized[i](data: buffer<uint32[]>, steps: uint32) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Run(m); err != nil {
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m)
+	dump := ir.Dump(m.Kernel)
 	loop := strings.Index(dump, "loop params=")
 	if loop < 0 || !strings.Contains(dump[loop:], "store &") {
 		t.Fatalf("synchronized memory update was incorrectly promoted:\n%s", dump)

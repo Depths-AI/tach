@@ -16,25 +16,35 @@ import (
 const validationLayer = "VK_LAYER_KHRONOS_validation"
 
 type moduleMetadata struct {
+	Schema   int                     `json:"schema"`
+	Programs []publicProgramMetadata `json:"programs"`
+	Targets  struct {
+		SPIRV *targetMetadata `json:"spirv"`
+	} `json:"targets"`
 	Resources []resourceMetadata `json:"resources"`
 	Kernels   []kernelMetadata   `json:"kernels"`
 }
 
 type resourceMetadata struct {
-	Name            string `json:"name"`
-	Group           uint32 `json:"group"`
-	Binding         uint32 `json:"binding"`
-	Kind            string `json:"kind"`
-	ByteSize        uint32 `json:"byteSize"`
-	MinimumByteSize uint32 `json:"minimumByteSize"`
+	Name            string     `json:"name"`
+	ByteSize        uint32     `json:"byteSize"`
+	MinimumByteSize uint32     `json:"minimumByteSize"`
+	Runtime         bool       `json:"runtime"`
+	RuntimeOffset   uint32     `json:"runtimeOffset"`
+	RuntimeStride   uint32     `json:"runtimeStride"`
+	Layout          hostLayout `json:"layout"`
+	Group           uint32     `json:"group"`
+	Binding         uint32     `json:"binding"`
+	Kind            string     `json:"kind"`
 }
 
 type kernelMetadata struct {
 	Name           string                    `json:"name"`
 	EntryPoint     string                    `json:"entryPoint"`
 	WorkgroupSize  [3]uint32                 `json:"workgroupSize"`
-	Parameters     []kernelParameterMetadata `json:"parameters"`
+	Bindings       []bindingMetadata         `json:"bindings"`
 	ParameterBlock *parameterBlockMetadata   `json:"parameterBlock"`
+	Parameters     []kernelParameterMetadata `json:"parameters"`
 }
 
 type kernelParameterMetadata struct {
@@ -43,10 +53,92 @@ type kernelParameterMetadata struct {
 	Resource *int   `json:"resource"`
 }
 
+type publicProgramMetadata struct {
+	Name       string                    `json:"name"`
+	Parameters []publicParameterMetadata `json:"parameters"`
+	Resources  []resourceMetadata        `json:"resources"`
+	Launch     *struct {
+		Dimensions int `json:"dimensions"`
+	} `json:"launch"`
+}
+type publicParameterMetadata struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Resource *int   `json:"resource"`
+}
+type bindingMetadata struct {
+	Group           uint32 `json:"group"`
+	Binding         uint32 `json:"binding"`
+	MinimumByteSize uint32 `json:"minimumByteSize"`
+}
+
 type parameterBlockMetadata struct {
-	Group    uint32 `json:"group"`
+	Group    uint32                   `json:"group"`
+	Binding  uint32                   `json:"binding"`
+	ByteSize uint32                   `json:"byteSize"`
+	Fields   []parameterFieldMetadata `json:"fields"`
+}
+type parameterFieldMetadata struct {
+	ByteOffset uint32     `json:"byteOffset"`
+	Layout     hostLayout `json:"layout"`
+}
+type hostLayout struct {
+	Kind   string            `json:"kind"`
+	Size   uint32            `json:"size"`
+	Stride uint32            `json:"stride"`
+	Count  uint32            `json:"count"`
+	Fields []hostLayoutField `json:"fields"`
+}
+type hostLayoutField struct {
+	Name   string     `json:"name"`
+	Offset uint32     `json:"offset"`
+	Type   hostLayout `json:"type"`
+}
+type targetMetadata struct {
+	Kernels  []kernelMetadata      `json:"kernels"`
+	Programs []programPlanMetadata `json:"programs"`
+}
+type programPlanMetadata struct {
+	Program       int                 `json:"program"`
+	Transients    []transientMetadata `json:"transients"`
+	Steps         []stepMetadata      `json:"steps"`
+	RepeatBarrier *stepMetadata       `json:"repeatBarrier"`
+	Repeat        string              `json:"repeat"`
+}
+type transientMetadata struct {
+	Stride          uint32          `json:"stride"`
+	MinimumByteSize uint32          `json:"minimumByteSize"`
+	Length          shapeExpression `json:"length"`
+	Color           int             `json:"color"`
+}
+type stepMetadata struct {
+	Kind       string                   `json:"kind"`
+	Kernel     int                      `json:"kernel"`
+	Domain     []shapeExpression        `json:"domain"`
+	Resources  []resourceSourceMetadata `json:"resources"`
+	Parameters []valueSourceMetadata    `json:"parameters"`
+}
+type resourceSourceMetadata struct {
 	Binding  uint32 `json:"binding"`
-	ByteSize uint32 `json:"byteSize"`
+	Kind     string `json:"kind"`
+	Resource int    `json:"resource"`
+}
+type shapeExpression struct {
+	Op        string           `json:"op"`
+	Value     uint32           `json:"value"`
+	Parameter int              `json:"parameter"`
+	Resource  int              `json:"resource"`
+	Path      []string         `json:"path"`
+	Axis      uint8            `json:"axis"`
+	Left      *shapeExpression `json:"left"`
+	Right     *shapeExpression `json:"right"`
+}
+type valueSourceMetadata struct {
+	Kind       string           `json:"kind"`
+	Parameter  int              `json:"parameter"`
+	Path       []string         `json:"path"`
+	Value      any              `json:"value"`
+	Expression *shapeExpression `json:"expression"`
 }
 
 type adapter struct {
@@ -397,20 +489,6 @@ func containsSoftwareIdentity(name string) bool {
 		}
 	}
 	return false
-}
-
-func (h *vulkanHarness) dispatch(
-	spirv []byte,
-	metadataJSON []byte,
-	kernelName string,
-	buffers map[string][]byte,
-	parameters []byte,
-	invocations [3]uint32,
-) (output map[string][]byte, err error) {
-	mark := h.validationMark()
-	output, err = h.dispatchUnchecked(spirv, metadataJSON, kernelName, buffers, parameters, invocations)
-	err = errors.Join(err, validationError(h.validationSince(mark)))
-	return output, err
 }
 
 func validationError(messages []validationMessage) error {

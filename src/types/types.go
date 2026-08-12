@@ -286,3 +286,7 @@ func IsWorkgroupStorable(t *Type) bool {
 	}
 	return false
 }
+
+func IsTransientElement(t *Type) bool {
+	return t != nil && IsHostShareable(t) && !ContainsRuntimeArray(t) && !ContainsAtomic(t)
+}

@@ -56,8 +56,10 @@ async function loadExamples() {
     const row = document.createElement("tr");
     const cells = [
       entry.name,
-      entry.kernels.join(", "),
-      String(entry.resources),
+			entry.programs.join(", "),
+			String(entry.physicalKernels),
+			String(entry.dispatches),
+			String(entry.transients),
       `${entry.wgslBytes} bytes`,
     ];
     for (const value of cells) {

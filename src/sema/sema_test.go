@@ -22,8 +22,8 @@ func TestParticlesEndToIR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m)
-	for _, want := range []string{"compute @integrate[i=%1]", "place.index", "call @integrateParticle"} {
+	dump := ir.Dump(m.Kernel)
+	for _, want := range []string{"stage @integrate[i=%1]", "place.index", "call @integrateParticle"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("IR missing %q:\n%s", want, dump)
 		}

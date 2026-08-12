@@ -1,0 +1,162 @@
+{
+  "generatedAt": "2026-08-12T03:56:07.834Z",
+  "adapter": "amd · rdna-2",
+  "profile": "gpu-large",
+  "results": [
+    {
+      "id": "particles",
+      "name": "Particle prediction",
+      "problem": "16,000,000 components × 16 iterations",
+      "samples": 5,
+      "logicalStages": 32,
+      "fusedDispatches": 1,
+      "unfusedDispatches": 2,
+      "fusedMs": 12.100000023841858,
+      "unfusedMs": 20.30000001192093,
+      "fusionSpeedup": 1.677685948092709,
+      "fusedSamplesMs": [
+        12.100000023841858,
+        12.799999982118607,
+        12.400000005960464,
+        11.099999994039536,
+        10.600000023841858
+      ],
+      "unfusedSamplesMs": [
+        20.399999976158142,
+        21.100000023841858,
+        20.30000001192093,
+        19.69999998807907,
+        19
+      ],
+      "cpuMs": null,
+      "gpuVsCpu": null,
+      "correct": true,
+      "check": "fused/unfused max error 0",
+      "millionElementsPerSecond": 21157.024751700596
+    },
+    {
+      "id": "fractal",
+      "name": "Fixed-depth fractal",
+      "problem": "3072 × 3072 pixels × 16 orbit steps × 4 iterations",
+      "samples": 5,
+      "logicalStages": 8,
+      "fusedDispatches": 1,
+      "unfusedDispatches": 2,
+      "fusedMs": 21.900000005960464,
+      "unfusedMs": 23,
+      "fusionSpeedup": 1.0502283102164454,
+      "fusedSamplesMs": [
+        21.80000001192093,
+        21.30000001192093,
+        26.80000001192093,
+        21.900000005960464,
+        22.900000005960464
+      ],
+      "unfusedSamplesMs": [
+        23.399999976158142,
+        23,
+        22.099999994039536,
+        23.19999998807907,
+        22.80000001192093
+      ],
+      "cpuMs": null,
+      "gpuVsCpu": null,
+      "correct": true,
+      "check": "fused/unfused max error 0",
+      "millionElementsPerSecond": 1723.6865748733346
+    },
+    {
+      "id": "matrices",
+      "name": "Batched 4 × 4 matrices",
+      "problem": "524,288 products × 8 iterations",
+      "samples": 5,
+      "logicalStages": 16,
+      "fusedDispatches": 1,
+      "unfusedDispatches": 2,
+      "fusedMs": 40.30000001192093,
+      "unfusedMs": 41.39999997615814,
+      "fusionSpeedup": 1.0272952844643133,
+      "fusedSamplesMs": [
+        40.30000001192093,
+        32.80000001192093,
+        41.400000005960464,
+        33.5,
+        41.599999994039536
+      ],
+      "unfusedSamplesMs": [
+        41.900000005960464,
+        41.29999998211861,
+        41.39999997615814,
+        42.10000002384186,
+        40.400000005960464
+      ],
+      "cpuMs": null,
+      "gpuVsCpu": null,
+      "correct": true,
+      "check": "fused/unfused max error 0",
+      "millionElementsPerSecond": 1665.2323568275156
+    },
+    {
+      "id": "options",
+      "name": "Black–Scholes pricing",
+      "problem": "4,194,304 options × 4 iterations",
+      "samples": 5,
+      "logicalStages": 8,
+      "fusedDispatches": 1,
+      "unfusedDispatches": 2,
+      "fusedMs": 16.600000023841858,
+      "unfusedMs": 16.299999982118607,
+      "fusionSpeedup": 0.9819277083558811,
+      "fusedSamplesMs": [
+        16.700000017881393,
+        16.600000023841858,
+        16.599999994039536,
+        16.80000001192093,
+        16.400000005960464
+      ],
+      "unfusedSamplesMs": [
+        16.299999982118607,
+        16,
+        17.19999998807907,
+        15.5,
+        16.5
+      ],
+      "cpuMs": null,
+      "gpuVsCpu": null,
+      "correct": true,
+      "check": "fused/unfused max error 0",
+      "millionElementsPerSecond": 1010.6756611990129
+    },
+    {
+      "id": "render",
+      "name": "Procedural rendering",
+      "problem": "3072 × 3072 pixels × 16 iterations",
+      "samples": 5,
+      "logicalStages": 32,
+      "fusedDispatches": 1,
+      "unfusedDispatches": 2,
+      "fusedMs": 42.599999994039536,
+      "unfusedMs": 42.900000005960464,
+      "fusionSpeedup": 1.0070422538019461,
+      "fusedSamplesMs": [
+        41.400000005960464,
+        42.599999994039536,
+        40.80000001192093,
+        43.599999994039536,
+        42.599999994039536
+      ],
+      "unfusedSamplesMs": [
+        44.599999994039536,
+        41.400000005960464,
+        42.900000005960464,
+        42.900000005960464,
+        43.599999994039536
+      ],
+      "cpuMs": null,
+      "gpuVsCpu": null,
+      "correct": true,
+      "check": "fused/unfused max error 0",
+      "millionElementsPerSecond": 3544.48225401706
+    }
+  ]
+}

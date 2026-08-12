@@ -35,14 +35,18 @@ export default async function buildExamples() {
 
     for (const suffix of artifactSuffixes) await access(join(outputDir, name + suffix), constants.R_OK);
     const metadata = JSON.parse(await readFile(join(outputDir, `${name}.tach.json`), "utf8"));
+		if (metadata.schema !== 1 || !metadata.targets?.web) throw new Error(`${name} has invalid schema-1 Web metadata`);
     const wgsl = await readFile(join(outputDir, `${name}.wgsl`), "utf8");
+		const plans = metadata.targets.web.programs;
     examples.push({
       name,
       source: relative(repositoryRoot, sourcePath).replaceAll("\\", "/"),
       module: `/build/${name}.js`,
       metadata: `/build/${name}.tach.json`,
-      kernels: metadata.kernels.map((kernel) => kernel.name),
-      resources: metadata.resources.length,
+			programs: metadata.programs.map((program) => program.name),
+			physicalKernels: metadata.targets.web.kernels.length,
+			dispatches: plans.reduce((count, plan) => count + plan.steps.filter((step) => step.kind === "dispatch").length, 0),
+			transients: plans.reduce((count, plan) => count + plan.transients.length, 0),
       wgslBytes: Buffer.byteLength(wgsl),
     });
   }
