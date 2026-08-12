@@ -136,10 +136,6 @@ func WriteDirectory(result *Result, dir, base string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(filepath.Join(dir, base+".tach.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-
 	if _, err := ParseBuildTarget(string(result.target)); err != nil {
 		return nil, fmt.Errorf("compilation result has invalid build target %q", result.target)
 	}

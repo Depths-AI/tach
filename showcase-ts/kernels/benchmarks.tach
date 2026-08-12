@@ -38,12 +38,6 @@ export function particleCommit[i](predicted: buffer<float32[]>, output: buffer<f
   output[i] = predicted[i] * 0.99991 + 0.00003;
 }
 
-export function particles(positions: buffer<float32[]>, velocities: buffer<float32[]>, output: buffer<float32[]>, params: ParticleParams) {
-  const predicted = transient<float32>(params.count);
-  run particlePredict(positions, velocities, predicted, params) over params.count;
-  run particleCommit(predicted, output) over params.count;
-}
-
 export function fractalOrbit[i](orbit: buffer<float32[]>, params: ImageParams) {
   const x = i % params.width;
   const y = i / params.width;
@@ -56,12 +50,6 @@ export function fractalColor[i](orbit: buffer<float32[]>, pixels: buffer<uint32[
 	const raw = log2(orbit[i] + 1.0) * 24.0;
 	const value = uint32(raw < 0.0 ? 0.0 : raw > 255.0 ? 255.0 : raw);
   pixels[i] = value | ((value * 3) << 8) | ((255 - value) << 16) | (255 << 24);
-}
-
-export function fractal(pixels: buffer<uint32[]>, params: ImageParams) {
-  const orbit = transient<float32>(params.width * params.height);
-  run fractalOrbit(orbit, params) over params.width * params.height;
-  run fractalColor(orbit, pixels) over params.width * params.height;
 }
 
 export function matrixProduct[i](left: buffer<float32[]>, right: buffer<float32[]>, product: buffer<float32[]>) {
@@ -80,12 +68,6 @@ export function matrixActivate[i](product: buffer<float32[]>, output: buffer<flo
   output[i] = value / (1.0 + abs(value));
 }
 
-export function matrices(left: buffer<float32[]>, right: buffer<float32[]>, output: buffer<float32[]>, params: CountParams) {
-  const product = transient<float32>(params.count);
-  run matrixProduct(left, right, product) over params.count;
-  run matrixActivate(product, output) over params.count;
-}
-
 export function optionPrice[i](prices: buffer<float32[]>, params: CountParams) {
   const spot = 80.0 + float32(i % 400) * 0.1;
   const strike = 90.0 + float32(i % 200) * 0.1;
@@ -99,12 +81,6 @@ export function optionPrice[i](prices: buffer<float32[]>, params: CountParams) {
 export function optionRisk[i](prices: buffer<float32[]>, output: buffer<float32[]>) {
   const price = prices[i];
   output[i] = price + sqrt(abs(price)) * 0.01;
-}
-
-export function options(output: buffer<float32[]>, params: CountParams) {
-  const prices = transient<float32>(params.count);
-  run optionPrice(prices, params) over params.count;
-  run optionRisk(prices, output) over params.count;
 }
 
 export function renderField[i](field: buffer<float32[]>, params: ImageParams) {
@@ -122,10 +98,4 @@ export function renderColor[i](field: buffer<float32[]>, pixels: buffer<uint32[]
   const green = uint32(sqrt(value) * 255.0);
   const blue = uint32((1.0 - value) * 255.0);
   pixels[i] = red | (green << 8) | (blue << 16) | (255 << 24);
-}
-
-export function render(pixels: buffer<uint32[]>, params: ImageParams) {
-  const field = transient<float32>(params.width * params.height);
-  run renderField(field, params) over params.width * params.height;
-  run renderColor(field, pixels) over params.width * params.height;
 }

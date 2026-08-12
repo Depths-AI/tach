@@ -98,42 +98,6 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "fusion", program: "transform",
-			buffers: map[string][]byte{
-				"input":  f32Bytes([]float32{1, 2, 3, 4}),
-				"output": f32Bytes(make([]float32, 4)),
-			},
-			values: map[string]any{"factor": float32(2), "bias": float32(1)},
-			check: func(output map[string][]byte) error {
-				actual, err := readF32(output, "output")
-				if err != nil {
-					return err
-				}
-				for index, expected := range []float32{3, 5, 7, 9} {
-					if actual[index] != expected {
-						return fmt.Errorf("output[%d] = %v, want %v", index, actual[index], expected)
-					}
-				}
-				return nil
-			},
-		},
-		{
-			name: "fusion", program: "neighbor",
-			buffers: map[string][]byte{"values": f32Bytes([]float32{1, 2, 3, 4})},
-			check: func(output map[string][]byte) error {
-				actual, err := readF32(output, "values")
-				if err != nil {
-					return err
-				}
-				for index, expected := range []float32{5, 7, 9, 5} {
-					if actual[index] != expected {
-						return fmt.Errorf("values[%d] = %v, want %v", index, actual[index], expected)
-					}
-				}
-				return nil
-			},
-		},
-		{
 			name: "math", program: "math", launch: invocations(4),
 			buffers: map[string][]byte{"out": f32Bytes(make([]float32, 16))},
 			check: func(output map[string][]byte) error {

@@ -243,8 +243,7 @@ await gpu.submit(step(state, params, {
 ```
 
 Every repetition uses the same buffers, parameter snapshot, and launch size. Use
-separate commands when values differ. Repetition is ordered dispatch, not
-compiler kernel fusion.
+separate commands when values differ.
 
 ## Host data shapes
 
@@ -364,7 +363,7 @@ tach version
 
 Both commands default to `web`. A web build writes `.wgsl`, `.js`, and `.d.ts`;
 `--target spirv` writes only `.spv`; `--target all` writes those artifacts plus
-`.tir`, `.spvasm`, and `.tach.json` diagnostics. Rebuilding the same module
+`.tir` and `.spvasm` diagnostics. Rebuilding the same module
 removes stale Tach artifacts outside the newly selected target.
 
 Published packages support Linux, macOS, and Windows on x64 and arm64. The

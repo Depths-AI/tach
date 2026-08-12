@@ -33,7 +33,7 @@ export function scale[i](data: buffer<float32[]>, factor: float32) {
 
     const spirv = await build(source, { cwd: directory, target: "spirv" });
     assert.equal(spirv.stderr, "");
-		assert.deepEqual((await readdir(join(directory, "build"))).sort(), ["scale.spv", "scale.tach.json"]);
+		assert.deepEqual((await readdir(join(directory, "build"))).sort(), ["scale.spv"]);
 
     const checked = await runCompiler(["check", source], { cwd: directory });
 		assert.match(checked.stdout, /WGSL:.*programs:/su);

@@ -356,10 +356,8 @@ dimensional launch size can be inferred from the first runtime-sized storage
 buffer; otherwise the default is exactly one workgroup. Explicit sizes must
 match the kernel rank and contain positive safe integers.
 
-Batching commands into one pass removes host submission boundaries but does not
-fuse shader bodies. The runtime preserves every dispatch boundary because it
-cannot prove cross-invocation memory independence. True fusion belongs in the
-compiler after Core IR dependence analysis, never in a host option that guesses.
+Batching commands into one pass removes host submission boundaries. The runtime
+preserves every dispatch boundary.
 
 ### Residency and caching
 

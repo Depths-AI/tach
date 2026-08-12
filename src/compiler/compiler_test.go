@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +17,9 @@ func TestBuildTargetsWriteExactArtifacts(t *testing.T) {
 		target BuildTarget
 		files  string
 	}{
-		{TargetAll, "module.d.ts,module.js,module.spv,module.spvasm,module.tach.json,module.tir,module.wgsl"},
+		{TargetAll, "module.d.ts,module.js,module.spv,module.spvasm,module.tir,module.wgsl"},
 		{TargetWeb, "module.d.ts,module.js,module.wgsl"},
-		{TargetSPIRV, "module.spv,module.tach.json"},
+		{TargetSPIRV, "module.spv"},
 	}
 	for _, test := range tests {
 		directory := t.TempDir()
@@ -69,49 +68,6 @@ func TestBaselineSugarProducesPublicProgramAndPrivateEntry(t *testing.T) {
 	}
 	if strings.Contains(result.WGSL, "fn scale") || !strings.Contains(result.TypeScript, "LaunchOptions<number>") {
 		t.Fatalf("public/physical ABI mismatch:\n%s\n%s", result.WGSL, result.TypeScript)
-	}
-}
-
-func TestFusionCorpusPlans(t *testing.T) {
-	result, err := CompileFile(filepath.Join("..", "..", "examples", "fusion.tach"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var metadata struct {
-		Schema  int `json:"schema"`
-		Targets struct {
-			Web struct {
-				Programs []struct {
-					Transients []any `json:"transients"`
-					Steps      []struct {
-						Kind string `json:"kind"`
-					} `json:"steps"`
-				} `json:"programs"`
-			} `json:"web"`
-			SPIRV struct {
-				Programs []struct {
-					Steps []struct {
-						Kind string `json:"kind"`
-					} `json:"steps"`
-				} `json:"programs"`
-			} `json:"spirv"`
-		} `json:"targets"`
-	}
-	if err := json.Unmarshal(result.Metadata, &metadata); err != nil {
-		t.Fatal(err)
-	}
-	if metadata.Schema != 1 || len(metadata.Targets.Web.Programs) != 2 {
-		t.Fatalf("metadata = %s", result.Metadata)
-	}
-	if got := len(metadata.Targets.Web.Programs[0].Steps); got != 1 || len(metadata.Targets.Web.Programs[0].Transients) != 0 {
-		t.Fatalf("fused plan = %#v", metadata.Targets.Web.Programs[0])
-	}
-	if got := len(metadata.Targets.Web.Programs[1].Steps); got != 2 {
-		t.Fatalf("web fallback steps = %d", got)
-	}
-	steps := metadata.Targets.SPIRV.Programs[1].Steps
-	if len(steps) != 3 || steps[1].Kind != "barrier" {
-		t.Fatalf("SPIR-V fallback steps = %#v", steps)
 	}
 }
 

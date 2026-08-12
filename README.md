@@ -231,7 +231,6 @@ The complete `all` artifact set is:
 | `.spvasm` | diagnostic disassembly of the emitted SPIR-V bytes |
 | `.js` | generated command constructors |
 | `.d.ts` | generated TypeScript object types and function signatures |
-| `.tach.json` | diagnostic reflection for buffers, values, layouts, entry points, and launches |
 
 The useful CLI commands are:
 

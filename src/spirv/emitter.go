@@ -1193,13 +1193,15 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 }
 
 func (s *fnEmitter) emitScope(scope *ir.Scope) error {
-	body, merge := s.b.id(), s.b.id()
-	condition, err := s.b.constant(types.TBool, "true")
+	header, body, cont, merge := s.b.id(), s.b.id(), s.b.id(), s.b.id()
+	again, err := s.b.constant(types.TBool, "false")
 	if err != nil {
 		return err
 	}
-	emit(&s.b.functions, OpSelectionMerge, merge, SelectionControlNone)
-	emit(&s.b.functions, OpBranchConditional, condition, body, merge)
+	emit(&s.b.functions, OpBranch, header)
+	emit(&s.b.functions, OpLabel, header)
+	emit(&s.b.functions, OpLoopMerge, merge, cont, LoopControlNone)
+	emit(&s.b.functions, OpBranch, body)
 	s.terminated = true
 	emit(&s.b.functions, OpLabel, body)
 	s.currentLabel, s.terminated = body, false
@@ -1210,9 +1212,11 @@ func (s *fnEmitter) emitScope(scope *ir.Scope) error {
 		return err
 	}
 	if exit.falls {
-		emit(&s.b.functions, OpBranch, merge)
+		emit(&s.b.functions, OpBranch, cont)
 		s.terminated = true
 	}
+	emit(&s.b.functions, OpLabel, cont)
+	emit(&s.b.functions, OpBranchConditional, again, header, merge)
 	emit(&s.b.functions, OpLabel, merge)
 	s.currentLabel, s.terminated = merge, false
 	return nil

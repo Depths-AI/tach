@@ -1,8 +1,6 @@
 package spirvtest
 
 import (
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -21,8 +19,6 @@ type moduleMetadata struct {
 	Targets  struct {
 		SPIRV *targetMetadata `json:"spirv"`
 	} `json:"targets"`
-	Resources []resourceMetadata `json:"resources"`
-	Kernels   []kernelMetadata   `json:"kernels"`
 }
 
 type resourceMetadata struct {
@@ -33,24 +29,13 @@ type resourceMetadata struct {
 	RuntimeOffset   uint32     `json:"runtimeOffset"`
 	RuntimeStride   uint32     `json:"runtimeStride"`
 	Layout          hostLayout `json:"layout"`
-	Group           uint32     `json:"group"`
-	Binding         uint32     `json:"binding"`
-	Kind            string     `json:"kind"`
 }
 
 type kernelMetadata struct {
-	Name           string                    `json:"name"`
-	EntryPoint     string                    `json:"entryPoint"`
-	WorkgroupSize  [3]uint32                 `json:"workgroupSize"`
-	Bindings       []bindingMetadata         `json:"bindings"`
-	ParameterBlock *parameterBlockMetadata   `json:"parameterBlock"`
-	Parameters     []kernelParameterMetadata `json:"parameters"`
-}
-
-type kernelParameterMetadata struct {
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Resource *int   `json:"resource"`
+	EntryPoint     string                  `json:"entryPoint"`
+	WorkgroupSize  [3]uint32               `json:"workgroupSize"`
+	Bindings       []bindingMetadata       `json:"bindings"`
+	ParameterBlock *parameterBlockMetadata `json:"parameterBlock"`
 }
 
 type publicProgramMetadata struct {
@@ -508,325 +493,14 @@ func validationError(messages []validationMessage) error {
 	return fmt.Errorf("Vulkan validation: %s", strings.Join(lines, "\n"))
 }
 
-func (h *vulkanHarness) dispatchUnchecked(
-	spirv []byte,
-	metadataJSON []byte,
-	kernelName string,
-	buffers map[string][]byte,
-	parameters []byte,
-	invocations [3]uint32,
-) (map[string][]byte, error) {
-	if len(spirv) < 20 || len(spirv)%4 != 0 {
-		return nil, fmt.Errorf("invalid SPIR-V byte length %d", len(spirv))
-	}
-	var metadata moduleMetadata
-	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-		return nil, fmt.Errorf("decode Tach metadata: %w", err)
-	}
-	var kernel *kernelMetadata
-	for i := range metadata.Kernels {
-		if metadata.Kernels[i].Name == kernelName {
-			kernel = &metadata.Kernels[i]
-			break
-		}
-	}
-	if kernel == nil {
-		return nil, fmt.Errorf("kernel %q is absent from metadata", kernelName)
-	}
-	for axis, count := range invocations {
-		if count == 0 {
-			return nil, fmt.Errorf("invocation axis %d is zero", axis)
-		}
-		if kernel.WorkgroupSize[axis] == 0 {
-			return nil, fmt.Errorf("workgroup axis %d is zero", axis)
-		}
-	}
-
-	type boundResource struct {
-		name     string
-		data     []byte
-		readback bool
-		metadata resourceMetadata
-		buffer   vk.Buffer
-		memory   vk.DeviceMemory
-		size     vk.DeviceSize
-		coherent bool
-	}
-	bound := make([]boundResource, 0, len(kernel.Parameters)+1)
-	destroyBound := func() {
-		for _, resource := range bound {
-			vk.DestroyBuffer(h.device, resource.buffer, nil)
-			vk.FreeMemory(h.device, resource.memory, nil)
-		}
-	}
-	defer destroyBound()
-	for _, parameter := range kernel.Parameters {
-		if parameter.Kind == "value" {
-			continue
-		}
-		if parameter.Kind != "buffer" || parameter.Resource == nil || *parameter.Resource < 0 || *parameter.Resource >= len(metadata.Resources) {
-			return nil, fmt.Errorf("kernel buffer %s has invalid metadata", parameter.Name)
-		}
-		resource := metadata.Resources[*parameter.Resource]
-		data, ok := buffers[parameter.Name]
-		if !ok {
-			return nil, fmt.Errorf("kernel buffer %s has no test data", parameter.Name)
-		}
-		if len(data) < int(resource.MinimumByteSize) {
-			return nil, fmt.Errorf("kernel buffer %s has %d bytes, needs at least %d", parameter.Name, len(data), resource.MinimumByteSize)
-		}
-		if resource.ByteSize != 0 && len(data) != int(resource.ByteSize) {
-			return nil, fmt.Errorf("kernel buffer %s has %d bytes, needs exactly %d", parameter.Name, len(data), resource.ByteSize)
-		}
-		buffer, memory, allocationSize, coherent, err := h.createBuffer(resource.Kind, data)
-		if err != nil {
-			return nil, fmt.Errorf("buffer %s: %w", parameter.Name, err)
-		}
-		bound = append(bound, boundResource{
-			name: parameter.Name, data: data, readback: true,
-			metadata: resource, buffer: buffer, memory: memory, size: allocationSize, coherent: coherent,
-		})
-	}
-	if len(buffers) != len(bound) {
-		return nil, fmt.Errorf("kernel %s received %d buffer inputs, want %d", kernel.Name, len(buffers), len(bound))
-	}
-	if kernel.ParameterBlock == nil {
-		if len(parameters) != 0 {
-			return nil, fmt.Errorf("kernel %s has no parameter block", kernel.Name)
-		}
-	} else {
-		if len(parameters) != int(kernel.ParameterBlock.ByteSize) {
-			return nil, fmt.Errorf("kernel %s parameter block has %d bytes, needs %d", kernel.Name, len(parameters), kernel.ParameterBlock.ByteSize)
-		}
-		parameterMetadata := resourceMetadata{
-			Name: "parameters", Group: kernel.ParameterBlock.Group, Binding: kernel.ParameterBlock.Binding,
-			Kind: "uniform", ByteSize: kernel.ParameterBlock.ByteSize, MinimumByteSize: kernel.ParameterBlock.ByteSize,
-		}
-		buffer, memory, allocationSize, coherent, err := h.createBuffer(parameterMetadata.Kind, parameters)
-		if err != nil {
-			return nil, fmt.Errorf("parameter block: %w", err)
-		}
-		bound = append(bound, boundResource{
-			name: "parameters", data: parameters, metadata: parameterMetadata,
-			buffer: buffer, memory: memory, size: allocationSize, coherent: coherent,
-		})
-	}
-	setBindings := map[uint32][]vk.DescriptorSetLayoutBinding{}
-	var maxSet uint32
-	for _, resource := range bound {
-		descriptorType, err := descriptorType(resource.metadata.Kind)
-		if err != nil {
-			return nil, err
-		}
-		setBindings[resource.metadata.Group] = append(setBindings[resource.metadata.Group], vk.DescriptorSetLayoutBinding{
-			Binding: resource.metadata.Binding, DescriptorType: descriptorType,
-			DescriptorCount: 1, StageFlags: vk.ShaderStageFlags(vk.ShaderStageComputeBit),
-		})
-		if resource.metadata.Group > maxSet {
-			maxSet = resource.metadata.Group
-		}
-	}
-	setLayouts := make([]vk.DescriptorSetLayout, maxSet+1)
-	for group := range setLayouts {
-		bindings := setBindings[uint32(group)]
-		sort.Slice(bindings, func(i, j int) bool { return bindings[i].Binding < bindings[j].Binding })
-		info := vk.DescriptorSetLayoutCreateInfo{
-			SType: vk.StructureTypeDescriptorSetLayoutCreateInfo, BindingCount: uint32(len(bindings)), PBindings: bindings,
-		}
-		if err := result("create descriptor set layout", vk.CreateDescriptorSetLayout(h.device, &info, nil, &setLayouts[group])); err != nil {
-			for i := 0; i < group; i++ {
-				vk.DestroyDescriptorSetLayout(h.device, setLayouts[i], nil)
-			}
-			return nil, err
-		}
-	}
-	defer func() {
-		for _, layout := range setLayouts {
-			vk.DestroyDescriptorSetLayout(h.device, layout, nil)
-		}
-	}()
-
-	poolCounts := map[vk.DescriptorType]uint32{}
-	for _, resource := range bound {
-		typeName, _ := descriptorType(resource.metadata.Kind)
-		poolCounts[typeName]++
-	}
-	poolSizes := make([]vk.DescriptorPoolSize, 0, len(poolCounts))
-	for typeName, count := range poolCounts {
-		poolSizes = append(poolSizes, vk.DescriptorPoolSize{Type: typeName, DescriptorCount: count})
-	}
-	descriptorPoolInfo := vk.DescriptorPoolCreateInfo{
-		SType: vk.StructureTypeDescriptorPoolCreateInfo, MaxSets: uint32(len(setLayouts)),
-		PoolSizeCount: uint32(len(poolSizes)), PPoolSizes: poolSizes,
-	}
-	var descriptorPool vk.DescriptorPool
-	if err := result("create descriptor pool", vk.CreateDescriptorPool(h.device, &descriptorPoolInfo, nil, &descriptorPool)); err != nil {
-		return nil, err
-	}
-	defer vk.DestroyDescriptorPool(h.device, descriptorPool, nil)
-
-	descriptorSets := make([]vk.DescriptorSet, len(setLayouts))
-	for i, layout := range setLayouts {
-		allocateInfo := vk.DescriptorSetAllocateInfo{
-			SType: vk.StructureTypeDescriptorSetAllocateInfo, DescriptorPool: descriptorPool,
-			DescriptorSetCount: 1, PSetLayouts: []vk.DescriptorSetLayout{layout},
-		}
-		if err := result("allocate descriptor set", vk.AllocateDescriptorSets(h.device, &allocateInfo, &descriptorSets[i])); err != nil {
-			return nil, err
-		}
-	}
-	writes := make([]vk.WriteDescriptorSet, len(bound))
-	for i, resource := range bound {
-		typeName, _ := descriptorType(resource.metadata.Kind)
-		writes[i] = vk.WriteDescriptorSet{
-			SType: vk.StructureTypeWriteDescriptorSet, DstSet: descriptorSets[resource.metadata.Group],
-			DstBinding: resource.metadata.Binding, DescriptorCount: 1, DescriptorType: typeName,
-			PBufferInfo: []vk.DescriptorBufferInfo{{Buffer: resource.buffer, Range: vk.DeviceSize(len(resource.data))}},
-		}
-	}
-	vk.UpdateDescriptorSets(h.device, uint32(len(writes)), writes, 0, nil)
-
-	words := make([]uint32, len(spirv)/4)
-	for i := range words {
-		words[i] = binary.LittleEndian.Uint32(spirv[i*4:])
-	}
-	shaderInfo := vk.ShaderModuleCreateInfo{
-		SType: vk.StructureTypeShaderModuleCreateInfo, CodeSize: uint64(len(spirv)), PCode: words,
-	}
-	var shader vk.ShaderModule
-	if err := result("create SPIR-V shader module", vk.CreateShaderModule(h.device, &shaderInfo, nil, &shader)); err != nil {
-		return nil, err
-	}
-	defer vk.DestroyShaderModule(h.device, shader, nil)
-
-	pipelineLayoutInfo := vk.PipelineLayoutCreateInfo{
-		SType:          vk.StructureTypePipelineLayoutCreateInfo,
-		SetLayoutCount: uint32(len(setLayouts)), PSetLayouts: setLayouts,
-	}
-	var pipelineLayout vk.PipelineLayout
-	if err := result("create pipeline layout", vk.CreatePipelineLayout(h.device, &pipelineLayoutInfo, nil, &pipelineLayout)); err != nil {
-		return nil, err
-	}
-	defer vk.DestroyPipelineLayout(h.device, pipelineLayout, nil)
-
-	pipelineInfo := vk.ComputePipelineCreateInfo{
-		SType: vk.StructureTypeComputePipelineCreateInfo,
-		Stage: vk.PipelineShaderStageCreateInfo{
-			SType: vk.StructureTypePipelineShaderStageCreateInfo,
-			Stage: vk.ShaderStageComputeBit, Module: shader, PName: kernel.EntryPoint + "\x00",
-		},
-		Layout: pipelineLayout,
-	}
-	pipelines := make([]vk.Pipeline, 1)
-	var noCache vk.PipelineCache
-	if err := result("create compute pipeline", vk.CreateComputePipelines(
-		h.device, noCache, 1, []vk.ComputePipelineCreateInfo{pipelineInfo}, nil, pipelines,
-	)); err != nil {
-		return nil, err
-	}
-	pipeline := pipelines[0]
-	defer vk.DestroyPipeline(h.device, pipeline, nil)
-
-	commandPoolInfo := vk.CommandPoolCreateInfo{
-		SType: vk.StructureTypeCommandPoolCreateInfo,
-		Flags: vk.CommandPoolCreateFlags(vk.CommandPoolCreateTransientBit), QueueFamilyIndex: h.queueFamily,
-	}
-	var commandPool vk.CommandPool
-	if err := result("create command pool", vk.CreateCommandPool(h.device, &commandPoolInfo, nil, &commandPool)); err != nil {
-		return nil, err
-	}
-	defer vk.DestroyCommandPool(h.device, commandPool, nil)
-
-	commandBuffers := make([]vk.CommandBuffer, 1)
-	commandBufferInfo := vk.CommandBufferAllocateInfo{
-		SType: vk.StructureTypeCommandBufferAllocateInfo, CommandPool: commandPool,
-		Level: vk.CommandBufferLevelPrimary, CommandBufferCount: 1,
-	}
-	if err := result("allocate command buffer", vk.AllocateCommandBuffers(h.device, &commandBufferInfo, commandBuffers)); err != nil {
-		return nil, err
-	}
-	commandBuffer := commandBuffers[0]
-	beginInfo := vk.CommandBufferBeginInfo{
-		SType: vk.StructureTypeCommandBufferBeginInfo,
-		Flags: vk.CommandBufferUsageFlags(vk.CommandBufferUsageOneTimeSubmitBit),
-	}
-	if err := result("begin command buffer", vk.BeginCommandBuffer(commandBuffer, &beginInfo)); err != nil {
-		return nil, err
-	}
-	vk.CmdBindPipeline(commandBuffer, vk.PipelineBindPointCompute, pipeline)
-	vk.CmdBindDescriptorSets(
-		commandBuffer, vk.PipelineBindPointCompute, pipelineLayout, 0,
-		uint32(len(descriptorSets)), descriptorSets, 0, nil,
-	)
-	groups := [3]uint32{}
-	for axis := range groups {
-		groups[axis] = 1 + (invocations[axis]-1)/kernel.WorkgroupSize[axis]
-	}
-	vk.CmdDispatch(commandBuffer, groups[0], groups[1], groups[2])
-	if err := result("end command buffer", vk.EndCommandBuffer(commandBuffer)); err != nil {
-		return nil, err
-	}
-
-	fenceInfo := vk.FenceCreateInfo{SType: vk.StructureTypeFenceCreateInfo}
-	var fence vk.Fence
-	if err := result("create dispatch fence", vk.CreateFence(h.device, &fenceInfo, nil, &fence)); err != nil {
-		return nil, err
-	}
-	defer vk.DestroyFence(h.device, fence, nil)
-	submit := vk.SubmitInfo{
-		SType: vk.StructureTypeSubmitInfo, CommandBufferCount: 1,
-		PCommandBuffers: []vk.CommandBuffer{commandBuffer},
-	}
-	if err := result("submit compute work", vk.QueueSubmit(h.queue, 1, []vk.SubmitInfo{submit}, fence)); err != nil {
-		return nil, err
-	}
-	if err := result("wait for compute work", vk.WaitForFences(h.device, 1, []vk.Fence{fence}, vk.True, vk.MaxUint64)); err != nil {
-		return nil, err
-	}
-
-	output := make(map[string][]byte, len(buffers))
-	for _, resource := range bound {
-		if !resource.readback {
-			continue
-		}
-		data := make([]byte, len(resource.data))
-		var mapped unsafe.Pointer
-		if err := result("map result buffer", vk.MapMemory(h.device, resource.memory, 0, resource.size, 0, &mapped)); err != nil {
-			return nil, err
-		}
-		if !resource.coherent {
-			rangeInfo := vk.MappedMemoryRange{
-				SType:  vk.StructureTypeMappedMemoryRange,
-				Memory: resource.memory, Offset: 0, Size: vk.DeviceSize(vk.WholeSize),
-			}
-			if err := result("invalidate result buffer", vk.InvalidateMappedMemoryRanges(
-				h.device, 1, []vk.MappedMemoryRange{rangeInfo},
-			)); err != nil {
-				vk.UnmapMemory(h.device, resource.memory)
-				return nil, err
-			}
-		}
-		copy(data, unsafe.Slice((*byte)(mapped), len(data)))
-		vk.UnmapMemory(h.device, resource.memory)
-		output[resource.name] = data
-	}
-	return output, nil
-}
-
-func (h *vulkanHarness) createBuffer(
-	kind string,
-	data []byte,
-) (vk.Buffer, vk.DeviceMemory, vk.DeviceSize, bool, error) {
+func (h *vulkanHarness) createBuffer(kind string, data []byte) (vk.Buffer, vk.DeviceMemory, vk.DeviceSize, bool, error) {
 	usage := vk.BufferUsageFlags(vk.BufferUsageStorageBufferBit)
 	if kind == "uniform" {
 		usage = vk.BufferUsageFlags(vk.BufferUsageUniformBufferBit)
 	} else if kind != "storage" {
 		return vk.NullBuffer, vk.NullDeviceMemory, 0, false, fmt.Errorf("unknown resource kind %q", kind)
 	}
-	info := vk.BufferCreateInfo{
-		SType: vk.StructureTypeBufferCreateInfo, Size: vk.DeviceSize(len(data)),
-		Usage: usage, SharingMode: vk.SharingModeExclusive,
-	}
+	info := vk.BufferCreateInfo{SType: vk.StructureTypeBufferCreateInfo, Size: vk.DeviceSize(len(data)), Usage: usage, SharingMode: vk.SharingModeExclusive}
 	var buffer vk.Buffer
 	if err := result("create buffer", vk.CreateBuffer(h.device, &info, nil, &buffer)); err != nil {
 		return vk.NullBuffer, vk.NullDeviceMemory, 0, false, err
@@ -834,25 +508,16 @@ func (h *vulkanHarness) createBuffer(
 	var requirements vk.MemoryRequirements
 	vk.GetBufferMemoryRequirements(h.device, buffer, &requirements)
 	requirements.Deref()
-	memoryType, coherent := vk.FindMemoryTypeIndex(
-		h.physical,
-		requirements.MemoryTypeBits,
-		vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit,
-	)
+	memoryType, coherent := vk.FindMemoryTypeIndex(h.physical, requirements.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
 	if !coherent {
 		var ok bool
-		memoryType, ok = vk.FindMemoryTypeIndex(
-			h.physical, requirements.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit,
-		)
+		memoryType, ok = vk.FindMemoryTypeIndex(h.physical, requirements.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit)
 		if !ok {
 			vk.DestroyBuffer(h.device, buffer, nil)
 			return vk.NullBuffer, vk.NullDeviceMemory, 0, false, errors.New("no host-visible Vulkan memory type")
 		}
 	}
-	allocateInfo := vk.MemoryAllocateInfo{
-		SType:          vk.StructureTypeMemoryAllocateInfo,
-		AllocationSize: requirements.Size, MemoryTypeIndex: memoryType,
-	}
+	allocateInfo := vk.MemoryAllocateInfo{SType: vk.StructureTypeMemoryAllocateInfo, AllocationSize: requirements.Size, MemoryTypeIndex: memoryType}
 	var memory vk.DeviceMemory
 	if err := result("allocate buffer memory", vk.AllocateMemory(h.device, &allocateInfo, nil, &memory)); err != nil {
 		vk.DestroyBuffer(h.device, buffer, nil)
@@ -871,13 +536,8 @@ func (h *vulkanHarness) createBuffer(
 	}
 	copy(unsafe.Slice((*byte)(mapped), len(data)), data)
 	if !coherent {
-		rangeInfo := vk.MappedMemoryRange{
-			SType:  vk.StructureTypeMappedMemoryRange,
-			Memory: memory, Offset: 0, Size: vk.DeviceSize(vk.WholeSize),
-		}
-		if err := result("flush input buffer", vk.FlushMappedMemoryRanges(
-			h.device, 1, []vk.MappedMemoryRange{rangeInfo},
-		)); err != nil {
+		rangeInfo := vk.MappedMemoryRange{SType: vk.StructureTypeMappedMemoryRange, Memory: memory, Size: vk.DeviceSize(vk.WholeSize)}
+		if err := result("flush input buffer", vk.FlushMappedMemoryRanges(h.device, 1, []vk.MappedMemoryRange{rangeInfo})); err != nil {
 			vk.UnmapMemory(h.device, memory)
 			vk.DestroyBuffer(h.device, buffer, nil)
 			vk.FreeMemory(h.device, memory, nil)
@@ -886,17 +546,6 @@ func (h *vulkanHarness) createBuffer(
 	}
 	vk.UnmapMemory(h.device, memory)
 	return buffer, memory, requirements.Size, coherent, nil
-}
-
-func descriptorType(kind string) (vk.DescriptorType, error) {
-	switch kind {
-	case "storage":
-		return vk.DescriptorTypeStorageBuffer, nil
-	case "uniform":
-		return vk.DescriptorTypeUniformBuffer, nil
-	default:
-		return 0, fmt.Errorf("unknown resource kind %q", kind)
-	}
 }
 
 func result(operation string, value vk.Result) error {

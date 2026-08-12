@@ -7,7 +7,7 @@ import { build } from "@depths/tach/compiler";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(projectRoot, "kernels", "benchmarks.tach");
-const result = await build(source, { cwd: projectRoot, target: "all" });
+const result = await build(source, { cwd: projectRoot });
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 

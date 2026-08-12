@@ -74,7 +74,7 @@ The full profile runs:
 
 | Workload | Timed batch |
 | --- | --- |
-| Particle integration | 1,048,576 scalar components, 128 fused steps in 1 dispatch |
+| Particle integration | 1,048,576 scalar components, 128 steps |
 | Mandelbrot escape | 768 x 768 pixels, limit 192, 4 dispatches |
 | Tiled matrix multiply | 256 x 256 matrices, 4 dispatches |
 | Black-Scholes pricing | 1,048,576 options, 8 dispatches |

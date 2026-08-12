@@ -8,7 +8,6 @@ import (
 	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/layout"
-	"tach/src/opt"
 	"tach/src/types"
 )
 
@@ -26,16 +25,10 @@ type Profile struct {
 	MaxStorageBindings int
 	MaxUniformBytes    uint32
 	MaxSharedBytes     uint32
-	MaxInstructions    int
-	MaxLiveValues      int
-	DispatchBenefit    int
-	TransientBenefit   int
-	CloneCost          int
-	LiveCost           int
 }
 
-var WebProfile = Profile{Target: Web, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024, MaxInstructions: 4096, MaxLiveValues: 1024, DispatchBenefit: 128, TransientBenefit: 4, CloneCost: 2, LiveCost: 1}
-var SPIRVProfile = Profile{Target: SPIRV, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024, MaxInstructions: 4096, MaxLiveValues: 1024, DispatchBenefit: 160, TransientBenefit: 5, CloneCost: 2, LiveCost: 1}
+var WebProfile = Profile{Target: Web, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024}
+var SPIRVProfile = Profile{Target: SPIRV, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024}
 
 type StorageBinding struct {
 	Buffer          int
@@ -128,9 +121,6 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 		return nil, fmt.Errorf("invalid target profile %q", profile.Target)
 	}
 	cloned := flow.Clone(logical)
-	if err := opt.Fuse(cloned, opt.FusionPolicy{Target: true, MaxInstructions: profile.MaxInstructions, MaxLiveValues: profile.MaxLiveValues, MaxBindings: profile.MaxStorageBindings, DispatchBenefit: profile.DispatchBenefit, TransientBenefit: profile.TransientBenefit, CloneCost: profile.CloneCost, LiveCost: profile.LiveCost}); err != nil {
-		return nil, err
-	}
 	executable := &Executable{Target: profile.Target, Logical: cloned, KernelModule: &ir.Module{Structs: append([]*types.Type(nil), cloned.Kernel.Structs...)}}
 	for _, function := range cloned.Kernel.Functions {
 		if function.Kind == ir.Helper {

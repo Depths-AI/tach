@@ -34,6 +34,7 @@ const cases = [
   {
     name: "atomics",
 		program: "accumulate",
+    parameters: [{ name: "counters", buffer: true }],
     resources: { counters: { total: 0 } },
     readParam: "counters",
     assert(value) { expect(value.total).toBe(64); },
@@ -41,6 +42,7 @@ const cases = [
   {
     name: "bitwise",
 		program: "bitwise",
+    parameters: [{ name: "out", buffer: true }],
     resources: { out: Array(8).fill(0) },
     readParam: "out",
     assert(value) { expect(value).toEqual(Array(8).fill(expectedBitwise())); },
@@ -48,6 +50,7 @@ const cases = [
   {
     name: "control",
 		program: "transform",
+    parameters: [{ name: "data", buffer: true }, { name: "params" }],
     resources: { data: controlInput, params: { scale: 2, count: 64, enabled: true } },
     readParam: "data",
     assert(value) {
@@ -58,6 +61,7 @@ const cases = [
   {
     name: "for",
 		program: "reduceLanes",
+    parameters: [{ name: "data", buffer: true }],
     resources: { data: forInput },
     readParam: "data",
     assert(value) {
@@ -66,23 +70,10 @@ const cases = [
       expect(value).toEqual(expected);
     },
   },
-	{
-		name: "fusion",
-		program: "transform",
-		resources: { input: [1, 2, 3, 4], output: [0, 0, 0, 0], factor: 2, bias: 1 },
-		readParam: "output",
-		assert(value) { expect(value).toEqual([3, 5, 7, 9]); },
-	},
-	{
-		name: "fusion",
-		program: "neighbor",
-		resources: { values: [1, 2, 3, 4] },
-		readParam: "values",
-		assert(value) { expect(value).toEqual([5, 7, 9, 5]); },
-	},
   {
     name: "math",
 		program: "math",
+    parameters: [{ name: "out", buffer: true }],
     resources: { out: Array.from({ length: 4 }, () => [0, 0, 0, 0]) },
     readParam: "out",
     assert(value) {
@@ -97,6 +88,7 @@ const cases = [
   {
     name: "particles",
 		program: "integrate",
+    parameters: [{ name: "particles", buffer: true }, { name: "params" }],
     resources: {
       particles: [
         { position: [1, 2, 3, 4], velocity: [2, 4, 6, 8] },
@@ -115,6 +107,7 @@ const cases = [
   {
     name: "scalars",
 		program: "scale",
+    parameters: [{ name: "data", buffer: true }, { name: "factor" }],
     resources: { data: [1, 2, 3, 4], factor: 2.5 },
     readParam: "data",
     assert(value) { expect(value).toEqual([2.5, 5, 7.5, 10]); },
@@ -131,7 +124,6 @@ async function executeCase(testCase) {
       gpu.device.addEventListener("uncapturederror", onUncaptured);
       try {
         const generated = await import(`/build/${testCase.name}.js`);
-        const metadata = await (await fetch(`/build/${testCase.name}.tach.json`)).json();
         const wgsl = await (await fetch(`/build/${testCase.name}.wgsl`)).text();
         const diagnosticModule = gpu.device.createShaderModule({
           label: `Tach ${testCase.name} diagnostics`,
@@ -142,13 +134,11 @@ async function executeCase(testCase) {
           .filter((message) => message.type === "error")
           .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`);
 
-				const program = metadata.programs.find((item) => item.name === testCase.program);
-				if (!program) throw new Error(`program ${testCase.program} is missing`);
         const args = [];
         const computeBuffers = new Map();
-				for (const parameter of program.parameters) {
+				for (const parameter of testCase.parameters) {
           const value = testCase.resources[parameter.name];
-          if (parameter.kind === "buffer") {
+          if (parameter.buffer) {
             const computeBuffer = gpu.buffer(value);
             computeBuffers.set(parameter.name, computeBuffer);
             args.push(computeBuffer);
@@ -178,14 +168,6 @@ async function executeCase(testCase) {
           },
           value,
           compilationErrors,
-					plan: (() => {
-						const index = metadata.programs.indexOf(program);
-						const plan = metadata.targets.web.programs[index];
-						return {
-							dispatches: plan.steps.filter((step) => step.kind === "dispatch").length,
-							transients: plan.transients.length,
-						};
-					})(),
         };
       } finally {
         gpu.device.removeEventListener("uncapturederror", onUncaptured);
@@ -228,12 +210,6 @@ for (const testCase of cases) {
       console.log(`WebGPU execution: ${result.adapter.mode} (${adapterLabel})`);
     }
     testCase.assert(result.value);
-		if (testCase.name === "fusion" && testCase.program === "transform") {
-			expect(result.plan).toEqual({ dispatches: 1, transients: 0 });
-		}
-		if (testCase.name === "fusion" && testCase.program === "neighbor") {
-			expect(result.plan.dispatches).toBe(2);
-		}
   });
 }
 

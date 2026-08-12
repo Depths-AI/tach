@@ -23,7 +23,6 @@ type programArguments struct {
 type allocatedBuffer struct {
 	name     string
 	data     []byte
-	readback bool
 	buffer   vk.Buffer
 	memory   vk.DeviceMemory
 	size     vk.DeviceSize
@@ -109,7 +108,7 @@ func (h *vulkanHarness) executeProgramUnchecked(spirv, metadataJSON []byte, name
 		if len(data) < int(resource.MinimumByteSize) || resource.ByteSize != 0 && len(data) != int(resource.ByteSize) {
 			return nil, fmt.Errorf("program buffer %s has invalid byte length %d", parameter.Name, len(data))
 		}
-		allocation, err := h.allocate(parameter.Name, "storage", data, true)
+		allocation, err := h.allocate(parameter.Name, "storage", data)
 		if err != nil {
 			return nil, err
 		}
@@ -132,7 +131,7 @@ func (h *vulkanHarness) executeProgramUnchecked(spirv, metadataJSON []byte, name
 		colorBytes[transient.Color] = max(colorBytes[transient.Color], transientBytes[index])
 	}
 	for color, byteSize := range colorBytes {
-		allocation, err := h.allocate(fmt.Sprintf("scratch %d", color), "storage", make([]byte, byteSize), false)
+		allocation, err := h.allocate(fmt.Sprintf("scratch %d", color), "storage", make([]byte, byteSize))
 		if err != nil {
 			return nil, err
 		}
@@ -247,7 +246,7 @@ func (h *vulkanHarness) executeProgramUnchecked(spirv, metadataJSON []byte, name
 			if err != nil {
 				return nil, err
 			}
-			allocation, err := h.allocate(fmt.Sprintf("parameters %d", stepIndex), "uniform", bytes, false)
+			allocation, err := h.allocate(fmt.Sprintf("parameters %d", stepIndex), "uniform", bytes)
 			if err != nil {
 				return nil, err
 			}
@@ -329,12 +328,12 @@ func (h *vulkanHarness) executeProgramUnchecked(spirv, metadataJSON []byte, name
 	return output, nil
 }
 
-func (h *vulkanHarness) allocate(name, kind string, data []byte, readback bool) (*allocatedBuffer, error) {
+func (h *vulkanHarness) allocate(name, kind string, data []byte) (*allocatedBuffer, error) {
 	buffer, memory, size, coherent, err := h.createBuffer(kind, data)
 	if err != nil {
 		return nil, fmt.Errorf("buffer %s: %w", name, err)
 	}
-	return &allocatedBuffer{name: name, data: data, readback: readback, buffer: buffer, memory: memory, size: size, coherent: coherent}, nil
+	return &allocatedBuffer{name: name, data: data, buffer: buffer, memory: memory, size: size, coherent: coherent}, nil
 }
 
 func (h *vulkanHarness) readAllocation(allocation *allocatedBuffer) ([]byte, error) {

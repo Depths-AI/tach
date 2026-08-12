@@ -265,11 +265,10 @@ Tach's binary validator checks both directions: descriptor-reachable physical
 types must carry the expected layout, while logical and Workgroup-reachable
 types must not be contaminated by host-layout decorations.
 
-## 9. Reflection metadata
+## 9. Generated-module metadata
 
-An `all` build writes `<module>.tach.json`; web builds keep the same reflection
-inside their generated JavaScript instead of writing a separate file. The
-JSON artifact's exact top-level shape is:
+Web builds embed the execution plan inside generated JavaScript. Its exact
+top-level shape is:
 
 ```ts
 interface Metadata {
@@ -574,7 +573,7 @@ synchronization boundary rather than being silently discarded.
 ## 16. Native Vulkan caller obligations
 
 The TypeScript runtime enforces the WebGPU side automatically. A native
-consumer of `.spv` and `.tach.json` must perform the equivalent work:
+consumer of the compiler API's SPIR-V and execution plan must perform the equivalent work:
 
 1. create descriptor bindings at set `0` and the recorded module binding
    numbers used by the selected kernel;

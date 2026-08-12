@@ -67,7 +67,7 @@ func TestGenerateBaselineProgram(t *testing.T) {
 	}
 }
 
-func TestGenerateOrchestrationUsesCommandOptionsAndEliminatesTransient(t *testing.T) {
+func TestGenerateOrchestrationUsesCommandOptions(t *testing.T) {
 	artifacts, metadata := generateSource(t, `
 function copy[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i]; }
 function twice[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i] * 2.0; }
@@ -78,7 +78,7 @@ export function transform(input: buffer<float32[]>, output: buffer<float32[]>) {
   run twice(temporary, output) over count;
 }`, false)
 	plan := metadata.Targets.Web.Programs[0]
-	if len(plan.Steps) != 1 || len(plan.Transients) != 0 {
+	if len(plan.Steps) != 2 || len(plan.Transients) != 1 {
 		t.Fatalf("plan = %#v", plan)
 	}
 	if !strings.Contains(artifacts.Declarations, "$options?: CommandOptions") {

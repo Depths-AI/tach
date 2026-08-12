@@ -17,9 +17,6 @@ func OptimizeLogical(logical *flow.Module) error {
 	if err := OptimizeKernel(logical.Kernel); err != nil {
 		return err
 	}
-	if err := Fuse(logical, PortablePolicy()); err != nil {
-		return err
-	}
 	return flow.Verify(logical)
 }
 
