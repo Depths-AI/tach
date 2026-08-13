@@ -10,9 +10,10 @@
     "showcase-ts"
   ],
   "scripts": {
+    "check:duplicates": "node dupl.mjs",
     "compiler": "go build -o dist/ .",
     "build": "npm run compiler && npm run build -w @depths/tach && npm run build -w @tach/showcase-ts",
-    "check": "npm run compiler && npm run build -w @depths/tach && npm run check -w @tach/showcase-ts",
+    "check": "npm run check:duplicates && npm run compiler && npm run build -w @depths/tach && npm run check -w @tach/showcase-ts",
     "test:spirv": "go test -count=1 -v ./spirv-test",
     "test": "npm run compiler && npm test -w @depths/tach && npm test -w @tach/browser-test && npm test -w @tach/showcase-ts"
   },

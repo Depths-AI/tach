@@ -116,6 +116,27 @@ type Executable struct {
 	Programs        []ProgramPlan
 }
 
+func (e *Executable) IndexFunctions() (map[*ir.Function]*Coordinates, map[*ir.Function]*PhysicalKernel, error) {
+	coordinates := map[*ir.Function]*Coordinates{}
+	kernels := map[*ir.Function]*PhysicalKernel{}
+	for i := range e.PhysicalKernels {
+		kernel := &e.PhysicalKernels[i]
+		coordinates[kernel.Function] = kernel.Coordinates
+		kernels[kernel.Function] = kernel
+	}
+	for _, function := range e.KernelModule.Functions {
+		if coordinates[function] != nil {
+			continue
+		}
+		lowered, err := LowerCoordinates(function)
+		if err != nil {
+			return nil, nil, err
+		}
+		coordinates[function] = lowered
+	}
+	return coordinates, kernels, nil
+}
+
 func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 	if profile.Target != Web && profile.Target != SPIRV {
 		return nil, fmt.Errorf("invalid target profile %q", profile.Target)

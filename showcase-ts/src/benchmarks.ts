@@ -8,10 +8,11 @@ import {
   optionRisk,
   particleCommit,
   particlePredict,
-  renderColor,
-  renderField,
+  meshFrame,
+  proceduralFrame,
   type CountParams,
   type ImageParams,
+  type MeshParams,
   type ParticleParams,
 } from "../build/benchmarks.js";
 
@@ -24,7 +25,7 @@ export interface BenchmarkResult {
   readonly problem: string;
   readonly samples: number;
   readonly logicalStages: number;
-  readonly dispatches: 2;
+  readonly dispatches: number;
   readonly gpuMs: number;
   readonly gpuSamplesMs: readonly number[];
   readonly cpuMs: number | null;
@@ -32,6 +33,7 @@ export interface BenchmarkResult {
   readonly correct: boolean;
   readonly check: string;
   readonly millionElementsPerSecond: number;
+  readonly framesPerSecond: number | null;
 }
 
 export interface BenchmarkReport {
@@ -51,8 +53,11 @@ interface Profile {
   readonly matrixIterations: number;
   readonly optionCount: number;
   readonly optionIterations: number;
-  readonly renderSize: number;
-  readonly renderIterations: number;
+  readonly visualWidth: number;
+  readonly visualHeight: number;
+  readonly meshColumns: number;
+  readonly meshRows: number;
+  readonly meshLayers: number;
 }
 
 const profiles: Record<BenchmarkProfile, Profile> = {
@@ -60,7 +65,7 @@ const profiles: Record<BenchmarkProfile, Profile> = {
     name: "gpu-large",
     samples: 5,
     cpu: false,
-	particleCount: 16_000_000,
+    particleCount: 16_000_000,
     particleIterations: 16,
     fractalSize: 3072,
     fractalIterations: 4,
@@ -68,8 +73,11 @@ const profiles: Record<BenchmarkProfile, Profile> = {
     matrixIterations: 8,
     optionCount: 1 << 22,
     optionIterations: 4,
-    renderSize: 3072,
-    renderIterations: 16,
+    visualWidth: 1920,
+    visualHeight: 1080,
+    meshColumns: 256,
+    meshRows: 144,
+    meshLayers: 4,
   },
   "gpu-cpu-medium": {
     name: "gpu-cpu-medium",
@@ -83,8 +91,11 @@ const profiles: Record<BenchmarkProfile, Profile> = {
     matrixIterations: 2,
     optionCount: 1 << 18,
     optionIterations: 1,
-    renderSize: 1024,
-    renderIterations: 4,
+    visualWidth: 960,
+    visualHeight: 540,
+    meshColumns: 160,
+    meshRows: 90,
+    meshLayers: 2,
   },
 };
 
@@ -94,10 +105,14 @@ interface Workload {
   readonly problem: string;
   readonly elements: number;
   readonly iterations: number;
-  readonly commands: readonly [ComputeCommand, ComputeCommand];
+  readonly stages?: number;
+  readonly dispatches?: number;
+  readonly commands: readonly [ComputeCommand, ...ComputeCommand[]];
   readonly output: ComputeBuffer<NumericArray>;
   readonly buffers: readonly ComputeBuffer<unknown>[];
   readonly cpu?: () => NumericArray;
+  readonly validate?: (output: NumericArray) => string | null;
+  readonly visual?: "procedural" | "mesh";
   readonly cpuTolerance: number;
 }
 
@@ -106,8 +121,8 @@ function median(values: readonly number[]): number {
   return sorted[Math.floor(sorted.length / 2)]!;
 }
 
-async function complete(gpu: Tach, first: ComputeCommand, second?: ComputeCommand): Promise<void> {
-  await (second === undefined ? gpu.submit(first) : gpu.submit(first, second));
+async function complete(gpu: Tach, commands: readonly [ComputeCommand, ...ComputeCommand[]]): Promise<void> {
+  await gpu.submit(...commands);
   await gpu.idle();
 }
 
@@ -149,9 +164,29 @@ function maxDifference(left: NumericArray, right: NumericArray): number {
   return maximum;
 }
 
+function renderVisual(id: "procedural" | "mesh", width: number, height: number, pixels: Uint32Array): void {
+  const bytes = new Uint8ClampedArray(pixels.length * 4);
+  for (let i = 0; i < pixels.length; i++) {
+    const pixel = pixels[i]!;
+    const offset = i * 4;
+    bytes[offset] = pixel & 255;
+    bytes[offset + 1] = (pixel >>> 8) & 255;
+    bytes[offset + 2] = (pixel >>> 16) & 255;
+    bytes[offset + 3] = pixel >>> 24;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.id = `preview-${id}`;
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (context === null) throw new Error("2D canvas is unavailable for visual capture");
+  context.putImageData(new ImageData(bytes, width, height), 0, 0);
+  document.body.append(canvas);
+}
+
 async function execute(gpu: Tach, profile: Profile, workload: Workload): Promise<BenchmarkResult> {
   try {
-    const samples = await measureGPU(profile.samples, () => complete(gpu, ...workload.commands));
+    const samples = await measureGPU(profile.samples, () => complete(gpu, workload.commands));
     const gpuMs = median(samples);
     const output = await workload.output.read();
     let cpuMs: number | null = null;
@@ -160,21 +195,24 @@ async function execute(gpu: Tach, profile: Profile, workload: Workload): Promise
       cpuMs = measureCPU(profile.samples, workload.cpu);
       cpuError = maxDifference(output, workload.cpu());
     }
-    const correct = cpuError === null || cpuError <= workload.cpuTolerance;
+    const validation = cpuError === null ? workload.validate?.(output) ?? null : null;
+    const correct = cpuError === null ? validation === null : cpuError <= workload.cpuTolerance;
+    if (workload.visual !== undefined && output instanceof Uint32Array) renderVisual(workload.visual, profile.visualWidth, profile.visualHeight, output);
     return {
         id: workload.id,
         name: workload.name,
         problem: workload.problem,
         samples: profile.samples,
-        logicalStages: workload.iterations * 2,
-        dispatches: 2,
+        logicalStages: workload.iterations * (workload.stages ?? 2),
+        dispatches: workload.dispatches ?? 2,
         gpuMs,
         gpuSamplesMs: samples,
         cpuMs,
         gpuVsCpu: cpuMs === null ? null : cpuMs / gpuMs,
         correct,
-        check: cpuError === null ? "completed" : `CPU max error ${cpuError}`,
+        check: cpuError === null ? validation ?? (workload.validate === undefined ? "completed" : "GPU frame validated") : `CPU max error ${cpuError}`,
         millionElementsPerSecond: workload.elements * workload.iterations / (gpuMs / 1000) / 1e6,
+        framesPerSecond: workload.visual === undefined ? null : 1000 / gpuMs,
     };
   } finally {
     for (const buffer of workload.buffers) buffer.destroy();
@@ -352,44 +390,102 @@ function optionWorkload(gpu: Tach, profile: Profile): Workload {
   };
 }
 
-function renderCPU(params: ImageParams, iterations: number): Uint32Array {
-  const output = new Uint32Array(params.width * params.height);
-  for (let repeat = 0; repeat < iterations; repeat++) {
-    for (let y = 0; y < params.height; y++) {
-      const v = (y + 0.5) / params.height - 0.5;
-      for (let x = 0; x < params.width; x++) {
-        const u = (x + 0.5) / params.width - 0.5;
-        const wave = Math.sin(u * 31 + params.time) * Math.cos(v * 23 - params.time);
-        const field = Math.exp(-Math.sqrt(u * u + v * v) * 4) + wave * 0.35;
-        const value = Math.min(1, Math.max(0, field * 0.5 + 0.5));
-        const red = Math.trunc(value * 255);
-        const green = Math.trunc(Math.sqrt(value) * 255);
-        const blue = Math.trunc((1 - value) * 255);
-        output[y * params.width + x] = (red | (green << 8) | (blue << 16) | (255 << 24)) >>> 0;
+function validateVisual(output: NumericArray): string | null {
+  if (!(output instanceof Uint32Array)) return "visual output is not packed RGBA8";
+  const samples = Math.min(output.length, 4096);
+  const stride = Math.max(1, Math.trunc(output.length / samples));
+  const first = output[0]!;
+  let different = 0;
+  for (let i = 0; i < output.length; i += stride) {
+    const pixel = output[i]!;
+    if ((pixel >>> 24) !== 255) return `pixel ${i} is not opaque`;
+    if (pixel !== first) different++;
+  }
+  return different < samples / 16 ? "visual output lacks scene variation" : null;
+}
+
+function proceduralWorkload(gpu: Tach, profile: Profile): Workload {
+  const count = profile.visualWidth * profile.visualHeight;
+  const output = gpu.buffer(new Uint32Array(count));
+  const params: ImageParams = { width: profile.visualWidth, height: profile.visualHeight, scale: 0, time: 1.7 };
+  return {
+    id: "procedural",
+    name: "Procedural scene",
+    problem: `${profile.visualWidth} × ${profile.visualHeight} pixels, up to 64 signed-distance steps`,
+    elements: count,
+    iterations: 1,
+    commands: [proceduralFrame(output, params)],
+    output,
+    buffers: [output],
+    validate: validateVisual,
+    visual: "procedural",
+    cpuTolerance: 0,
+  };
+}
+
+function createMesh(columns: number, rows: number, layers: number): { vertices: Float32Array; indices: Uint32Array } {
+  const layerVertices = (columns + 1) * (rows + 1);
+  const vertices = new Float32Array(layerVertices * layers * 4);
+  const indices = new Uint32Array(columns * rows * layers * 6);
+  let vertex = 0;
+  for (let layer = 0; layer < layers; layer++) {
+    for (let y = 0; y <= rows; y++) {
+      const ny = 1 - y / rows * 2;
+      for (let x = 0; x <= columns; x++) {
+        const nx = x / columns * 2 - 1;
+        const depth = 2.1 + layer * 0.52 + Math.sin(nx * 6.1 + layer) * Math.cos(ny * 4.7 - layer) * 0.14;
+        vertices[vertex++] = nx * depth * 0.92;
+        vertices[vertex++] = ny * depth * 0.92;
+        vertices[vertex++] = depth;
+        vertices[vertex++] = layer;
       }
     }
   }
-  return output;
+  let index = 0;
+  for (let layer = 0; layer < layers; layer++) {
+    const base = layer * layerVertices;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < columns; x++) {
+        const a = base + y * (columns + 1) + x;
+        const b = a + 1;
+        const c = a + columns + 1;
+        const d = c + 1;
+        indices[index++] = a;
+        indices[index++] = b;
+        indices[index++] = c;
+        indices[index++] = b;
+        indices[index++] = d;
+        indices[index++] = c;
+      }
+    }
+  }
+  return { vertices, indices };
 }
 
-function renderWorkload(gpu: Tach, profile: Profile): Workload {
-  const size = profile.renderSize;
-  const count = size * size;
-  const field = gpu.buffer(new Float32Array(count));
+function meshWorkload(gpu: Tach, profile: Profile): Workload {
+  const count = profile.visualWidth * profile.visualHeight;
+  const mesh = createMesh(profile.meshColumns, profile.meshRows, profile.meshLayers);
+  const triangles = mesh.indices.length / 3;
+  if (triangles >= 0x000f_ffff) throw new RangeError("mesh benchmark exceeds packed triangle identifier capacity");
+  const vertices = gpu.buffer(mesh.vertices);
+  const indices = gpu.buffer(mesh.indices);
+  const visibility = gpu.buffer(new Uint32Array(count));
   const output = gpu.buffer(new Uint32Array(count));
-  const params: ImageParams = { width: size, height: size, scale: 0, time: 1.7 };
-  const launch = { size: count, repeat: profile.renderIterations };
+  const params: MeshParams = { width: profile.visualWidth, height: profile.visualHeight, time: 1.7 };
   return {
-    id: "render",
-    name: "Procedural rendering",
-    problem: `${size} × ${size} pixels × ${profile.renderIterations} iterations`,
-    elements: count,
-    iterations: profile.renderIterations,
-    commands: [renderField(field, params, launch), renderColor(field, output, launch)],
+    id: "mesh",
+    name: "Triangle-mesh software rendering",
+    problem: `${profile.visualWidth} × ${profile.visualHeight} pixels, ${triangles.toLocaleString()} triangles, ${profile.meshLayers} depth layers`,
+    elements: triangles,
+    iterations: 1,
+    stages: 4,
+    dispatches: 4,
+    commands: [meshFrame(vertices, indices, visibility, output, params)],
     output,
-    buffers: [field, output],
-    cpu: () => renderCPU(params, profile.renderIterations),
-    cpuTolerance: 2,
+    buffers: [vertices, indices, visibility, output],
+    validate: validateVisual,
+    visual: "mesh",
+    cpuTolerance: 0,
   };
 }
 
@@ -399,7 +495,7 @@ export async function runBenchmarks(
   progress: (name: string, index: number) => void,
 ): Promise<BenchmarkReport> {
   const profile = profiles[profileName];
-  const factories = [particleWorkload, fractalWorkload, matrixWorkload, optionWorkload, renderWorkload] as const;
+  const factories = [particleWorkload, fractalWorkload, matrixWorkload, optionWorkload, proceduralWorkload, meshWorkload] as const;
   const results: BenchmarkResult[] = [];
   for (let index = 0; index < factories.length; index++) {
     const workload = factories[index]!(gpu, profile);

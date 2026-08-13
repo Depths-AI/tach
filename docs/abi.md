@@ -1,377 +1,63 @@
-# Tach buffer, parameter, host, and runtime ABI
+# Tach program, memory, and runtime ABI
 
-Tach owns one external contract across source kernels, WGSL/WebGPU,
-SPIR-V/Vulkan, generated JavaScript/TypeScript, and reflection metadata. This
-document defines buffer and parameter identity, names, bytes, launches, host values,
-lifetime, synchronization, and errors.
+Tach owns one external contract across source programs, generated
+JavaScript/TypeScript, WebGPU/WGSL, Vulkan/SPIR-V, and reflection metadata.
+This document defines names, resource identity, bytes, physical dispatch
+plans, launch geometry, lifetime, and synchronization.
 
-The source language is described in [the language reference](language.md).
-Core IR and optimization are described in [the IR reference](ir.md).
+Application code normally consumes generated modules and `@depths/tach`; it
+does not implement this ABI. Native runtimes and compiler contributors need
+the complete contract.
 
-Normal TypeScript applications do not implement this contract: generated
-modules and `@depths/tach` do it. Read the early sections when debugging data
-shape or launch size. Read the complete document when building another host
-runtime or consuming SPIR-V directly.
+See [the language guide](language.md) for source semantics and
+[the IR guide](ir.md) for logical programs, kernel templates, and executable
+plans.
 
-## 1. What the ABI covers
+## 1. Three connected boundaries
 
-The ABI has five connected parts:
-
-1. **Buffer ABI:** which `buffer<T>` parameter maps to which storage binding.
-2. **Parameter ABI:** how all plain values become one internal block per kernel.
-3. **Memory ABI:** how a logical Tach value occupies host-visible bytes.
-4. **Launch ABI:** how logical extents become workgroup counts.
-5. **Runtime ABI:** how generated commands, buffers, sessions, synchronization,
-   and failures behave in TypeScript.
-
-All five are compiler-owned. Tach source contains no descriptor coordinates,
-padding fields, byte offsets, target address spaces, or WebGPU lifecycle code.
-
-## 2. Public names
-
-An exported kernel keeps its source name everywhere:
+The ABI separates three identities that a one-function example can make look
+the same:
 
 ```text
-Tach kernel       integrate
-WGSL entry point  integrate
-SPIR-V entry      integrate
-metadata name     integrate
-JavaScript export integrate
-TypeScript export integrate
+public program       host-callable generated function
+logical stage        indexed portable GPU operation
+physical kernel      target entry created for one dispatch
 ```
 
-Generated host-visible type, kernel, and parameter names must be portable
-ASCII JavaScript/TypeScript identifiers and must not conflict with reserved
-generated names or language keywords. Semantic source identifiers may use
-Unicode where no generated public identifier is required.
-
-Only compiler-private shader symbols are mangled. Applications must not depend
-on private names.
-
-## 3. Buffers, values, and bindings
-
-Every `buffer<T>` parameter becomes one module buffer in deterministic
-declaration traversal order. Plain parameters remain logical values in Core IR.
-A kernel records its original positional parameter list and maps each entry to
-either a module buffer or a value ID.
-
-For module buffer index `N`, both current targets use:
-
-```text
-WGSL       @group(0) @binding(N)
-SPIR-V     DescriptorSet 0, Binding N
-metadata   group: 0, binding: N
-```
-
-The index is global to the compiled module, not restarted for each kernel.
-Source cannot override these coordinates.
-
-Each module buffer records:
-
-```text
-name
-logical type
-inferred access
-module index
-physical host layout
-```
-
-`buffer<T>` becomes a storage binding. Tach infers read-only versus mutable
-access from stores and atomic operations. A type containing an atomic is
-physically `read_write` even if source only calls `atomicLoad`, because the
-target storage class must admit atomic access.
-
-The generated WebGPU bind-group layout uses `read-only-storage` or `storage`
-from that proven result. SPIR-V variables and decorations describe the same
-buffer contract.
-
-### Non-aliasing
-
-Different buffer parameters of one kernel are distinct, non-aliasing memory
-objects. This is a language and ABI rule, not an optimizer guess.
-
-The TypeScript runtime rejects one `ComputeBuffer` passed to two parameters of
-the same generated command. Native Vulkan callers must enforce the same rule.
-An in-place algorithm should declare one buffer parameter and read/write
-through that parameter.
-
-## 4. Canonical host layout
-
-Tach logical types never acquire artificial padding fields. `src/layout`
-computes a separate physical layout with 32-bit checked size arithmetic.
-
-### Scalars and vectors
-
-| Tach type | Byte size | Byte alignment |
-|---|---:|---:|
-| `int32` | 4 | 4 |
-| `uint32` | 4 | 4 |
-| `float32` | 4 | 4 |
-| `atomic<int32>` | 4 | 4 |
-| `atomic<uint32>` | 4 | 4 |
-| `int32x2`, `uint32x2`, `float32x2` | 8 | 8 |
-| `int32x3`, `uint32x3`, `float32x3` | 12 | 16 |
-| `int32x4`, `uint32x4`, `float32x4` | 16 | 16 |
-
-`bool` has no direct storage-buffer representation. It is valid in ordinary
-kernel values; the parameter planner represents each bool leaf as a private
-`uint32` field containing `0` or `1`.
-
-### Structs
-
-Struct alignment is at least 16 bytes. Each field begins at the next multiple
-of its required alignment. A nested struct is placed and reserved at a
-16-byte-aligned extent. A fixed-size struct's total size is rounded up to its
-alignment.
-
-For example:
+For baseline shorthand:
 
 ```tach
-type Particle = {
-  position: float32x3,
-  mass: float32,
-  velocity: float32x3,
-};
-```
-
-has this layout:
-
-```text
-offset  0..11   position
-offset 12..15   mass
-offset 16..27   velocity
-offset 28..31   trailing padding
-
-alignment 16
-byte size 32
-```
-
-Field order is therefore semantically visible to the byte ABI even though a
-source struct literal may list fields in any order.
-
-### Fixed arrays
-
-For an element with size `S` and alignment `A`:
-
-```text
-array stride = roundUp(A, S)
-array size   = stride * element count
-array align  = A
-```
-
-Fixed arrays are part of the layout engine and are currently admitted to
-shared memory, not host parameters.
-
-### Runtime arrays and tails
-
-A direct runtime array `T[]` has no fixed byte size. Its alignment is the
-element alignment and its stride is `roundUp(elementAlignment, elementSize)`.
-
-A struct may contain one runtime array as its final field. The struct's
-`byteSize` is then the fixed prefix ending at the runtime-tail offset; actual
-resource size is:
-
-```text
-runtimeOffset + elementCount * runtimeStride
-```
-
-For example:
-
-```tach
-type Samples = {
-  count: uint32,
-  values: float32[],
-};
-```
-
-has a 16-byte alignment, a four-byte fixed prefix, runtime offset `4`, and
-runtime stride `4`. A resource must contain at least one complete runtime
-element, so its minimum binding size is `8` bytes.
-
-## 5. Buffer binding size
-
-Fixed-size buffers are physically wrapped so the binding occupies:
-
-```text
-roundUp(16, logical layout size)
-```
-
-Consequently `buffer<float32>` has logical size/alignment `4/4` but a physical
-`byteSize` and `minimumByteSize` of `16`. The wrapper does not change the
-logical value type used by loads, helpers, or optimization.
-
-Runtime resources are not rounded to a fixed 16-byte wrapper. Their minimum is
-one element:
-
-```text
-minimumByteSize = runtimeOffset + runtimeStride
-```
-
-Actual materialized buffers can contain more whole elements. Partial elements
-and zero-element runtime buffers are rejected by the managed runtime.
-
-## 6. One parameter block per kernel
-
-After Core IR optimization, `src/abi` plans the physical representation of all
-plain parameters of each kernel. It walks value parameters in source order and
-struct fields in declaration order, flattening every numeric, vector, or bool
-leaf into one private struct. Numeric leaves keep their type; bool leaves use a
-physical `uint32`. The normal layout engine supplies the exact offsets and
-rounds the completed struct to 16-byte alignment.
-
-For a kernel with module buffers and parameter blocks already assigned, the
-next block receives the next group/set `0` binding. A kernel with no plain
-values has no block. A block may contain at most 16 KiB, the limit guaranteed
-by Vulkan core and WebGPU compatibility mode.
-
-The planner is shared. WGSL, SPIR-V, public metadata, generated JavaScript, the
-WebGPU packer, and the Vulkan harness all consume its offsets. Core IR still
-contains the original logical values; no physical field, padding byte, binding,
-or bool encoding enters Tach semantics.
-
-## 7. Physical representation in WGSL
-
-The WGSL backend emits group `0` storage bindings at each module buffer index.
-Fixed-size buffers use compiler-private wrappers with a 16-byte-aligned first
-field so WebGPU observes the Tach binding size. Runtime arrays keep the natural
-Tach stride. A kernel parameter block is emitted as a compiler-private block in
-WGSL's `uniform` address space, then reconstructed into logical values at entry.
-
-Storage access is emitted as read-only or read-write from semantic inference.
-Entry-point parameter inputs are limited to the coordinates the lowered kernel
-actually uses.
-
-The runtime uses compiler metadata for `minBindingSize` and packing. It never
-parses WGSL to infer a layout.
-
-## 8. Physical representation in SPIR-V
-
-The SPIR-V backend decorates every host-visible buffer and parameter-block
-variable with descriptor set `0` and its planned binding. Descriptor-reachable
-structs and arrays receive the exact Tach member offsets and array strides.
-
-There are two intentionally separate representations:
-
-```text
-logical representation    SSA values, helper values, Workgroup memory
-physical representation   parameter-block and StorageBuffer memory
-```
-
-Logical aggregates are undecorated. Host-visible aggregates carry ABI
-decorations. Aggregate loads and stores cross the boundary field by field, so
-padding bytes never appear as logical members.
-
-Tach's binary validator checks both directions: descriptor-reachable physical
-types must carry the expected layout, while logical and Workgroup-reachable
-types must not be contaminated by host-layout decorations.
-
-## 9. Generated-module metadata
-
-Web builds embed the execution plan inside generated JavaScript. Its exact
-top-level shape is:
-
-```ts
-interface Metadata {
-  types: Array<{
-    name: string;
-    fields: Array<{
-      name: string;
-      type: string;
-    }>;
-  }>;
-  resources: Array<{
-    name: string;
-    group: number;
-    binding: number;
-    kind: "storage";
-    access: "read" | "read_write";
-    type: string;
-    byteSize?: number;
-    alignment: number;
-    runtime: boolean;
-    runtimeOffset?: number;
-    runtimeStride?: number;
-    minimumByteSize: number;
-  }>;
-  kernels: Array<{
-    name: string;
-    entryPoint: string;
-    dimensions: number;
-    workgroupSize: [number, number, number];
-    parameters: Array<{
-      name: string;
-      kind: "buffer" | "value";
-      type: string;
-      resource?: number;
-    }>;
-    parameterBlock?: {
-      group: number;
-      binding: number;
-      byteSize: number;
-      fields: Array<{
-        parameter: number;
-        path: string[];
-        type: string;
-        byteOffset: number;
-      }>;
-    };
-  }>;
+export function scale[i](values: buffer<float32[]>, factor: float32) {
+  if (i < values.length) {
+    values[i] *= factor;
+  }
 }
 ```
 
-Zero-valued optional numeric fields are omitted by JSON encoding. For the
-`scale` kernel in the project README, metadata is:
+`scale` is both the source stage name and public program name, but its emitted
+shader entry is private, currently `_tach_k0`. A multi-stage public program has
+several private physical entries. Host code must execute the generated plan;
+it must not infer a shader entry from the public name.
 
-```json
-{
-  "types": [],
-  "resources": [
-    {
-      "name": "values",
-      "group": 0,
-      "binding": 0,
-      "kind": "storage",
-      "access": "read_write",
-      "type": "float32[]",
-      "alignment": 4,
-      "runtime": true,
-      "runtimeStride": 4,
-      "minimumByteSize": 4
-    }
-  ],
-  "kernels": [
-    {
-      "name": "scale",
-      "entryPoint": "scale",
-      "dimensions": 1,
-      "workgroupSize": [256, 1, 1],
-      "parameters": [
-        { "name": "values", "kind": "buffer", "type": "float32[]", "resource": 0 },
-        { "name": "factor", "kind": "value", "type": "float32" }
-      ],
-      "parameterBlock": {
-        "group": 0,
-        "binding": 1,
-        "byteSize": 16,
-        "fields": [
-          { "parameter": 1, "path": [], "type": "float32", "byteOffset": 0 }
-        ]
-      }
-    }
-  ]
-}
-```
+The contract has six parts:
 
-Metadata is deliberately plain and unversioned while Tach is early. Generated
-JavaScript, declarations, metadata, and shaders must be rebuilt together from
-the same `.tach` source; mixing artifacts from different compiler builds is
-not supported.
+1. **Program ABI:** public parameters, resources, and optional launch input.
+2. **Plan ABI:** ordered dispatches, target kernels, transients, and barriers.
+3. **Binding ABI:** storage and parameter-block bindings for each physical
+   kernel.
+4. **Memory ABI:** canonical host-visible bytes.
+5. **Runtime ABI:** commands, ownership, synchronization, and errors.
+6. **Documentation ABI:** target-neutral descriptions used for JSDoc and
+   generated Markdown.
 
-## 10. Generated TypeScript contract
+## 2. Public names and generated signatures
 
-Named Tach structs become exported readonly object type aliases. Numeric values
-become `number`, bool becomes TypeScript `boolean`, and vectors become readonly
-tuples. A kernel becomes a positional function in source parameter order:
+Source-named types and exported programs become JavaScript/TypeScript exports.
+Their names and public parameter names must be portable ASCII identifiers and
+must avoid reserved JavaScript/TypeScript and generated names. Private helpers,
+stages, physical entries, wrappers, and fields may be mangled.
+
+An exported indexed shorthand receives `LaunchOptions`:
 
 ```ts
 import type {
@@ -387,113 +73,500 @@ export function scale(
 ): ComputeCommand;
 ```
 
-The optional final `$launch` parameter is generated, not part of Tach source.
-Its `size` type is tied to kernel rank:
+An explicit public program derives every dispatch domain in source and
+receives only `CommandOptions`:
+
+```ts
+import type {
+  CommandOptions,
+  ComputeBuffer,
+  ComputeCommand,
+} from "@depths/tach";
+
+export function transform(
+  input: ComputeBuffer<Float32Array | readonly number[]>,
+  output: ComputeBuffer<Float32Array | readonly number[]>,
+  count: number,
+  factor: number,
+  bias: number,
+  $options?: CommandOptions,
+): ComputeCommand;
+```
+
+The final options object is compiler-generated and is not a Tach source
+parameter. Both forms return an opaque command; neither executes immediately.
+
+## 3. Public resources and non-aliasing
+
+Each public `buffer<T>` parameter creates one external resource in that
+program. Public parameters retain source order and map buffer parameters to
+resource-table indices. Plain parameters remain typed host values.
+
+Different public buffer parameters are distinct, non-aliasing objects. The
+TypeScript runtime rejects one `ComputeBuffer` passed in more than one buffer
+position of a command. A native runtime must enforce the same rule. In-place
+work uses one buffer parameter.
+
+Within an explicit program, a stage buffer argument names either an external
+resource or a compiler-managed transient. One resource cannot fill two buffer
+formals of the same dispatch. Resource-version checks prove that a transient
+read has been defined by an earlier complete write.
+
+Access is inferred from all stages that touch an external resource:
+
+| Logical access | Meaning |
+|---|---|
+| `read` | no stage writes it |
+| `write` | stages define it without reading its previous value |
+| `readWrite` | stages both read and write |
+| `atomic` | any stage performs atomic access |
+
+This program-level access appears in documentation. Physical shader bindings
+use the read/read-write requirement of their particular stage.
+
+## 4. Canonical host layout
+
+`src/layout` computes one checked, target-independent layout. Logical types do
+not acquire fake padding fields; offsets and padding exist only at the host
+boundary.
+
+### Scalars and vectors
+
+| Tach type | Size | Alignment |
+|---|---:|---:|
+| `int32`, `uint32`, `float32` | 4 | 4 |
+| `atomic<int32>`, `atomic<uint32>` | 4 | 4 |
+| two-lane numeric vector | 8 | 8 |
+| three-lane numeric vector | 12 | 16 |
+| four-lane numeric vector | 16 | 16 |
+
+`bool` has no direct storage-buffer representation. In a physical parameter
+block, each logical bool leaf becomes one `uint32` word containing `0` or `1`.
+
+### Structs
+
+Struct alignment is at least 16 bytes. A field begins at its required aligned
+offset. Nested structs reserve a 16-byte-aligned extent. A fixed struct's final
+size is rounded to its alignment.
+
+```tach
+type Particle = {
+  position: float32x3,
+  mass: float32,
+  velocity: float32x3,
+};
+
+export function preserve[i](particles: buffer<Particle[]>) {
+  if (i < particles.length) {
+    particles[i] = particles[i];
+  }
+}
+```
+
+`Particle` has:
 
 ```text
-1D  number
-2D  readonly [x, y]
-3D  readonly [x, y, z]
+offset  0..11  position
+offset 12..15  mass
+offset 16..27  velocity
+offset 28..31  padding
+alignment 16, size 32
 ```
 
-Runtime arrays of scalar values may use their matching `Float32Array`,
-`Int32Array`, or `Uint32Array`. Runtime arrays of tightly packed two- and
-four-lane vectors may use a flat matching typed array or nested tuples.
-Three-lane vectors use nested tuples because their 16-byte element stride
-contains padding.
+Source struct-literal order is irrelevant, but declaration field order is part
+of the byte ABI.
 
-Generated JavaScript exports the source-named command constructors and embeds
-the WGSL plus private resource/layout descriptors. It imports execution only
-from `@depths/tach/internal`; packing and reflection plumbing are not public
-application APIs.
+### Arrays and runtime tails
 
-## 11. Host values and buffer materialization
+For a fixed or runtime array element with size `S` and alignment `A`:
 
-`gpu.buffer(value)` creates a session-owned `ComputeBuffer<T>` and stores a
-structured clone of the initial value. It does not immediately know which
-compiled buffer layout will consume that value.
+```text
+stride = roundUp(A, S)
+```
 
-The first submitted command that uses the buffer:
+A fixed array has `stride * count` bytes. Fixed arrays currently exist only in
+workgroup memory.
 
-1. selects the compiler-emitted buffer codec;
+A direct runtime array `T[]` has no fixed size. A struct may contain one
+runtime array as its final field; the struct layout records a fixed prefix,
+tail offset, and tail stride. A materialized runtime resource must contain at
+least one complete element:
+
+```text
+minimumByteSize = runtimeOffset + runtimeStride
+actualByteSize  = runtimeOffset + elementCount * runtimeStride
+```
+
+Partial and zero-element runtime resources are rejected.
+
+### Fixed resource wrapper size
+
+A public fixed-size buffer is allocated as:
+
+```text
+roundUp(16, logicalSize)
+```
+
+This matches the compiler-generated storage wrapper. The public metadata
+records that padded `byteSize`. Runtime arrays retain their natural stride so
+padding cannot become a phantom element.
+
+All size arithmetic is checked against the 32-bit ABI limit.
+
+## 5. Physical kernels and bindings
+
+Target lowering clones one logical indexed stage for every surviving program
+dispatch. The current policy is intentionally one physical kernel per
+dispatch; identical stages are not deduplicated and distinct dispatches are
+not fused.
+
+For each physical kernel:
+
+- the entry point is `_tach_kN` in target-plan order;
+- storage bindings are dense from binding `0` in source-formal order;
+- WebGPU uses group `0` and Vulkan uses descriptor set `0`;
+- each binding records read/read-write access, logical type, and minimum size;
+- the selected workgroup is part of the target plan; and
+- a parameter block, when present, takes the next binding.
+
+Binding numbers therefore restart for each physical kernel's pipeline layout.
+They are not module-global public-resource IDs.
+
+## 6. One value block per physical kernel
+
+After target-neutral Kernel IR optimization and backend parameter pruning,
+`src/abi` flattens the remaining plain stage parameters into one private
+struct. It walks parameters in order and struct fields in declaration order.
+Numeric leaves retain their type; bool leaves become `uint32`.
+
+The canonical layout determines every field offset and rounds the struct to
+its 16-byte alignment. A stage with no remaining values has no parameter
+block. A block is limited to 16 KiB, the portable floor shared by the target
+profiles.
+
+The same plan drives WGSL, SPIR-V, embedded metadata, TypeScript packing, and
+the Vulkan harness. Kernel IR continues to contain logical parameters; no
+binding, physical bool, or padding member leaks into it.
+
+## 7. Program plans and shape evaluation
+
+Each public program receives one plan per requested target. A plan contains:
+
+```text
+program index
+physical kernels
+ordered dispatch/barrier steps
+external/transient resource sources for each step
+value sources for each parameter-block leaf
+transient lifetimes and allocation colors
+repeat mode and optional repeat barrier
+```
+
+Dispatch domains are trees of checked shape operations. Leaves can reference a
+public value/path, an external runtime-array length, a baseline launch axis, or
+a constant. Operators are `add`, `sub`, `mul`, `div`, `rem`, `min`, `max`, and
+`ceilDiv`.
+
+The host evaluates shapes with `uint32` range checks. Resource lengths come
+from the materialized byte length, runtime-tail offset, and stride. A dispatch
+axis or transient length must be positive.
+
+Parameter-block value sources can reference public values/paths, literal bool,
+`int32`, `uint32`, or exact `float32` bits, a shape expression, or the command
+repeat count.
+
+## 8. Transient allocation and synchronization
+
+Each transient records element type, stride, alignment, minimum size, length
+shape, first/last use, and an allocation color. Non-overlapping lifetimes can
+share a color. At preparation time the runtime evaluates byte sizes and gives
+each color one buffer large enough for the largest active requirement.
+
+The WebGPU session retains scratch buffers by color and grows them
+geometrically. Replaced buffers are retired until the next `idle()` so queued
+work cannot observe destroyed storage.
+
+WebGPU records all dispatches of submitted commands into one compute pass in
+program order. The SPIR-V plan inserts explicit compute-to-compute barriers
+between adjacent steps when an earlier stage writes a resource touched by the
+next stage. It also records a barrier across repeated program iterations when
+required.
+
+These are synchronization and allocation optimizations, not kernel fusion.
+
+## 9. Repeat semantics
+
+Both generated option types include `repeat?: number`. The value must be a
+positive integer within `uint32`; omission means `1`.
+
+For an ordinary multi-dispatch program, repeat executes the complete ordered
+plan repeatedly:
+
+```text
+stage A -> stage B -> stage A -> stage B -> ...
+```
+
+For a one-dispatch program, target lowering may internalize repeat as an
+invocation-local loop only when the stage:
+
+- contains no source loop;
+- has no atomic, shared-memory, or barrier effects; and
+- touches buffers only at the exact current 1D coordinate.
+
+Under those proofs, each invocation can perform all repetitions while its
+values remain in registers, preserving observable behavior and removing
+repeat dispatches. Otherwise the host plan repeats the dispatch literally.
+
+The metadata field `repeat` records `"invocation-loop"` or `"program"`; native
+runtimes must obey it.
+
+## 10. Metadata schema 1
+
+Metadata is embedded in generated Web JavaScript and returned separately by
+the Go compiler API. The schema-1 shape is:
+
+```ts
+interface Metadata {
+  schema: 1;
+  types: Array<{
+    name: string;
+    fields: Array<{ name: string; type: string }>;
+  }>;
+  programs: PublicProgram[];
+  targets: { web?: TargetPlan; spirv?: TargetPlan };
+}
+
+interface PublicProgram {
+  name: string;
+  parameters: Array<{
+    name: string;
+    kind: "buffer" | "value";
+    type: string;
+    resource?: number;
+  }>;
+  resources: Array<{
+    name: string;
+    type: string;
+    byteSize?: number;
+    alignment: number;
+    runtime: boolean;
+    runtimeOffset?: number;
+    runtimeStride?: number;
+    minimumByteSize: number;
+    layout: HostLayout;
+  }>;
+  launch?: {
+    dimensions: 1 | 2 | 3;
+    inferFromResource?: number;
+  };
+}
+
+interface TargetPlan {
+  kernels: Array<{
+    entryPoint: string;
+    workgroupSize: [number, number, number];
+    bindings: Array<{
+      group: 0;
+      binding: number;
+      access: "read" | "read_write";
+      type: string;
+      minimumByteSize: number;
+    }>;
+    parameterBlock?: {
+      group: 0;
+      binding: number;
+      byteSize: number;
+      fields: Array<{
+        type: string;
+        byteOffset: number;
+        layout: HostLayout;
+      }>;
+    };
+  }>;
+  programs: Array<{
+    program: number;
+    transients: Transient[];
+    steps: Step[];
+    repeatBarrier?: Step;
+    repeat: "program" | "invocation-loop";
+  }>;
+}
+
+interface Transient {
+  type: string;
+  stride: number;
+  alignment: number;
+  minimumByteSize: number;
+  length: Shape;
+  color: number;
+  firstStep: number;
+  lastStep: number;
+}
+
+interface Step {
+  kind: "dispatch" | "barrier";
+  kernel: number;
+  domain?: Shape[];
+  resources: Array<{
+    binding: number;
+    kind: "external" | "transient";
+    resource: number;
+  }>;
+  parameters?: ValueSource[];
+}
+
+interface Shape {
+  op: "constant" | "parameter" | "resourceLength" | "launchAxis"
+    | "add" | "sub" | "mul" | "div" | "rem"
+    | "min" | "max" | "ceilDiv";
+  value?: number;
+  parameter: number;
+  resource: number;
+  path?: string[];
+  axis: number;
+  left?: Shape;
+  right?: Shape;
+}
+
+interface ValueSource {
+  kind: "parameter" | "bool" | "i32" | "u32" | "f32Bits"
+    | "shape" | "repeat";
+  parameter: number;
+  path?: string[];
+  value?: boolean | number;
+  expression?: Shape;
+}
+
+interface HostLayout {
+  kind: "bool" | "i32" | "u32" | "f32" | "vector"
+    | "array" | "runtime" | "struct";
+  size?: number;
+  stride?: number;
+  count?: number;
+  runtime?: boolean;
+  elem?: HostLayout;
+  fields?: Array<{ name: string; offset: number; type: HostLayout }>;
+}
+```
+
+Each present target contains parallel `kernels` and `programs` arrays:
+
+```text
+targets.web.kernels[]       physical entry, workgroup, bindings, value block
+targets.web.programs[]      steps, shapes, transients, repeat mode
+targets.spirv.kernels[]     target-specific physical entries
+targets.spirv.programs[]    target-specific barriers and plan
+```
+
+Array indices are cross-references. Every program plan records its public
+program index; a dispatch step records a physical-kernel index; resource
+sources identify an external or transient table plus its index. Schema
+validation rejects dangling indices, mismatched target/program counts,
+invalid bindings, layouts, steps, shapes, and value sources.
+
+Zero-valued optional numeric fields may be absent in JSON. Consumers must use
+the schema and discriminator fields rather than property presence as a general
+truth test.
+
+Schema 1 is compiler/runtime internal while Tach is pre-1.0. Rebuild all
+artifacts together rather than treating it as a stable third-party wire
+format.
+
+## 11. WGSL representation
+
+WGSL contains all physical kernels for the Web target. Each has its own
+group-0 storage variables, wrappers, optional uniform block, selected builtin
+inputs, and private entry name.
+
+Fixed resources use an aligned wrapper; runtime tails preserve natural
+stride. Parameter blocks use the `uniform` address space and reconstruct
+logical values at entry. Storage access is `read` or `read_write` from the
+stage proof. Only coordinate inputs still used after backend optimization are
+emitted.
+
+The runtime builds layouts from metadata and never parses WGSL.
+
+## 12. SPIR-V representation
+
+SPIR-V 1.3 uses Logical addressing and the Shader capability. Host-visible
+storage and uniform aggregates carry descriptor, member-offset, and
+array-stride decorations. Logical SSA/helper values and Workgroup memory use
+undecorated logical aggregate types.
+
+Aggregate loads, stores, and parameter reconstruction cross the logical/
+physical boundary field by field. Padding never becomes a logical member.
+
+Tach guarantees zero-initialized shared memory. The SPIR-V backend emits a
+first-local-invocation initialization prologue and a workgroup barrier because
+native SPIR-V cannot assume WGSL's initialization rule.
+
+## 13. Host values and materialization
+
+`gpu.buffer(value)` stores a structured clone without choosing a physical
+layout. The first submitted use:
+
+1. selects the compiler-emitted resource layout;
 2. validates and packs the host value;
-3. requires at least the buffer's minimum binding size;
-4. creates and uploads the WebGPU buffer; and
-5. fixes that buffer's layout and byte length.
+3. requires the exact fixed size or a complete valid runtime tail;
+4. creates and uploads a WebGPU storage buffer; and
+5. fixes that handle's codec and byte length.
 
-Before materialization, `write(value)` replaces the cloned host value and may
-change its eventual size. After materialization, writes must pack to the exact
-same byte length. A buffer cannot later be used as a differently laid-out
-buffer; create another `ComputeBuffer` instead.
+Before materialization, `write(value)` may change the future size. Afterward,
+it must pack to the same byte length. A buffer cannot later be interpreted by
+a different layout; create a new handle.
 
-Packing validates numeric shape and range. Integers must fit `int32`/`uint32`;
-vectors and fixed arrays must have the exact count; structs must provide every
-declared field; runtime storage must end on a complete element. Multi-byte
-numbers use little-endian byte order.
-
-On little-endian hosts, correctly typed scalar and tightly packed vector
-arrays can cross the boundary without element-wise packing. Readback preserves
-that typed-array representation. Other values use compiler-generated
-`DataView` codecs and return cloned object/array structures.
-
-`ComputeBuffer` exposes only:
+Packing checks integer ranges, vector/array counts, struct fields, offsets,
+and strides. Multi-byte values are little-endian. On little-endian hosts,
+matching scalar and tightly packed vector typed arrays can cross without
+element-wise packing. Three-lane vector arrays use structured tuples because
+their element stride includes padding.
 
 ```ts
-write(value: T): void;
-read(): Promise<T>;
-destroy(): void;
+interface ComputeBuffer<T> {
+  write(value: T): void;
+  read(): Promise<T>;
+  destroy(): void;
+}
 ```
 
-Reading an unmaterialized buffer returns a clone of its host value. Reading a
-materialized buffer waits for prior submissions, copies to a temporary map-read
-buffer, decodes the bytes, destroys the temporary, and returns a clone.
-`destroy()` is idempotent; subsequent use is a lifecycle error.
+Reading an unmaterialized handle returns a clone. Reading a materialized handle
+waits for earlier submissions, copies through a temporary map-read buffer,
+decodes, destroys the temporary, and returns a clone. `destroy()` is
+idempotent; later use is a lifecycle error.
 
-## 12. Commands and launch geometry
+## 14. Commands and submission
 
-A generated kernel call validates its arguments and returns an opaque
-`ComputeCommand`. It does not submit. Accidentally awaiting the command throws
-a targeted error; the only execution boundary is:
+A generated program call validates buffer handles, ownership, non-aliasing,
+options, and every parameter block that can be evaluated immediately. The
+opaque command holds its public arguments until preparation; do not mutate a
+plain object/array argument between command construction and submission.
+
+Accidentally awaiting a command throws a targeted error. Execution occurs only
+through:
 
 ```ts
-await gpu.submit(commandA, commandB);
+await gpu.submit(first, second);
 ```
 
-Plain arguments are packed together and snapshotted when the command is
-constructed. Buffer arguments remain live resident handles. All command
-buffers must belong to the same Tach session.
+All commands must belong to one session. `submit` prepares them, records their
+plans in argument order into one compute pass and command buffer, and performs
+one queue submission. Its promise resolves after preparation/submission, not
+after GPU completion.
 
-`submit` records its commands in order into one compute pass and one command
-buffer, then performs one queue submission. `repeat` repeats that command's
-`dispatchWorkgroups` call inside the same pass:
-
-```ts
-step(state, params, { size: count, repeat: 100 })
-```
-
-Every explicit size component must be a positive safe integer and the value's
-rank must exactly match the kernel. Workgroup counts are:
+For indexed shorthand, explicit launch sizes must be positive safe integers
+of exact rank. Workgroup counts are:
 
 ```text
 groups[axis] = ceil(logicalSize[axis] / workgroupSize[axis])
 ```
 
-The final workgroup may therefore execute coordinates outside the logical
-extent. Kernel code owns bounds guards.
+When size is omitted, a 1D program uses the first runtime resource length when
+available; otherwise it uses exactly one workgroup. Public explicit programs
+have no host launch size because their shapes are in source.
 
-When `size` is omitted:
+## 15. Sessions, caches, and completion
 
-- a 1D kernel infers it from the first runtime-sized buffer;
-- otherwise the logical extent defaults to exactly one workgroup.
-
-Two- and three-dimensional problem extents cannot be inferred from a flat
-buffer and should normally be explicit.
-
-## 13. Sessions and ownership
-
-The public runtime exposes one session behavior through two lifetimes.
-
-### Scoped lifetime
+Scoped ownership:
 
 ```ts
 const result = await tach(async (gpu) => {
@@ -503,101 +576,85 @@ const result = await tach(async (gpu) => {
 });
 ```
 
-`tach(work, options?)` opens a session, calls `work`, waits for submitted GPU
-work, returns the callback value, and closes the session. Failures reject with
-`TachError`. Every buffer created by that session is destroyed on exit. A
-returned `ComputeBuffer` is therefore not usable after the scope.
+The callback form opens a session, runs user code, waits for queued work,
+returns the callback value, and closes every owned resource.
 
-### Persistent lifetime
+Persistent ownership:
 
 ```ts
 const gpu = await tach();
 try {
-  // Reuse resident buffers and cached pipelines across many submissions.
+  await gpu.submit(step(state));
   await gpu.idle();
 } finally {
   gpu.close();
 }
 ```
 
-`tach(options?)` returns the same session without automatic shutdown. The
-caller owns synchronization and `close()`. This form supports frame loops and
-long iterative jobs without reacquiring an adapter/device or recreating
-resident state.
+The caller owns synchronization and closure. Both forms share one engine and
+the same ownership rules.
 
-Both forms use the same `ComputeBuffer`, commands, caches, submission ordering,
-and error model. There is no batch-only and frame-only execution split.
+Generated modules cache shader modules and physical pipelines per device.
+Sessions cache bind groups by layout and buffer range, one aligned parameter
+arena, and scratch allocations by transient color. Parameter blocks use
+dynamic offsets. Arena and scratch growth retire old buffers until `idle()`.
 
-## 14. Submission, synchronization, and caches
+Completion boundaries are:
 
-`submit()` awaits asynchronous pipeline preparation and queue submission, but
-does not wait for GPU completion. Session submissions are chained so calls
-issued from interleaved promises retain invocation order.
+- `gpu.idle()` for all earlier session work;
+- `buffer.read()` for earlier work plus readback; and
+- exit from `tach(callback)`.
 
-The explicit completion boundaries are:
+`close()` is immediate and idempotent. Call `idle()` first when graceful GPU
+completion matters.
 
-- `gpu.idle()`;
-- `buffer.read()` for all prior session submissions; and
-- successful or failed exit from `tach(...)`.
+## 16. Errors
 
-Generated modules cache a shader module and compute pipelines per WebGPU
-device. Sessions cache bind groups by layout and storage-buffer range. Parameter
-blocks share an aligned session buffer sized against WebGPU's
-`minUniformBufferOffsetAlignment`; dynamic offsets select each command's
-snapshot, so commands with the same storage buffers reuse one bind group. The
-arena grows geometrically and is reused under queue ordering. Destroying a
-buffer or growing the parameter arena clears affected bind-group cache entries.
-
-`gpu.close()` is idempotent. It destroys all owned GPU buffers, the parameter
-arena, bind-group state, event handling, and the WebGPU device.
-
-## 15. Error contract
-
-Both `tach(...)` overloads and all session operations use ordinary TypeScript
-success and failure semantics:
+Public asynchronous APIs follow ordinary promise semantics and normalize
+failures to `TachError`:
 
 ```ts
-tach(options?): Promise<Tach>;
-tach<T>(work: (gpu: Tach) => T | Promise<T>, options?): Promise<T>;
+class TachError extends Error {
+  readonly code: TachErrorCode;
+  readonly operation: string | undefined;
+}
 ```
 
-Success returns or resolves to the value. Failure throws or rejects with
-`TachError`, which extends `Error` and carries a stable `code`, an optional
-operation, and the original cause. Current categories cover WebGPU
-availability, adapter/device acquisition and loss, GPU
-validation/out-of-memory/internal errors, buffers, kernels, lifecycle, user
-callback failures, and compiler delivery/execution. Asynchronous WebGPU errors
-are retained by the session and surface at a later submission or
-synchronization boundary rather than being silently discarded.
+Codes distinguish WebGPU availability, adapter/device acquisition and loss,
+GPU validation/out-of-memory/internal errors, compiler installation/execution,
+buffer and program failures, lifecycle misuse, and user callback failures.
+Original causes are retained. Error scopes, device loss, and uncaptured errors
+surface at submission or synchronization boundaries rather than disappearing.
 
-## 16. Native Vulkan caller obligations
+## 17. Native Vulkan obligations
 
-The TypeScript runtime enforces the WebGPU side automatically. A native
-consumer of the compiler API's SPIR-V and execution plan must perform the equivalent work:
+A native consumer must execute the target plan, not merely load one entry
+point:
 
-1. create descriptor bindings at set `0` and the recorded module binding
-   numbers used by the selected kernel;
-2. allocate at least `minimumByteSize`, with every runtime tail ending on its
-   recorded stride;
-3. pack scalars, vectors, fields, padding, and runtime tails according to the
-   Tach layout;
-4. create storage-buffer descriptors for buffer parameters and, when present,
-   one uniform-buffer descriptor for the compiler-owned parameter block;
-5. build that block from each field's parameter index, path, type, and byte
-   offset, encoding bool as `0` or `1` in a `uint32` slot;
-6. bind distinct memory objects for distinct buffer parameters;
-7. dispatch `ceil(logicalExtent / workgroupSize)` groups on every axis; and
-8. insert Vulkan synchronization appropriate for work before and after the
-   Tach pipeline.
+1. decode and validate schema-1 metadata;
+2. select the public program and matching SPIR-V program plan;
+3. allocate every external resource using its canonical layout and size;
+4. evaluate transient lengths and allocate each color's maximum required size;
+5. create pipelines for referenced physical kernels;
+6. build each kernel's set-0 storage and optional uniform descriptors;
+7. pack every parameter-block leaf from its recorded value source and layout;
+8. evaluate dispatch domains and divide by recorded workgroup dimensions;
+9. record steps in order, including plan barriers;
+10. honor `program` versus `invocation-loop` repeat mode;
+11. bind distinct memory for distinct public buffer parameters; and
+12. synchronize work before upload and after execution as required by the
+    embedding application.
 
-Workgroup-memory initialization and intra-kernel barriers are already encoded
-in the SPIR-V module. Bounds outside a rounded-up logical extent remain the
-kernel author's responsibility.
+The native repository harness implements this contract and additionally runs
+Khronos `spirv-val --target-env vulkan1.1`.
 
-## 17. Compatibility rule
+## 18. Artifact compatibility
 
-The `.tach` file is the source of truth. Files from one selected build form one
-compiler result and must travel together; the `all` target is the seven-file
-diagnostic superset. Public kernel names, parameter order, byte layout, launch
-rank, and runtime lifetime are ABI, but the metadata schema is intentionally
-not versioned yet. Recompile rather than hand-editing or combining output.
+The `.tach` file is the source of truth. One `all` build contains six files:
+`.tir`, `.wgsl`, `.spv`, `.spvasm`, `.js`, and `.d.ts`. Metadata is embedded in
+generated JavaScript and available through the compiler API; it is not a
+separate CLI artifact.
+
+Public names, parameter order, logical types, host bytes, plan semantics, and
+runtime ownership form one synchronized result. Do not hand-edit generated
+files or combine outputs from different compiler versions.

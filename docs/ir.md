@@ -1,40 +1,51 @@
-# Tach Core IR
+# Tach IR: Flow programs and Kernel templates
 
-Tach Core IR is the compiler's target-independent contract. Semantic analysis
-lowers source into it; optimization proves and rewrites it; WGSL, SPIR-V, and
-host-binding generation all consume it. It contains Tach semantics, never
-WGSL syntax, SPIR-V opcodes, or backend binding coordinates.
+Tach has two target-independent intermediate representations:
 
-The `.tir` artifact and `tach ir` command print this IR for inspection. Textual
-IR is diagnostic output, not another accepted input language.
+- **Flow IR** describes host-callable programs, resources, shapes, versions,
+  and ordered dispatches.
+- **Kernel IR** describes the portable work performed by one invocation of an
+  indexed stage or helper.
 
-Kernel authors do not need to learn this notation. When debugging a dump,
-remember two marks: `%3` is an immutable value and `&p3` is a path to memory.
-The rest of this guide explains why that distinction makes control flow,
-optimization, and two very different shader backends fit one semantic model.
+Target lowering combines them into a Web or SPIR-V executable plan containing
+private physical kernels. The `.tir` artifact and `tach ir` print all four
+views: optimized Flow IR, optimized Kernel IR templates, the Web plan, and the
+SPIR-V plan. The text is diagnostic output, not an accepted input language.
 
-## 1. From source to Core IR
+Kernel authors do not need this notation. Contributors should understand the
+identity boundary:
 
-Consider a complete kernel:
+```text
+public program -> Flow dispatch -> logical stage -> physical target kernel
+```
+
+## 1. One baseline through every representation
 
 ```tach
-export function scale[i](
-  data: buffer<float32[]>,
-  factor: float32,
-) {
-  if (i < data.length) {
-    data[i] *= factor;
+export function scale[i](values: buffer<float32[]>, factor: float32) {
+  if (i < values.length) {
+    values[i] *= factor;
   }
 }
 ```
 
-Its optimized dump has this shape:
+Its optimized logical-program dump is:
 
 ```text
-buffer @0 data: float32[] access=mutable
+program @scale(values=%r1: buffer<float32[]>, factor: float32) {
+  resource %r1 values kind=external initial=%v1 final=%v2
+  version %v1 resource=%r1 previous=%v0 producer=%d0 defined=true
+  version %v2 resource=%r1 previous=%v1 producer=%d1 defined=true
+  shape %s1 = launch(0)
+  dispatch %d1 @scale over [%s1]
+}
+```
 
-compute @scale[i=%1](data=@0, factor=%2: float32) workgroup(256,1,1) {
-  &p1 = place.resource @0 : float32[]
+The corresponding Kernel IR template has this shape:
+
+```text
+stage @scale[i=%1](values=%b0: float32[] access=mutable, factor=%2: float32) workgroup(auto) {
+  &p1 = place.buffer %b0 : float32[]
   %3 = array_length &p1
   %4 = < %1, %3 : bool
   if %4 -> [] {
@@ -50,387 +61,432 @@ compute @scale[i=%1](data=@0, factor=%2: float32) workgroup(256,1,1) {
 }
 ```
 
-This example exposes the central distinctions:
+Target planning then creates one private `_tach_k0` kernel, selects
+`256 x 1 x 1`, maps `%s1` to the host launch axis, and records one dispatch.
+The public name `scale` stays in metadata and generated bindings, not in the
+shader entry ABI.
 
-- `%N` identifies an immutable typed value;
-- `&pN` identifies a typed addressable place;
-- buffers live at module scope;
-- the kernel's logical coordinate is an ordinary `uint32` parameter;
-- the plain `factor` input is an ordinary immutable value;
-- memory reads and writes are explicit; and
-- control flow remains structured.
+## 2. Flow module and public programs
 
-## 2. Module model
-
-An IR module contains three ordered collections:
+A `flow.Module` contains:
 
 ```text
-Module
-  Structs
-  Resources
-  Functions
+Kernel          shared Kernel IR module
+Programs        ordered public Flow programs
+Documentation   normalized structured source docs
 ```
 
-Structs retain logical field names and types. Resources are the module's
-external buffers. Functions include value helpers and exported compute entry
-points.
+Every exported function creates one public program. An exported indexed
+function synthesizes a one-dispatch program; an exported unindexed function
+lowers explicit orchestration.
 
-### Buffer resources
-
-Each buffer records:
+A `Program` records:
 
 ```text
-name
-type       logical buffer type
-access     read | mutable
-source span
+Name, Span
+Indexed, Rank
+Parameters
+Resources
+Versions
+Shapes
+Dispatches
 ```
 
-Buffer order is module-global and deterministic. A kernel keeps a
-`KernelParams` list that preserves source parameter order and maps each entry
-to either a module buffer or an SSA value parameter. Physical bindings and byte
-layout are derived later by the ABI layer; neither is encoded in a logical IR
-type. Buffer access is inferred from lowered effects, and the verifier rejects
-stores through read-only roots.
+IDs for resources, versions, shapes, and dispatches are dense, nonzero, and
+local to one program.
 
-### Functions
+### Public parameters
 
-A helper function records typed value parameters, a result type, and a body.
-A kernel records:
+A parameter has a name, type, source span, and kind:
 
-- one to three logical index parameters;
-- its three-axis workgroup size;
-- its ordinary immutable value parameters;
-- its source-order buffer/value mapping;
-- its workgroup-memory declarations; and
-- a `void` body.
+| Kind | Meaning |
+|---|---|
+| `BufferParameter` | maps to one external resource ID |
+| `ValueParameter` | immutable constructible host value |
 
-Logical indices are explicit `uint32` parameters in Core IR. There is no Core IR
-notion of a WGSL builtin variable or SPIR-V `BuiltIn` decoration. A backend
-privately chooses the target input needed to produce each used coordinate.
+Parameter order is the generated API order. Buffer resources additionally
+remember the public parameter index.
 
-## 3. Values and places
+### Resources
 
-Keeping values and memory locations separate is the foundation of the IR.
+A resource records:
+
+```text
+ID, Name, Kind, Type, Span
+Parameter              external public index, or -1
+Length                 transient shape
+Initial, Final         version IDs
+```
+
+`External` resources come from public buffers and start defined. `Transient`
+resources come from `transient<T>(length)` and start undefined. Their logical
+type is a runtime array even though target plans later assign reusable scratch
+allocations.
+
+Resource identity is stronger than a type. Different public buffers and
+different transients are non-aliasing resources until target scratch coloring
+proves that non-overlapping transient lifetimes can share storage.
+
+### Versions
+
+Every resource has an initial version. A mutable dispatch consumes the current
+version and produces a later one:
+
+```text
+Version
+  Resource
+  Previous
+  Producer dispatch
+  Defined
+```
+
+`Defined` is not merely “some write occurred.” A previously undefined
+transient becomes defined only if the stage access summary proves a complete
+write for the dispatch domain. A later stage cannot read an undefined version.
+
+This is currently a linear version chain over ordered dispatches, not a
+general control-flow SSA graph: public-program source has no branch or loop.
+
+### Shapes
+
+Shapes are interned expression DAG nodes with these operations:
+
+| Operation | Inputs |
+|---|---|
+| `constant` | one `uint32` literal |
+| `parameter` | public value index plus struct-field path |
+| `resourceLength` | resource ID plus runtime-array field path |
+| `launchAxis` | baseline host launch axis |
+| `add`, `sub`, `mul`, `div`, `rem` | two shapes |
+| `min`, `max`, `ceilDiv` | two shapes |
+
+Identical structural nodes are shared. Shapes remain symbolic until a runtime
+has public values, materialized resource byte lengths, and optional launch
+coordinates. Both TypeScript and native Vulkan evaluators apply checked
+`uint32` semantics.
+
+### Dispatches
+
+A dispatch contains:
+
+```text
+ID, Stage, Span
+Domain[]           one shape per stage coordinate
+Buffers[]          formal -> resource, input version, optional output version
+Values[]           formal -> checked value source
+```
+
+Buffer arguments are stored in formal order and cannot repeat a resource.
+Value sources are a public parameter/path, literal bool/integer/float bits,
+shape, or backend-added repeat count.
+
+Flow IR names a logical stage, not a physical kernel index. Target planning
+creates the latter.
+
+## 3. Flow verification
+
+`flow.Verify` first verifies the shared Kernel IR, then proves:
+
+- unique public program names and at least one dispatch per program;
+- at least one external buffer and valid constructible value parameters;
+- dense, valid resource/version/shape/dispatch IDs;
+- valid initial/final versions and monotonic version chains;
+- acyclic, well-typed shape expressions;
+- stage existence, domain rank, and exact argument counts;
+- buffer/resource type equality and per-dispatch non-aliasing;
+- current-version consumption and correct mutable output versions;
+- definition before every read; and
+- valid public/literal/shape sources for stage value formals.
+
+Because definition and version checks live here, neither backend runtime needs
+to rediscover program dataflow from shader text.
+
+## 4. Kernel module and functions
+
+An `ir.Module` contains logical struct types and functions. Resources are not
+module-global: every indexed stage has its own ordered `BufferParams`.
+
+Function roles are:
+
+| Kind | Contents |
+|---|---|
+| `Helper` | immutable value parameters, constructible result, pure body |
+| `Stage` | logical indices, buffer/value source mapping, workgroup constraint, void body |
+
+A stage records:
+
+- `Indices`: one to three named `uint32` values;
+- `BufferParams`: logical type, inferred `read`/`mutable` access, and span;
+- `Params`: immutable non-buffer values;
+- `SourceParams`: original interleaved source order;
+- `Workgroup`: explicit dimensions or an automatic constraint;
+- `WorkgroupVars`: shared allocations; and
+- `Body`: one structured block.
+
+No function records target binding numbers, entry decorations, or physical
+parameter fields.
+
+## 5. Values and places
+
+Kernel IR deliberately distinguishes immutable data from addressable memory.
 
 ### Values
 
-A value is immutable, typed, and defined once. `ValueID` zero is reserved;
-ordinary definitions use nonzero IDs. IDs are unique across a whole function,
-including nested branches and loops, so a printed `%12` has one meaning within
-that function.
-
-Value-producing instructions are:
+A `ValueID` is unique and nonzero across an entire function, including nested
+regions. Value-producing instructions are:
 
 | Instruction | Meaning |
 |---|---|
-| `Const` | canonical scalar literal |
-| `Unary` | typed unary operation |
-| `Binary` | typed binary operation |
+| `Const` | canonical typed scalar literal |
+| `Unary`, `Binary` | resolved Tach operator |
 | `Convert` | explicit numeric conversion |
-| `Composite` | vector or struct assembly |
-| `Extract` | constant field or lane extraction from a value |
-| `VectorIndex` | dynamic lane extraction from a vector value |
+| `Composite` | vector or struct construction |
+| `Extract`, `VectorIndex` | constant or dynamic value projection |
 | `Call` | direct pure helper call |
-| `Intrinsic` | backend-independent math operation |
-| `Load` | read a value from a place |
-| `ArrayLength` | query a runtime array through a place |
-| `Atomic` | atomic result, except for `atomicStore` |
+| `Intrinsic` | portable math operation |
+| `Load` | read through a place |
+| `ArrayLength` | runtime-array length through a place |
+| `Atomic` | atomic result except store |
 
-An instruction stores its result type directly. Backends never have to infer a
-literal type or reconstruct overload resolution.
+Every result carries its resolved type. Emitters never repeat literal
+inference or overload selection.
 
 ### Places
 
-A place describes a path to addressable GPU memory. It is not a first-class
-pointer and supports no pointer arithmetic, casting, or comparison.
+A `PlaceID` identifies a typed path to GPU memory, not a first-class pointer.
 
 | Instruction | Meaning |
 |---|---|
-| `PlaceRoot` | root a path at a buffer resource |
-| `PlaceWorkgroup` | root a path at a shared variable |
-| `PlaceField` | project a struct field or constant vector lane |
-| `PlaceIndex` | index an array, runtime array, or vector dynamically |
+| `PlaceRoot` | stage buffer formal |
+| `PlaceWorkgroup` | shared allocation |
+| `PlaceField` | struct field or constant vector lane |
+| `PlaceIndex` | array/runtime-array/vector index |
 
-`Load`, `Store`, `ArrayLength`, and atomic instructions consume places. The
-place chain makes the root buffer, address space, element type, and write
-permission recoverable at every memory operation.
+`Load`, `Store`, `ArrayLength`, and atomics consume places. A place chain keeps
+the root buffer/workgroup identity, element type, and access rights available
+for verification and optimization.
 
-This distinction also explains source locals. Rebinding a source `let` does
-not create a hidden memory cell. It creates new values and structured merge or
-loop results. Only buffers and shared variables become places. Plain kernel
-parameters are values from their first Core IR appearance onward.
+Ordinary `let` variables do not become places. Rebinding creates new SSA values
+and structured results. Only external/shared memory is addressable.
 
-## 4. Structured control flow
+## 6. Structured control flow
 
-Core IR preserves source structure instead of flattening control into a
-general control-flow graph.
-
-### Blocks and terminators
-
-A block is an instruction list followed by exactly one terminator:
+A block is an instruction list plus exactly one terminator:
 
 | Terminator | Role |
 |---|---|
-| `Yield` | return values from an `if` branch or loop condition region |
-| `Continue` | supply the next values of all loop-carried parameters |
-| `Return` | leave a helper or kernel |
-| `Unreachable` | compiler-owned terminal state |
-
-Child regions cannot fall through accidentally; their terminator states how
-control and values return to the owning instruction.
+| `Yield` | return values from an `If` branch or loop condition |
+| `Continue` | provide next loop-carried values |
+| `Return` | leave helper/stage, optionally with helper value |
+| `ExitScope` | leave a backend-created scope without leaving the stage |
+| `Unreachable` | explicit terminal state |
 
 ### Conditionals
 
-An `If` owns a condition value, a then block, an else block, and zero or more
-typed results:
+`If` owns a condition, then/else blocks, and typed results. Ternaries normally
+produce one result; statement branches may produce several when surrounding
+locals are rebound.
 
 ```text
 %result = if %condition -> float32 {
-  ...
-  yield [%thenValue]
+  yield [%then]
 } else {
-  ...
-  yield [%elseValue]
+  yield [%else]
 }
 ```
 
-A ternary expression produces one result. A statement `if` can produce several
-results when it rebinds several surrounding locals. Both branches yield the
-same arity and types.
-
-WGSL lowering materializes these results with compiler-private mutable locals.
-SPIR-V lowering creates merge blocks and `OpPhi` instructions. Core IR needs
-neither representation.
+WGSL materializes results in private mutable locals. SPIR-V creates merge
+blocks and `OpPhi`. Kernel IR chooses neither representation.
 
 ### Loops
 
-A `Loop` owns initial values, typed loop parameters, a condition region, a body
-region, and final results:
+`Loop` owns initial values, loop parameters, a condition region, a body region,
+and final results:
 
 ```text
-loop params=[(%index <- %initialIndex), (%sum <- %initialSum)] {
+loop params=[(%index <- %initial), (%sum <- %zero)] {
   cond
-    ...
     yield [%keepGoing]
   body
-    ...
     continue [%nextIndex, %nextSum]
 }
 ```
 
-The condition yields one `bool`. The body's `Continue` supplies one next value
-for every parameter. When the condition is false, the current parameters
-become the loop results. Source `while` and `for` both lower to this single
-form.
+The condition yields one bool. The body supplies one next value per loop
+parameter. When the condition is false, current parameters become results.
+Source `while` and `for`, plus safe backend repeat internalization, share this
+model.
 
-Loop parameters are the semantic equivalent of loop-header phi nodes. WGSL
-uses generated mutable locals; SPIR-V uses `OpPhi`. This is why optimization
-can reason about a loop once without adopting either backend's mechanics.
+`Scope` lets backend-created wrappers rewrite an ordinary stage `return` into
+`ExitScope`, preserving early return inside an outer repeat loop.
 
-### Short-circuiting and early return
+Short-circuit `&&`, `||`, and conditional expressions lower to `If`, so only
+the selected region executes.
 
-`&&`, `||`, and conditional expressions lower through structured `If`
-regions, so only the selected operand or branch executes. A source `return`
-terminates its current block directly. Semantic analysis rejects unreachable
-source statements and loops without a continuing path.
+## 7. Types, effects, and access summaries
 
-## 5. Types and representation boundaries
+Kernel IR uses only logical Tach types: scalars, numeric vectors, named
+structs, atomics, fixed/runtime arrays, and void. Host padding, WGSL wrappers,
+SPIR-V pointer/storage types, and descriptor decorations are later physical
+representations.
 
-Core IR uses resolved logical Tach types:
+Observable effects are stores, atomics, and barriers. Loads from mutable or
+shared memory cannot be freely reused. Loads from inferred read-only buffers
+can be commoned when place identity and structured dominance match.
 
-```text
-bool, int32, uint32, float32
-numeric vectors with 2, 3, or 4 lanes
-named structs
-atomic<int32>, atomic<uint32>
-fixed arrays
-runtime arrays
-void
-```
+`ir.AnalyzeAccess` summarizes each stage buffer:
 
-Logical types express program meaning. They do not contain host padding,
-descriptor decorations, WGSL wrapper structs, or SPIR-V storage-class pointer
-types.
+- whether it reads, writes, or performs atomics;
+- whether its writes completely define a dispatch result;
+- affine index information relative to logical coordinates; and
+- global stage effects involving barriers/workgroup memory.
 
-The layout package independently computes host-visible alignment, offsets,
-strides, and minimum buffer sizes. The ABI planner also flattens each kernel's
-plain values into one physical parameter block without changing Core IR. Each
-backend establishes an explicit boundary between logical values and physical
-buffer/block memory. This prevents padding and backend storage rules from
-contaminating helper signatures or optimization.
+Flow definition proofs, repeat internalization, access inference, and later
+planning consume this shared analysis rather than scanning source again.
 
-## 6. Effects and synchronization
+## 8. Atomics, barriers, and uniformity
 
-The instructions with observable memory or execution effects are:
+An `Atomic` records the portable operation, place, logical integer type, input,
+and optional result. Scope and memory-semantics operands are backend-owned.
 
-- `Store`;
-- every `Atomic` operation;
-- `BarrierWorkgroup`; and
-- `BarrierBuffer`.
+`Barrier` records workgroup-memory or buffer-memory synchronization. Uniformity
+analysis propagates a conservative property through values, helper calls,
+structured control, and loop fixed points. A barrier is legal only when all
+enclosing decisions are uniform across the workgroup.
 
-Loads from mutable buffers and shared memory are not freely reusable because an
-effect may change the addressed value. Loads from inferred read-only buffers
-may be reused when the place and structured dominance match. Plain kernel
-parameters require no memory load at all; they are immutable SSA values.
+Zero-initialized workgroup storage is a language invariant rather than a
+Kernel IR instruction. WGSL supplies it natively; SPIR-V emission adds a
+prologue and barrier.
 
-### Atomics
+## 9. Kernel verification
 
-An atomic instruction records a Tach operation, an atomic place, an underlying
-`int32` or `uint32` type, and any value operand/result. The portable operation set
-is load, store, add, subtract, minimum, maximum, bitwise and/or/xor, and
-exchange. Target scope and memory-semantics operands are backend decisions, not
-Core IR operands.
+`ir.Verify` checks, among other invariants:
 
-### Barriers and uniformity
+- valid module types, function roles, and workgroup constraints;
+- unique nonzero value/place definitions and structured availability;
+- exact operand, result, yield, loop-carrier, call, and return types;
+- valid source-parameter mappings and at least one stage buffer;
+- legal buffer/workgroup roots and field/index projections;
+- read/write access through every place;
+- constructible, host-shareable, runtime, and shared-memory restrictions;
+- intrinsic signatures and conversion rules;
+- atomic place/type/access rules;
+- compute-only workgroup effects; and
+- barrier uniformity.
 
-Barrier instructions record the memory domain being synchronized. The
-uniformity analysis classifies each available value conservatively as uniform
-or varying within a workgroup and follows structured branches plus loop-carried
-fixed points.
+Semantic lowering verifies before Flow construction. The optimizer verifies
+before and after its pipeline. Backend and binding boundaries verify again.
 
-Constants and plain kernel parameters are uniform. Logical coordinates,
-buffer/shared-memory loads, and atomic results are varying. A barrier is valid
-only when all enclosing control decisions are uniform.
+## 10. Target-independent Kernel optimization
 
-### Workgroup zero initialization
-
-Zero initialization is a Tach semantic invariant, not an explicit Core IR
-instruction. WGSL already provides the required behavior. SPIR-V lowering
-emits a first-local-invocation initialization prologue followed by a barrier
-before source instructions execute.
-
-## 7. Verification
-
-`ir.Verify` is the executable contract for Core IR. It checks, among other
-invariants:
-
-- well-formed modules, buffers, functions, and workgroup sizes;
-- unique, nonzero value and place definitions;
-- availability of every operand at its structured use;
-- exact operand, result, branch-yield, and loop-carrier types;
-- direct helper-call signatures and valid returns;
-- valid buffer and shared-memory roots;
-- field, array, runtime-array, and vector projections;
-- place-root access and legal loads/stores;
-- runtime-sized and nonconstructible type restrictions;
-- atomic object, type, address-space, and access rules;
-- intrinsic signatures;
-- compute-only workgroup operations; and
-- barrier control-flow uniformity.
-
-Semantic lowering verifies its result through the optimizer's precondition.
-The optimizer verifies again after all target-independent passes. WGSL,
-SPIR-V, and binding generation also refuse an invalid module at their
-boundaries. A backend therefore never treats malformed IR as a recoverable
-input variant.
-
-## 8. Target-independent optimization
-
-`opt.Run` applies one fixed pipeline to every function:
+`opt.OptimizeKernel` runs:
 
 ```text
 verify
 common values and places
-loop-invariant code motion
+hoist loop invariants
 common values and places
-loop buffer-value promotion
+promote conservative loop buffer values
 common values and places
-dead definition elimination to a fixed point
+remove dead pure definitions to a fixed point
 verify
 ```
 
-### Common values and places
+### Commoning
 
-The pass reuses exact repeated constants, unary/binary operations, conversions,
-intrinsics, extracts, pure helper calls, and small composites where structured
-dominance makes reuse valid. It also reuses identical place paths, array
-lengths, and loads from inferred read-only buffers.
+Exact repeated constants, unary/binary expressions, conversions, intrinsics,
+extracts, pure calls, small composites, place paths, array lengths, and
+read-only loads reuse a dominating definition. Mutable loads and effects do
+not.
 
-Mutable loads, atomics, stores, and barriers are not commoned. Composites and
-calls wider than four operands currently skip commoning to avoid allocating a
-key in the hot path; they remain correct and may still become dead.
+Composites and calls wider than four inputs currently skip keyed commoning to
+avoid extra hot-path allocation; correctness is unchanged and dead uses can
+still disappear.
 
-### Loop-invariant code motion
+### Loop-invariant motion
 
-Pure instructions whose operands are defined outside a loop move before it.
-An immutable buffer load from the condition region can move because the
-condition executes before deciding whether to enter. A body-only load is not
-eagerly hoisted across a possible zero-trip loop.
+Pure instructions with loop-external inputs move before the loop. An immutable
+load in the condition may move because the condition always executes. A
+body-only load cannot be eagerly moved across a zero-trip loop.
 
 ### Loop buffer-value promotion
 
-The optimizer can replace a repeated load/update/store of one unambiguous
-buffer place with a loop-carried value. It performs the first load lazily,
-keeps subsequent iterations in SSA, and writes back only if the loop ran.
-
-Promotion is deliberately conservative. It stops when the loop contains
-synchronization, atomics, an early exit, another touch of the same buffer,
-multiple candidate loads/stores, or a place defined inside the loop. This
-preserves memory order and zero-trip behavior without speculative alias
-analysis.
+A single unambiguous load/update/store path may become a lazy loop-carried
+value and one conditional writeback. Promotion stops at synchronization,
+atomics, early exits, competing touches, multiple candidates, or places
+defined inside the loop.
 
 ### Dead definitions
 
-Unused side-effect-free values and unused place paths are removed repeatedly
-until use counts stop changing. Effects remain even when their returned value
-is unused.
+Unused pure values and place paths are removed repeatedly. Stores, atomics,
+barriers, and other effects remain when their result is unused.
 
-## 9. Backend-specific lowering and optimization
+Flow IR currently receives verification after this Kernel rewrite but no
+separate optimization pass.
 
-After Core optimization, each backend creates a private lowered program. The
-current shared backend analysis begins with every logical index as a global
-coordinate and then recognizes two exact Tach expressions:
+## 11. From logical stages to executable plans
 
-```text
-const localX = x % workgroupWidth;
-const local = localX + localY * workgroupWidth
-            + localZ * workgroupWidth * workgroupHeight;
-```
-
-When the constants exactly match the kernel's workgroup dimensions, the
-backend replaces the first form with a local coordinate and the row-major form
-with a local linear coordinate. Dead coordinate arithmetic and unused target
-inputs disappear. If the expression does not match exactly, it remains normal
-Tach arithmetic over the global logical coordinate.
-
-This is the second optimization stage:
+Each backend clones Flow and Kernel IR. For every Flow dispatch it creates a
+`PhysicalKernel`:
 
 ```text
-Core IR optimization       semantics shared by every target
-backend IR optimization    representation choices for one target
+Entry
+Function clone
+Workgroup
+Storage bindings
+Optional parameter block
+Coordinate mapping
 ```
 
-The source and Core IR never acquire provider-specific invocation objects to
-obtain this optimization.
+It can internalize safe repeat, prune now-unused value parameters, select a
+portable workgroup, assign dense binding numbers, plan the value block, and
+replace exact workgroup-local coordinate arithmetic.
 
-## 10. Backend mapping
+A `ProgramPlan` maps the public program to:
 
-| Core concept | WGSL lowering | SPIR-V lowering |
+```text
+Transients[]       size/lifetime/color
+Steps[]            dispatch or target barrier
+RepeatBarrier      optional cross-iteration synchronization
+Repeat             program | invocation-loop
+```
+
+A dispatch step refers to a physical-kernel index, domain shapes, resource
+sources, and parameter sources. Physical identity is therefore target-specific
+and downstream of logical dispatch identity.
+
+The current planner creates one physical kernel for every dispatch. It does not
+deduplicate identical stage clones or fuse adjacent dispatches.
+
+## 12. Backend mapping
+
+| Logical concept | WGSL | SPIR-V |
 |---|---|---|
-| logical index | selected builtin input expression | selected interface builtin |
-| plain kernel value | reconstructed from one parameter block | reconstructed from one parameter block |
-| immutable value | expression or generated local | SSA result ID |
-| buffer/shared place | access expression | pointer plus access chain |
-| load/store | value read/assignment | `OpLoad` / `OpStore` |
-| structured `If` | WGSL `if` | selection merge, branches, `OpPhi` |
-| structured `Loop` | generated locals and `loop` | loop merge, branches, `OpPhi` |
-| intrinsic | WGSL builtin | core or GLSL.std.450 operation |
+| physical entry | private `@compute fn` | private `OpEntryPoint` |
+| logical coordinate | selected builtin expression | selected interface builtin |
+| plain stage value | reconstructed uniform-block leaf | reconstructed uniform-block leaf |
+| immutable value | expression or private local | SSA result ID |
+| buffer/shared place | access expression | pointer/access chain |
+| load/store | expression/assignment | `OpLoad` / `OpStore` |
+| `If` result | private mutable local | merge block and `OpPhi` |
+| `Loop` carrier | generated mutable local | header `OpPhi` |
+| intrinsic | WGSL builtin | core or GLSL.std.450 instruction |
 | atomic | WGSL atomic builtin | `OpAtomic*` |
-| barrier | WGSL barrier builtin | `OpControlBarrier` |
+| source barrier | WGSL barrier | `OpControlBarrier` |
+| plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier` in native plan runtime |
 
-WGSL's validator reparses the exact emitted subset and checks serialization.
-The SPIR-V validator independently decodes the binary and checks structure,
-types, layout, control flow, dominance, phi edges, effects, and the exact used
-entry-point interface.
+Backend coordinate optimization may map exact modulo/row-major expressions to
+local coordinate inputs and remove dead global inputs. It never changes
+logical source/IR names.
 
-## 11. Extension rule
+## 13. Extension rule
 
-A new source convenience should lower into existing IR whenever its semantics
-already fit. `for`, ternary expressions, compound assignment, and swizzles do
-this today.
+Source sugar belongs in lowering when existing IR already expresses its
+meaning. New per-invocation semantics must earn a Kernel IR instruction/type,
+verification, effects, optimization rules, and both backend mappings. New
+multi-dispatch semantics must earn a Flow node, verifier rule, target-plan
+representation, metadata, and both runtime implementations.
 
-A genuinely new portable capability must first earn a target-independent type,
-instruction, verifier rule, and optimizer effect rule. Only then should each
-backend lower it. Backend spellings and encodings never become Tach source or
-Core IR semantics.
+Target-only instruction selection, physical layout, dispatch deduplication, or
+future fusion belongs after logical IR. Provider syntax and opcodes never
+become portable meaning merely to enable an optimization.

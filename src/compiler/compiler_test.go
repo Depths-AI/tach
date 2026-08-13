@@ -3,8 +3,10 @@ package compiler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -121,5 +123,36 @@ func TestMaintainedExamplesCompile(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestMaintainedDocumentationExamplesCompile(t *testing.T) {
+	fence := regexp.MustCompile("(?s)```tach\\r?\\n(.*?)\\r?\\n```")
+	paths := []string{
+		filepath.Join("..", "..", "README.md"),
+		filepath.Join("..", "..", "tach-ts", "README.md"),
+		filepath.Join("..", "..", "docs", "language.md"),
+		filepath.Join("..", "..", "docs", "abi.md"),
+		filepath.Join("..", "..", "docs", "architecture.md"),
+		filepath.Join("..", "..", "docs", "ir.md"),
+	}
+	total := 0
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index, match := range fence.FindAllSubmatch(data, -1) {
+			name := fmt.Sprintf("%s#%d", filepath.ToSlash(path), index+1)
+			t.Run(name, func(t *testing.T) {
+				if _, err := Compile(name, string(match[1])); err != nil {
+					t.Fatal(err)
+				}
+			})
+			total++
+		}
+	}
+	if total == 0 {
+		t.Fatal("maintained documentation contains no Tach examples")
 	}
 }

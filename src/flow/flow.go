@@ -240,13 +240,6 @@ func (p *Program) AddDispatch(d Dispatch) DispatchID {
 	return d.ID
 }
 
-func (p *Program) SyncIDs() {
-	p.nextRes = ResourceID(len(p.Resources))
-	p.nextVer = VersionID(len(p.Versions))
-	p.nextShape = ShapeID(len(p.Shapes))
-	p.nextDisp = DispatchID(len(p.Dispatches))
-}
-
 func (p *Program) Resource(id ResourceID) *Resource {
 	if id == 0 || int(id) > len(p.Resources) || p.Resources[id-1].ID != id {
 		return nil

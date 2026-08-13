@@ -397,25 +397,22 @@ func resultID(in Instruction) uint32 {
 		return a[0]
 	case OpTypeVoid, OpTypeBool, OpTypeInt, OpTypeFloat, OpTypeVector, OpTypeArray, OpTypeRuntimeArray, OpTypeStruct, OpTypePointer, OpTypeFunction, OpLabel:
 		return a[0]
-	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
-		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
-		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
-		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
-		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
-		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd,
-		OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual,
-		OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual,
-		OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual,
-		OpAtomicLoad, OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
-		OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpPhi, OpExtInst, OpDot:
+	}
+	if hasResultType(in.Op) {
 		return a[1]
 	}
 	return 0
 }
 
 func resultTypeID(in Instruction) uint32 {
-	a := in.Operands
-	switch in.Op {
+	if hasResultType(in.Op) {
+		return in.Operands[0]
+	}
+	return 0
+}
+
+func hasResultType(op Op) bool {
+	switch op {
 	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
 		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
@@ -427,9 +424,9 @@ func resultTypeID(in Instruction) uint32 {
 		OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual,
 		OpAtomicLoad, OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
 		OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpPhi, OpExtInst, OpDot:
-		return a[0]
+		return true
 	}
-	return 0
+	return false
 }
 func (v *validation) def(id uint32, idx int, what string) error {
 	if id == 0 || id >= v.m.Bound {

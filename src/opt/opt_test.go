@@ -10,6 +10,22 @@ import (
 	"tach/src/sema"
 )
 
+func optimized(t *testing.T, name, source string) *ir.Module {
+	t.Helper()
+	a, err := parser.Parse(name, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := opt.OptimizeKernel(m.Kernel); err != nil {
+		t.Fatal(err)
+	}
+	return m.Kernel
+}
+
 func TestDeadExpressionTreeIsRemoved(t *testing.T) {
 	a, err := parser.Parse("dead.tach", `
 @workgroup(1)
@@ -38,24 +54,14 @@ export function dead[i](out: buffer<float32[]>) {
 }
 
 func TestRepeatedPureValuesAreCanonicalized(t *testing.T) {
-	a, err := parser.Parse("common.tach", `
+	kernel := optimized(t, "common.tach", `
 @workgroup(64)
 export function common[i](out: buffer<uint32[]>) {
   const a = i + 1;
   const b = i + 1;
   if (i < out.length) { out[i] = a + b; }
 }`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
-		t.Fatal(err)
-	}
-	dump := ir.Dump(m.Kernel)
+	dump := ir.Dump(kernel)
 	if got := strings.Count(dump, " = + %1,"); got != 1 {
 		t.Fatalf("repeated index expression was emitted %d times, want one:\n%s", got, dump)
 	}
@@ -65,7 +71,7 @@ export function common[i](out: buffer<uint32[]>) {
 }
 
 func TestImmutableMemoryValuesAreCanonicalized(t *testing.T) {
-	a, err := parser.Parse("memory.tach", `
+	kernel := optimized(t, "memory.tach", `
 type Params = { scale: float32 };
 @workgroup(1)
 export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, params: Params) {
@@ -77,17 +83,7 @@ export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, 
   const after = values[0];
   values[1] = before + after + immutable + float32(length);
 }`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
-		t.Fatal(err)
-	}
-	dump := ir.Dump(m.Kernel)
+	dump := ir.Dump(kernel)
 	if got := strings.Count(dump, "load"); got != 3 {
 		t.Fatalf("got %d loads, want one immutable-buffer and two ordered mutable-buffer loads:\n%s", got, dump)
 	}
@@ -97,7 +93,7 @@ export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, 
 }
 
 func TestUnusedPureMemoryAndCallResultsAreRemoved(t *testing.T) {
-	a, err := parser.Parse("dead-memory.tach", `
+	kernel := optimized(t, "dead-memory.tach", `
 function square(x: float32): float32 { return x * x; }
 @workgroup(1)
 export function dead[i](out: buffer<float32[]>) {
@@ -106,17 +102,7 @@ export function dead[i](out: buffer<float32[]>) {
   square(value);
   out[0] = 1.0;
 }`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
-		t.Fatal(err)
-	}
-	dump := ir.Dump(m.Kernel)
+	dump := ir.Dump(kernel)
 	for _, dead := range []string{"array.length", "load", "call @square"} {
 		if strings.Contains(dump, dead) {
 			t.Fatalf("dead %s survived:\n%s", dead, dump)
@@ -125,7 +111,7 @@ export function dead[i](out: buffer<float32[]>) {
 }
 
 func TestLoopBufferValuesAreLazilyPromotedToRegisterCarriers(t *testing.T) {
-	a, err := parser.Parse("loop-memory.tach", `
+	kernel := optimized(t, "loop-memory.tach", `
 type Params = { dt: float32, count: uint32, steps: uint32 };
 @workgroup(64)
 export function integrate[i](
@@ -139,18 +125,8 @@ export function integrate[i](
     }
   }
 }`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
-		t.Fatal(err)
-	}
-	dump := ir.Dump(m.Kernel)
-	outer, ok := m.Kernel.Functions[0].Body.Instrs[len(m.Kernel.Functions[0].Body.Instrs)-1].(*ir.If)
+	dump := ir.Dump(kernel)
+	outer, ok := kernel.Functions[0].Body.Instrs[len(kernel.Functions[0].Body.Instrs)-1].(*ir.If)
 	if !ok {
 		t.Fatalf("test setup has no bounds guard:\n%s", dump)
 	}
@@ -190,7 +166,7 @@ export function integrate[i](
 }
 
 func TestLoopBufferPromotionStopsAtSynchronization(t *testing.T) {
-	a, err := parser.Parse("synchronized-loop.tach", `
+	kernel := optimized(t, "synchronized-loop.tach", `
 @workgroup(4)
 export function synchronized[i](data: buffer<uint32[]>, steps: uint32) {
   for (let step = 0; step < steps; step++) {
@@ -198,17 +174,7 @@ export function synchronized[i](data: buffer<uint32[]>, steps: uint32) {
     workgroupBarrier();
   }
 }`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
-		t.Fatal(err)
-	}
-	dump := ir.Dump(m.Kernel)
+	dump := ir.Dump(kernel)
 	loop := strings.Index(dump, "loop params=")
 	if loop < 0 || !strings.Contains(dump[loop:], "store &") {
 		t.Fatalf("synchronized memory update was incorrectly promoted:\n%s", dump)

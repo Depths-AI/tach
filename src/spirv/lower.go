@@ -14,14 +14,10 @@ const (
 	inputLocalLinear
 )
 
-type loweredFunction struct {
-	source      *ir.Function
-	coordinates *backend.Coordinates
-}
 type program struct {
 	executable *backend.Executable
 	source     *ir.Module
-	functions  map[*ir.Function]*loweredFunction
+	functions  map[*ir.Function]*backend.Coordinates
 	kernels    map[*ir.Function]*backend.PhysicalKernel
 }
 
@@ -30,28 +26,17 @@ func Lower(logical *flow.Module) (*backend.Executable, error) {
 }
 
 func lower(executable *backend.Executable) (*program, error) {
-	p := &program{executable: executable, source: executable.KernelModule, functions: map[*ir.Function]*loweredFunction{}, kernels: map[*ir.Function]*backend.PhysicalKernel{}}
-	for i := range executable.PhysicalKernels {
-		kernel := &executable.PhysicalKernels[i]
-		p.functions[kernel.Function] = &loweredFunction{source: kernel.Function, coordinates: kernel.Coordinates}
-		p.kernels[kernel.Function] = kernel
+	functions, kernels, err := executable.IndexFunctions()
+	if err != nil {
+		return nil, err
 	}
-	for _, function := range p.source.Functions {
-		if function.Kind == ir.Helper {
-			uses, _, err := ir.UseCounts(function)
-			if err != nil {
-				return nil, err
-			}
-			p.functions[function] = &loweredFunction{source: function, coordinates: &backend.Coordinates{Values: map[ir.ValueID]backend.Coordinate{}, Replaced: map[ir.ValueID]bool{}, Uses: uses}}
-		}
-	}
-	return p, nil
+	return &program{executable: executable, source: executable.KernelModule, functions: functions, kernels: kernels}, nil
 }
 
-func (f *loweredFunction) inputs() map[inputKind]bool {
+func inputs(f *ir.Function, coordinates *backend.Coordinates) map[inputKind]bool {
 	used := map[inputKind]bool{}
-	for id, coordinate := range f.coordinates.Values {
-		if f.coordinates.Uses[id] == 0 {
+	for id, coordinate := range coordinates.Values {
+		if coordinates.Uses[id] == 0 {
 			continue
 		}
 		switch coordinate.Space {
@@ -63,15 +48,13 @@ func (f *loweredFunction) inputs() map[inputKind]bool {
 			used[inputLocalLinear] = true
 		}
 	}
-	if len(f.source.WorkgroupVars) > 0 {
+	if len(f.WorkgroupVars) > 0 {
 		used[inputLocalLinear] = true
 	}
 	return used
 }
-func (f *loweredFunction) used(id ir.ValueID) bool     { return f.coordinates.Uses[id] > 0 }
-func (f *loweredFunction) replaced(id ir.ValueID) bool { return f.coordinates.Replaced[id] }
-func (f *loweredFunction) coordinate(id ir.ValueID) (inputKind, uint32) {
-	coordinate := f.coordinates.Values[id]
+func coordinate(f *backend.Coordinates, id ir.ValueID) (inputKind, uint32) {
+	coordinate := f.Values[id]
 	switch coordinate.Space {
 	case backend.Global:
 		return inputGlobalIndex, uint32(coordinate.Dimension)

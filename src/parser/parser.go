@@ -50,6 +50,13 @@ func (p *Parser) expectText(s string) (lexer.Token, error) {
 }
 
 func join(a, b source.Span) source.Span { a.End = b.End; return a }
+func assignment(k lexer.Kind) bool {
+	switch k {
+	case lexer.Assign, lexer.PlusEq, lexer.MinusEq, lexer.StarEq, lexer.SlashEq, lexer.PercentEq, lexer.AmpEq, lexer.PipeEq, lexer.CaretEq, lexer.ShiftLeftEq, lexer.ShiftRightEq:
+		return true
+	}
+	return false
+}
 
 func (p *Parser) module() (*ast.Module, error) {
 	m := &ast.Module{File: p.file}
@@ -477,7 +484,7 @@ func (p *Parser) stmt() (ast.Stmt, error) {
 				d = -1
 			}
 			post = &ast.IncStmt{Target: pe, Delta: d, Span: join(postStart, op.Span)}
-		} else if p.at(lexer.Assign) || p.at(lexer.PlusEq) || p.at(lexer.MinusEq) || p.at(lexer.StarEq) || p.at(lexer.SlashEq) || p.at(lexer.PercentEq) || p.at(lexer.AmpEq) || p.at(lexer.PipeEq) || p.at(lexer.CaretEq) || p.at(lexer.ShiftLeftEq) || p.at(lexer.ShiftRightEq) {
+		} else if assignment(p.cur().Kind) {
 			op := p.take()
 			pv, err := p.expr(0)
 			if err != nil {
@@ -528,7 +535,7 @@ func (p *Parser) stmt() (ast.Stmt, error) {
 		}
 		return &ast.IncStmt{Target: e, Delta: d, Span: join(start, s.Span)}, nil
 	}
-	if p.at(lexer.Assign) || p.at(lexer.PlusEq) || p.at(lexer.MinusEq) || p.at(lexer.StarEq) || p.at(lexer.SlashEq) || p.at(lexer.PercentEq) || p.at(lexer.AmpEq) || p.at(lexer.PipeEq) || p.at(lexer.CaretEq) || p.at(lexer.ShiftLeftEq) || p.at(lexer.ShiftRightEq) {
+	if assignment(p.cur().Kind) {
 		op := p.take()
 		v, err := p.expr(0)
 		if err != nil {

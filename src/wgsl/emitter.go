@@ -223,13 +223,13 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	var params []string
 	if f.Kind == ir.Stage {
 		lowered := e.p.functions[f]
-		if lowered.needsGlobal() {
+		if needs(lowered, backend.Global) {
 			params = append(params, "@builtin(global_invocation_id) _tach_global_index: vec3<u32>")
 		}
-		if lowered.needsLocal() {
+		if needs(lowered, backend.Local) {
 			params = append(params, "@builtin(local_invocation_id) _tach_local_index: vec3<u32>")
 		}
-		if lowered.needsLocalLinear() {
+		if needs(lowered, backend.LocalLinear) {
 			params = append(params, "@builtin(local_invocation_index) _tach_local_linear: u32")
 		}
 	} else {
@@ -241,15 +241,15 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	if f.Return.Kind != types.Void {
 		head += fmt.Sprintf(" -> %s", e.typeName(f.Return))
 	}
-	e.line(head + " {")
+	e.line("%s {", head)
 	e.indent++
 	st := &fnState{e: e, f: f, lowered: e.p.functions[f], values: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]placeExpr{}}
-	for _, id := range st.lowered.coordinates.Order {
-		if st.lowered.uses(id) == 0 {
+	for _, id := range st.lowered.Order {
+		if st.lowered.Uses[id] == 0 {
 			continue
 		}
-		expression, _ := st.lowered.expression(id)
-		e.line("let %s: u32 = %s;", v(id), expression)
+		value, _ := expression(st.lowered, id)
+		e.line("let %s: u32 = %s;", v(id), value)
 		st.def(id, types.TU32)
 	}
 	for _, p := range f.Params {
@@ -315,7 +315,7 @@ type placeExpr struct {
 type fnState struct {
 	e       *emitter
 	f       *ir.Function
-	lowered *loweredFunction
+	lowered *backend.Coordinates
 	values  map[ir.ValueID]*types.Type
 	places  map[ir.PlaceID]placeExpr
 }
@@ -365,12 +365,12 @@ func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result, loop *ir.Loop
 }
 func (s *fnState) emitInstr(in ir.Instr) error {
 	e := s.e
-	if definition, ok := in.(ir.ValueDef); ok && s.lowered != nil && s.lowered.replaced(definition.ResultValue()) {
+	if definition, ok := in.(ir.ValueDef); ok && s.lowered != nil && s.lowered.Replaced[definition.ResultValue()] {
 		return nil
 	}
 	switch x := in.(type) {
 	case *ir.Const:
-		if s.lowered != nil && s.lowered.uses(x.Result) == 0 {
+		if s.lowered != nil && s.lowered.Uses[x.Result] == 0 {
 			return nil
 		}
 		raw := x.Raw

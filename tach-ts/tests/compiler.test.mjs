@@ -107,7 +107,8 @@ export function scale[i](values: buffer<float32[]>, options: Options) {
     assert.equal(generated.status, 0, generated.stderr);
     assert.match(generated.stdout, /^# Scaling kernels/mu);
     assert.match(generated.stdout, /GPU buffer · read\/write/u);
-    assert.match(generated.stdout, /## Internal functions[\s\S]*The configured multiplier\./u);
+    assert.match(generated.stdout, /## Internal functions and stages[\s\S]*The configured multiplier\./u);
+    assert.match(generated.stdout, /## Exported programs[\s\S]*Scales every value\./u);
     assert.match(generated.stdout, /## TypeScript usage/u);
     assert.match(generated.stdout, /\$size: number[\s\S]*\{ size: \$size \}/u);
     const snippet = generated.stdout.match(/```ts\n([\s\S]*?)```/u)?.[1];

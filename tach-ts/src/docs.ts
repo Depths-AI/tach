@@ -37,11 +37,11 @@ export function renderDocumentation(module: Documentation): string {
   const privateFunctions = module.functions.filter((fn) => !fn.exported);
   const exportedFunctions = module.functions.filter((fn) => fn.exported);
   if (privateFunctions.length) {
-    markdown += "## Internal functions\n\n";
+    markdown += "## Internal functions and stages\n\n";
     for (const fn of privateFunctions) markdown += renderFunction(fn);
   }
   if (exportedFunctions.length) {
-    markdown += "## Exported kernels\n\n";
+    markdown += "## Exported programs\n\n";
     for (const fn of exportedFunctions) markdown += renderFunction(fn);
     markdown += "## TypeScript usage\n\nThis example is generated from the compiler-validated API.\n\n```ts\n";
     markdown += usage(module, exportedFunctions) + "```\n";

@@ -437,7 +437,7 @@ func inputInfo(k inputKind) (*types.Type, uint32, string) {
 func (b *builder) emitInputs() error {
 	used := map[inputKind]bool{}
 	for _, f := range b.m.Functions {
-		for k := range b.p.functions[f].inputs() {
+		for k := range inputs(f, b.p.functions[f]) {
 			used[k] = true
 		}
 	}
@@ -487,7 +487,7 @@ func (b *builder) emitEntryPoints() {
 		if f.Kind != ir.Stage {
 			continue
 		}
-		used := b.p.functions[f].inputs()
+		used := inputs(f, b.p.functions[f])
 		ops := []uint32{ExecutionModelGLCompute, b.funcIDs[f.Name]}
 		ops = append(ops, encodeString(f.Name)...)
 		// SPIR-V 1.3 entry-point interfaces contain Input/Output variables only.
@@ -729,8 +729,8 @@ func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int,
 func (s *fnEmitter) emitCoordinates() error {
 	lowered := s.b.p.functions[s.f]
 	active := false
-	for _, value := range lowered.coordinates.Order {
-		active = active || lowered.used(value)
+	for _, value := range lowered.Order {
+		active = active || lowered.Uses[value] > 0
 	}
 	if !active {
 		return nil
@@ -739,11 +739,11 @@ func (s *fnEmitter) emitCoordinates() error {
 	if err != nil {
 		return err
 	}
-	for _, value := range lowered.coordinates.Order {
-		if !lowered.used(value) {
+	for _, value := range lowered.Order {
+		if lowered.Uses[value] == 0 {
 			continue
 		}
-		input, dimension := lowered.coordinate(value)
+		input, dimension := coordinate(lowered, value)
 		loaded := s.inputs[input]
 		if loaded == 0 {
 			variable := s.b.inputIDs[input]
@@ -1056,13 +1056,13 @@ func (s *fnEmitter) storePlace(p spvPlace, value uint32) error {
 func (s *fnEmitter) emitInstr(in ir.Instr) error {
 	if definition, ok := in.(ir.ValueDef); ok {
 		lowered := s.b.p.functions[s.f]
-		if lowered.replaced(definition.ResultValue()) {
+		if lowered.Replaced[definition.ResultValue()] {
 			return nil
 		}
 	}
 	switch x := in.(type) {
 	case *ir.Const:
-		if !s.b.p.functions[s.f].used(x.Result) {
+		if s.b.p.functions[s.f].Uses[x.Result] == 0 {
 			return nil
 		}
 		id, err := s.b.constant(x.Type, x.Raw)
