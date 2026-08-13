@@ -44,19 +44,19 @@ func LowerCoordinates(f *ir.Function) (*Coordinates, error) {
 	return coordinates, nil
 }
 
-func OptimizeCoordinates(f *ir.Function, coordinates *Coordinates) {
+func OptimizeCoordinates(f *ir.Function, workgroup [3]uint32, coordinates *Coordinates) {
 	// Coefficients use uint32 arithmetic, matching Core exactly. The row-major
 	// [1, size.x, size.x*size.y] form is the portable local-linear coordinate.
 	want := [3]uint32{}
 	stride := uint32(1)
 	for dimension := range f.Indices {
 		want[dimension] = stride
-		stride *= f.Workgroup[dimension]
+		stride *= workgroup[dimension]
 	}
-	optimizeBlock(f, coordinates, f.Body, map[ir.ValueID]uint32{}, map[ir.ValueID]*ir.Binary{}, map[ir.ValueID][3]uint32{}, want)
+	optimizeBlock(f, workgroup, coordinates, f.Body, map[ir.ValueID]uint32{}, map[ir.ValueID]*ir.Binary{}, map[ir.ValueID][3]uint32{}, want)
 }
 
-func optimizeBlock(f *ir.Function, coordinates *Coordinates, block *ir.Block, constants map[ir.ValueID]uint32, definitions map[ir.ValueID]*ir.Binary, forms map[ir.ValueID][3]uint32, want [3]uint32) {
+func optimizeBlock(f *ir.Function, workgroup [3]uint32, coordinates *Coordinates, block *ir.Block, constants map[ir.ValueID]uint32, definitions map[ir.ValueID]*ir.Binary, forms map[ir.ValueID][3]uint32, want [3]uint32) {
 	for _, in := range block.Instrs {
 		switch x := in.(type) {
 		case *ir.Const:
@@ -69,7 +69,7 @@ func optimizeBlock(f *ir.Function, coordinates *Coordinates, block *ir.Block, co
 			definitions[x.Result] = x
 			origin, ok := coordinates.Values[x.Left]
 			size, constant := constants[x.Right]
-			if ok && constant && origin.Space == Global && x.Op == "%" && size == f.Workgroup[origin.Dimension] {
+			if ok && constant && origin.Space == Global && x.Op == "%" && size == workgroup[origin.Dimension] {
 				space := Local
 				if len(f.Indices) == 1 {
 					space = LocalLinear
@@ -94,11 +94,13 @@ func optimizeBlock(f *ir.Function, coordinates *Coordinates, block *ir.Block, co
 			coordinates.Order = append(coordinates.Order, x.Result)
 			replaceBinary(x, coordinates, definitions)
 		case *ir.If:
-			optimizeBlock(f, coordinates, x.Then, constants, definitions, forms, want)
-			optimizeBlock(f, coordinates, x.Else, constants, definitions, forms, want)
+			optimizeBlock(f, workgroup, coordinates, x.Then, constants, definitions, forms, want)
+			optimizeBlock(f, workgroup, coordinates, x.Else, constants, definitions, forms, want)
 		case *ir.Loop:
-			optimizeBlock(f, coordinates, x.Cond, constants, definitions, forms, want)
-			optimizeBlock(f, coordinates, x.Body, constants, definitions, forms, want)
+			optimizeBlock(f, workgroup, coordinates, x.Cond, constants, definitions, forms, want)
+			optimizeBlock(f, workgroup, coordinates, x.Body, constants, definitions, forms, want)
+		case *ir.Scope:
+			optimizeBlock(f, workgroup, coordinates, x.Body, constants, definitions, forms, want)
 		}
 	}
 }

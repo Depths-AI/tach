@@ -34,3 +34,18 @@ func TestNumericLiteralRejectsMissingDigits(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentationStringsAndLineComments(t *testing.T) {
+	tokens, err := Lex("docs.tach", `// ignored
+@docs(summary("GPU \"work\"."))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens[0].Kind != At || tokens[5].Kind != String || tokens[5].Text != `"GPU \"work\"."` {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	block, err := Lex("comments.tach", `/* not a comment */`)
+	if err != nil || block[0].Kind != Slash {
+		t.Fatalf("block comment was ignored: tokens=%#v error=%v", block, err)
+	}
+}

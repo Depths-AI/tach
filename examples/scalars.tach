@@ -1,7 +1,19 @@
+@docs(
+  title("Scalar scaling"),
+  summary("A minimal typed GPU kernel that scales a runtime-sized array in place.")
+);
+
+@docs(
+  summary("Multiplies every in-range value by a scalar."),
+  coordinate(i, "Value index."),
+  param(data, "Values updated in place."),
+  param(factor, "Multiplier applied to each value.")
+)
 export function scale[i](
   data: buffer<float32[]>,
   factor: float32,
 ) {
+  // Workgroup rounding can produce coordinates beyond the runtime array.
   if (i < data.length) {
     data[i] *= factor;
   }

@@ -8,15 +8,10 @@ import (
 	"unicode"
 )
 
-// KernelEntry is the exact externally-visible entry-point name emitted into
-// both WGSL and SPIR-V. Exported Tach kernels keep their source spelling; host
-// applications should never have to know or reconstruct a compiler mangling
-// scheme.
-func KernelEntry(name string) string { return name }
+func PrivateEntry(index int) string { return fmt.Sprintf("_tach_k%d", index) }
 
 // Mangle maps a Tach identifier to a conservative ASCII identifier for
-// compiler-private symbols. Public kernel entry points deliberately do not use
-// it.
+// compiler-private symbols.
 func Mangle(s string) string {
 	var b strings.Builder
 	for _, r := range s {

@@ -79,6 +79,10 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 				if err := block(x.Body); err != nil {
 					return err
 				}
+			case *Scope:
+				if err := block(x.Body); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("unhandled IR instruction %T", in)
 			}
@@ -96,7 +100,7 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 			if x.HasValue {
 				useValue(x.Value)
 			}
-		case *Unreachable, nil:
+		case *Unreachable, *ExitScope, nil:
 		default:
 			return fmt.Errorf("unhandled IR terminator %T", b.Term)
 		}

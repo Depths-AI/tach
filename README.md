@@ -1,10 +1,10 @@
 # Tach
 
-Tach is a small, typed language for GPU compute. It is designed to feel
-familiar to a TypeScript developer while keeping shader-provider details out of
-application code.
+Tach is a small, typed language for portable GPU compute. Its source feels
+familiar to a TypeScript developer, while the compiler owns shader entry
+points, bindings, byte layout, launch geometry, and target validation.
 
-You write this:
+Write a baseline kernel:
 
 ```tach
 export function scale[i](
@@ -17,30 +17,24 @@ export function scale[i](
 }
 ```
 
-Tach turns it into validated WGSL for WebGPU, validated SPIR-V for Vulkan,
-typed JavaScript/TypeScript bindings, reflection metadata, and a readable
-target-neutral IR. You never write a WGSL invocation builtin, a Vulkan
-descriptor number, or a padding field in Tach source.
+Tach turns it into validated WGSL for WebGPU, validated SPIR-V 1.3 for Vulkan,
+typed JavaScript/TypeScript command constructors, reflection metadata, and
+readable diagnostics. Tach source contains no WGSL builtins, descriptor
+numbers, storage classes, or padding fields.
 
-## Run your first kernel
+## Run the first kernel
 
-The npm package needs Node.js 22 or newer. Install it in your application:
+Applications need Node.js 22 or newer. Install the package, save the source as
+`scale.tach`, and build its default WebGPU output:
 
 ```sh
 npm install @depths/tach
-```
-
-Save the example above as `scale.tach`, then compile it:
-
-```sh
 npx tach check scale.tach
 npx tach build scale.tach
 ```
 
-`check` validates without writing files. `build` writes synchronized artifacts
-to `build/`, including `scale.js` and `scale.d.ts`.
-
-Call the generated function from TypeScript:
+`check` validates without writing files. `build` writes `scale.wgsl`,
+`scale.js`, and `scale.d.ts` under `build/`.
 
 ```ts
 import { tach } from "@depths/tach";
@@ -48,7 +42,6 @@ import { scale } from "./build/scale.js";
 
 const result = await tach(async (gpu) => {
   const values = gpu.buffer(new Float32Array([1, 2, 3, 4]));
-
   await gpu.submit(scale(values, 2));
   return values.read();
 });
@@ -56,30 +49,29 @@ const result = await tach(async (gpu) => {
 console.log(result); // Float32Array [2, 4, 6, 8]
 ```
 
-That example contains the whole everyday model:
+The everyday host model has three operations:
 
-1. `gpu.buffer(...)` creates GPU-resident state owned by one Tach session.
-2. `scale(values, 2)` creates a command; it does not execute yet.
-3. `gpu.submit(...)` records and submits one or more commands.
-4. `values.read()` waits for prior work and returns host data.
+1. `gpu.buffer(value)` creates session-owned GPU state.
+2. A generated function such as `scale(...)` constructs a command.
+3. `gpu.submit(...)` records and queues commands; `read()` or `idle()` waits
+   for completion.
 
-## Reading Tach source
+## Source model
 
-A kernel is an exported function with one to three logical coordinates:
+Tach has three function roles:
 
-```tach
-export function line[i](out: buffer<uint32[]>) {
-  if (i < out.length) {
-    out[i] = i;
-  }
-}
-```
+| Source form | Role |
+|---|---|
+| `function helper(...)` | private value computation |
+| `function stage[i](...)` | private indexed GPU stage |
+| `export function program(...)` | host-callable program that runs stages |
 
-The brackets are the one intentional extension to an ordinary TypeScript-like
-function declaration. `i` is an immutable `uint32` supplied to each invocation.
-It is not a host argument and it is not a provider-specific invocation object.
+The baseline form shown above is deliberate syntax sugar: an
+`export function name[i](...)` declares an indexed stage and a same-named
+public one-dispatch program. Simple kernels remain simple.
 
-Two-dimensional work is equally direct:
+Coordinates are immutable `uint32` values supplied to GPU invocations, not
+host parameters:
 
 ```tach
 export function image[x, y](pixels: buffer<float32x4[]>) {
@@ -91,23 +83,22 @@ export function image[x, y](pixels: buffer<float32x4[]>) {
 }
 ```
 
-The host supplies a matching logical size:
+The host supplies a logical size of matching rank:
 
 ```ts
 await gpu.submit(image(pixels, { size: [1920, 1080] }));
 ```
 
-Kernel parameters describe data movement:
+Tach rounds each dimension up to whole workgroups. Source must guard any edge
+invocations before indexing; the compiler does not add dynamic bounds checks.
 
-- `buffer<T>` is storage that a kernel may read or write. Tach infers access.
-- a plain type such as `float32` or `Params` is an immutable value copied into
-  the command;
-- `T[]` is a runtime-sized array and exposes `.length` inside the kernel.
+Parameters describe the host boundary:
 
-That is the complete distinction: buffers are resident memory; ordinary typed
-parameters are values. Shader storage classes never appear in Tach source.
+- `buffer<T>` is GPU storage whose read/write mode is inferred from effects;
+- a plain type is an immutable value packed by the compiler; and
+- `T[]` is a runtime-sized array with `.length` inside indexed stages.
 
-Regular helper functions use the same spelling TypeScript does:
+Helpers use TypeScript-shaped declarations and operate only on values:
 
 ```tach
 type Particle = {
@@ -122,28 +113,76 @@ function advance(particle: Particle, dt: float32): Particle {
   };
 }
 
-export function step[i](particles: buffer<Particle[]>) {
+export function step[i](particles: buffer<Particle[]>, dt: float32) {
   if (i < particles.length) {
-    particles[i] = advance(particles[i], 0.016);
+    particles[i] = advance(particles[i], dt);
   }
 }
 ```
 
-Tach uses TypeScript-shaped `type`, `function`, `export`, `const`, `let`, `if`,
-`else`, `while`, `for`, ternaries, object literals, property access, indexing,
-and return annotations. GPU value types stay explicit: `bool`, `int32`,
-`uint32`, `float32`, and vectors such as `float32x4`. A plain `number` would hide
-representation decisions that buffers and GPU arithmetic need to agree on.
+GPU value types are explicit: `bool`, `int32`, `uint32`, `float32`, and
+two-, three-, or four-lane numeric vectors such as `float32x4`. Numeric
+literals have no shader suffixes. Context infers their type; conversions use
+`int32(value)`, `uint32(value)`, or `float32(value)`.
 
-Numeric literals have no shader suffixes. Write `0`, not `0u`; context infers
-the concrete type. Use `uint32(value)`, `int32(value)`, or `float32(value)` for
-an explicit conversion when needed.
+## Multi-stage programs
 
-The complete source contract is in the [language guide](docs/language.md).
+When an operation needs several dispatches, keep the indexed work in private
+stages and export one orchestration function:
 
-## Workgroups are optional
+```tach
+function multiply[i](
+  input: buffer<float32[]>,
+  scratch: buffer<float32[]>,
+  factor: float32,
+) {
+  scratch[i] = input[i] * factor;
+}
 
-Tach chooses portable defaults from kernel rank:
+function addBias[i](
+  scratch: buffer<float32[]>,
+  output: buffer<float32[]>,
+  bias: float32,
+) {
+  output[i] = scratch[i] + bias;
+}
+
+export function transform(
+  input: buffer<float32[]>,
+  output: buffer<float32[]>,
+  count: uint32,
+  factor: float32,
+  bias: float32,
+) {
+  const scratch = transient<float32>(count);
+  run multiply(input, scratch, factor) over count;
+  run addBias(scratch, output, bias) over count;
+}
+```
+
+`transient<T>(length)` requests program-local scratch storage. The compiler
+checks its lifetime and type, reuses non-overlapping scratch allocations, and
+emits the target execution plan. `run stage(...) over domain` has the same rank
+as the stage coordinates. Domains are checked `uint32` shape expressions built
+from constants, public values, buffer lengths, arithmetic, `min`, `max`, and
+`ceilDiv`.
+
+The public TypeScript API still exposes one command:
+
+```ts
+await gpu.submit(transform(input, output, count, 2, 0.5));
+```
+
+Tach currently preserves every source `run` as a physical dispatch. It can
+move a safe repeated single-stage command into an invocation-local loop, but
+it does not fuse distinct stages.
+
+The [language guide](docs/language.md) defines both the baseline sugar and the
+complete orchestration language.
+
+## Workgroups and synchronization
+
+The compiler selects portable defaults by stage rank:
 
 | Coordinates | Default workgroup |
 |---:|---:|
@@ -151,8 +190,8 @@ Tach chooses portable defaults from kernel rank:
 | `[x, y]` | `16 x 16 x 1` |
 | `[x, y, z]` | `8 x 8 x 4` |
 
-Most kernels should stop there. State a workgroup only when the algorithm
-depends on its shape, usually because it uses shared memory:
+Most stages should use the default. Specify `@workgroup(...)` when the
+algorithm depends on shared memory or barriers:
 
 ```tach
 @workgroup(64)
@@ -169,26 +208,33 @@ export function blockTotals[i](out: buffer<uint32[]>) {
 }
 ```
 
-`shared<T>`, barriers, and atomics express real parallel-memory semantics, so
-they remain explicit. Mapping coordinate arithmetic to efficient target inputs
-is the compiler's job.
+`shared<T>`, atomics, and barriers expose real parallel-memory semantics and
+therefore remain explicit. Tach verifies that every workgroup invocation
+reaches a barrier under uniform control.
 
-## Batch jobs and long-running loops
+## Structured documentation
 
-`tach(...)` owns a complete scoped job. It opens a device, runs the callback,
-waits for submitted work, returns the callback value, and closes everything:
+`@docs(...)` attaches checked documentation to the module, types, helpers,
+stages, and public programs. Names in `field`, `param`, and `coordinate`
+clauses are resolved by the compiler, so stale references fail compilation.
+Use `//` for single-line implementation notes; block comments are not part of
+the language.
 
-```ts
-const result = await tach(async (gpu) => {
-  const state = gpu.buffer(initialState);
-  await gpu.submit(step(state));
-  return state.read();
-});
+```sh
+npx tach docs scale.tach > scale.md
 ```
 
-Calling `tach()` without a callback gives the caller the same session without
-automatic shutdown. Use it for animation, simulation, services, or any loop that should keep the
-device, pipelines, bind groups, and buffers resident:
+Generated `.d.ts` files carry summaries and parameter context as JSDoc. The
+`docs` command renders target-neutral Markdown and adds TypeScript usage from
+the same validated API description. See the
+[documentation section of the language guide](docs/language.md#3-structured-documentation-and-comments).
+
+## Runtime lifetime
+
+`tach(callback)` owns a scoped job: it opens a session, runs the callback,
+waits for queued work, returns the callback result, and closes all resources.
+
+Call `tach()` without a callback for resident state:
 
 ```ts
 import { tach } from "@depths/tach";
@@ -198,7 +244,7 @@ const state = gpu.buffer(initialState);
 
 try {
   for (let frame = 0; frame < 1_000; frame++) {
-    await gpu.submit(step(state));
+    await gpu.submit(step(state, 1 / 60));
   }
   await gpu.idle();
 } finally {
@@ -206,107 +252,95 @@ try {
 }
 ```
 
-`submit()` waits for preparation and queue submission, not GPU completion.
-`idle()`, buffer readback, and the end of `tach(...)` are completion
-boundaries. Both lifetime forms use the same execution engine and ownership
-rules. The [TypeScript runtime guide](tach-ts/README.md) covers the full API.
+`submit()` waits for command preparation and queue submission, not GPU
+completion. `idle()`, buffer readback, and scoped-session exit are completion
+boundaries. The [TypeScript guide](tach-ts/README.md) defines the full runtime
+contract.
 
-## Compiler output
+## Compiler commands and artifacts
 
-`build` and `check` use the same target selection. Both default to `web`:
+`build` and `check` default to `web` and accept the same target selection:
 
 | Target | `build` writes | `check` validates |
 |---|---|---|
-| `web` | `.wgsl`, `.js`, `.d.ts` | WGSL and generated bindings |
-| `spirv` | `.spv` | SPIR-V |
-| `all` | every artifact below | both backends plus diagnostics |
+| `web` | `.wgsl`, `.js`, `.d.ts` | WGSL, execution metadata, and bindings |
+| `spirv` | `.spv` | SPIR-V and execution metadata |
+| `all` | all six artifacts below | both targets plus diagnostics |
 
-The complete `all` artifact set is:
-
-| File | What it is for |
+| Artifact | Purpose |
 |---|---|
-| `.tir` | readable, verified Tach Core IR diagnostic |
-| `.wgsl` | WebGPU compute shader |
-| `.spv` | SPIR-V 1.3 compute module |
-| `.spvasm` | diagnostic disassembly of the emitted SPIR-V bytes |
-| `.js` | generated command constructors |
-| `.d.ts` | generated TypeScript object types and function signatures |
-| `.tach.json` | diagnostic reflection for buffers, values, layouts, entry points, and launches |
-
-The useful CLI commands are:
+| `.tir` | logical programs, kernel templates, and both executable plans |
+| `.wgsl` | WebGPU shader module |
+| `.spv` | SPIR-V 1.3 shader module |
+| `.spvasm` | disassembly decoded from the emitted SPIR-V bytes |
+| `.js` | generated public command constructors and embedded Web plan |
+| `.d.ts` | generated TypeScript types and signatures |
 
 ```text
-tach build FILE.tach
-tach build --target spirv FILE.tach
-tach build --target all FILE.tach
+tach build [--target web|spirv|all] FILE.tach
 tach check [--target web|spirv|all] FILE.tach
+tach docs FILE.tach
 tach ir FILE.tach
 tach wgsl FILE.tach
 tach spirv-dis FILE.tach
 tach version
 ```
 
-The `.tach` file is the source of truth. A later build of the same module
-removes stale Tach artifacts outside the selected target, so `build/` reflects
-that invocation exactly. Do not edit or mix generated artifacts by hand.
+`ir`, `wgsl`, and `spirv-dis` compile the complete `all` pipeline before
+printing their diagnostic view. A later build removes stale sibling artifacts
+outside the selected target. Generated files from different compiler runs are
+not compatible and should never be edited or mixed.
 
-## What the compiler owns
-
-Compilation is deliberately layered:
+## Compiler architecture
 
 ```text
-Tach source
-  -> parse and type-check
-  -> verified target-neutral Core IR
-  -> target-neutral optimization
-  -> shared parameter-block planning
-       |                    |
-       v                    v
-     WGSL IR             SPIR-V IR
-  -> target pass       -> target pass
-  -> emit + validate   -> emit + validate
-       \____________________/
-                 |
-                 v
-        bindings + metadata
-        + contract validation
+source -> AST -> semantic checking
+                  |-> Kernel IR: helpers and indexed stages
+                  `-> Flow IR: public programs, resources, shapes, dispatches
+                             |
+                             v
+                     Kernel IR optimization
+                         /             \
+                        v               v
+                 Web executable    SPIR-V executable
+                 plan + WGSL       plan + SPIR-V
+                        \               /
+                         v             v
+                    bindings + metadata
+                    + contract validation
 ```
 
-The first optimization stage reasons only about Tach semantics. Each backend
-then performs representation-specific work privately. Provider terms may
-appear in generated WGSL or SPIR-V, never in Tach source or Core IR.
-
-The compiler owns the host boundary. Storage buffers use one canonical layout;
-all plain values of a kernel are flattened into one compiler-planned parameter
-block. The same offsets drive WGSL, SPIR-V, metadata, the WebGPU runtime, and
-the native harness. Host code never parses a shader to rediscover an interface.
+Kernel IR owns portable per-invocation meaning. Flow IR owns dispatch order,
+resource versions, shapes, and transient lifetimes. Each target then chooses
+workgroups, physical entries, parameter blocks, coordinate inputs, and
+synchronization without leaking provider concepts upward.
 
 For deeper detail:
 
-- [Language guide](docs/language.md): write kernels, from first principles to
-  the exact grammar.
-- [Architecture guide](docs/architecture.md): how source, IR, optimization,
-  backends, bindings, and runtime fit together.
-- [Core IR guide](docs/ir.md): values, places, structured control, verification,
-  and both optimization levels.
-- [ABI guide](docs/abi.md): buffer identity, byte layout, launch geometry,
-  host values, sessions, and native caller obligations.
+- [Language](docs/language.md): complete source syntax and semantic rules.
+- [Architecture](docs/architecture.md): ownership and end-to-end data flow.
+- [IR](docs/ir.md): Flow IR, Kernel IR, executable plans, and verification.
+- [ABI](docs/abi.md): names, layouts, plans, metadata, and host obligations.
 
-## Develop this repository
+## Develop the repository
 
-Compiler development needs Go 1.23 or newer. Runtime and browser work needs
+Compiler development requires Go 1.26.5. Runtime and browser work requires
 Node.js 22 or newer.
 
 ```sh
 npm ci
-npm run compiler
 npm run check
-go test -count=1 ./src/...
+go test -count=1 ./...
 go vet ./...
+npm run check:duplicates
 ```
 
-Install Chromium once, then exercise generated WGSL in a real WebGPU
-implementation:
+`npm run check` builds the compiler and TypeScript surfaces, regenerates the
+showcase kernel, type-checks it, and fails on structural Go clones at the
+repository threshold. The committed Go tool directive pins `dupl`; no separate
+global installation is required.
+
+Install Chromium once and run real WebGPU correctness and benchmark harnesses:
 
 ```sh
 npm run install:browser --workspace=@tach/browser-test
@@ -314,59 +348,55 @@ npm run install:browser --workspace=@tach/showcase-ts
 npm test
 ```
 
-Exercise generated SPIR-V through Vulkan:
+Run the native SPIR-V path through Khronos validation and Vulkan:
 
 ```sh
 npm run test:spirv
 ```
 
-That native harness additionally needs CGO, a C compiler, a Vulkan loader and
-driver, and Khronos `spirv-val`.
-
-The focused harness guides are:
-
-- [browser-test](browser-test/README.md): correctness through generated
-  TypeScript bindings and Chromium WebGPU;
-- [spirv-test](spirv-test/README.md): correctness through SPIR-V and Vulkan;
-- [showcase-ts](showcase-ts/README.md): sustained compute and procedural
-  rendering workloads with reports and screenshots.
+That harness additionally needs CGO, a C compiler, a Vulkan loader and driver,
+Khronos `spirv-val`, and preferably the Vulkan validation layer. Harness details
+live in [browser-test](browser-test/README.md),
+[spirv-test](spirv-test/README.md), and
+[showcase-ts](showcase-ts/README.md).
 
 ## Repository map
 
 ```text
-main.go          CLI
-src/lexer        tokenization
-src/parser       source grammar
-src/ast          source-shaped syntax tree
-src/types        logical types
-src/sema         checking and Core IR lowering
-src/ir           Core IR and verification
-src/opt          target-neutral optimization
-src/backend      shared backend analysis
-src/layout       canonical buffer and physical field layout
-src/abi          names and shared parameter-block planning
-src/wgsl         WGSL lowering, optimization, emission, validation
-src/spirv        SPIR-V lowering, optimization, emission, validation
-src/bindings     metadata and JS/TypeScript generation
+main.go          native CLI
+src/lexer        tokens and source spelling
+src/parser       grammar and source-shaped AST construction
+src/ast          source representation
+src/types        logical type system
+src/sema         checking plus Kernel IR and Flow IR lowering
+src/ir           per-invocation Kernel IR
+src/flow         public-program Flow IR
+src/opt          target-independent Kernel IR optimization
+src/backend      target executable planning
+src/layout       canonical host-visible byte layout
+src/abi          private names and parameter blocks
+src/wgsl         WGSL lowering, emission, and validation
+src/spirv        SPIR-V lowering, emission, decoding, and validation
+src/bindings     metadata, JS/TypeScript, and documentation descriptions
 src/compiler     end-to-end orchestration
-tach-ts          npm compiler delivery and WebGPU runtime
-examples         executable language corpus
-browser-test     browser correctness harness
+tach-ts          compiler delivery and WebGPU runtime
+examples         maintained language and execution corpus
+browser-test     Chromium WebGPU correctness harness
 spirv-test       native Vulkan correctness harness
-showcase-ts      performance and rendering showcase
+showcase-ts      large GPU and GPU-versus-CPU benchmark harness
 ```
 
 ## Releases and license
 
-Maintainers can build native targets, pack the npm package, and create checksums
-with:
+Maintainers can run all release checks, build six native compiler targets,
+pack the npm package, and write checksums with:
 
 ```sh
 ./release.sh v0.1.0
 ```
 
-`./release.sh v0.1.0 --publish` additionally publishes the release and package;
-it requires authenticated GitHub and npm CLIs plus a clean committed tree.
+Adding `--publish` creates the GitHub release and publishes npm; it requires
+authenticated GitHub and npm CLIs plus a clean committed tree.
 
 Tach is licensed under the [GNU Affero General Public License version 3](LICENSE)
 only (`AGPL-3.0-only`).

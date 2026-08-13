@@ -79,6 +79,7 @@ trap 'exit 1' HUP INT TERM
 echo "Running local release checks"
 go test -count=1 ./...
 go vet ./...
+npm run check:duplicates
 npm ci --ignore-scripts
 npm test
 host_compiler=$workspace/dist/tach

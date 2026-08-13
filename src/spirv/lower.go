@@ -2,6 +2,7 @@ package spirv
 
 import (
 	"tach/src/backend"
+	"tach/src/flow"
 	"tach/src/ir"
 )
 
@@ -13,38 +14,29 @@ const (
 	inputLocalLinear
 )
 
-type loweredFunction struct {
-	source      *ir.Function
-	coordinates *backend.Coordinates
-}
-
 type program struct {
-	source    *ir.Module
-	functions map[*ir.Function]*loweredFunction
+	executable *backend.Executable
+	source     *ir.Module
+	functions  map[*ir.Function]*backend.Coordinates
+	kernels    map[*ir.Function]*backend.PhysicalKernel
 }
 
-func lower(m *ir.Module) (*program, error) {
-	p := &program{source: m, functions: map[*ir.Function]*loweredFunction{}}
-	for _, f := range m.Functions {
-		coordinates, err := backend.LowerCoordinates(f)
-		if err != nil {
-			return nil, err
-		}
-		p.functions[f] = &loweredFunction{source: f, coordinates: coordinates}
+func Lower(logical *flow.Module) (*backend.Executable, error) {
+	return backend.Lower(logical, backend.SPIRVProfile)
+}
+
+func lower(executable *backend.Executable) (*program, error) {
+	functions, kernels, err := executable.IndexFunctions()
+	if err != nil {
+		return nil, err
 	}
-	return p, nil
+	return &program{executable: executable, source: executable.KernelModule, functions: functions, kernels: kernels}, nil
 }
 
-func optimize(p *program) {
-	for _, f := range p.functions {
-		backend.OptimizeCoordinates(f.source, f.coordinates)
-	}
-}
-
-func (f *loweredFunction) inputs() map[inputKind]bool {
+func inputs(f *ir.Function, coordinates *backend.Coordinates) map[inputKind]bool {
 	used := map[inputKind]bool{}
-	for id, coordinate := range f.coordinates.Values {
-		if f.coordinates.Uses[id] == 0 {
+	for id, coordinate := range coordinates.Values {
+		if coordinates.Uses[id] == 0 {
 			continue
 		}
 		switch coordinate.Space {
@@ -56,18 +48,13 @@ func (f *loweredFunction) inputs() map[inputKind]bool {
 			used[inputLocalLinear] = true
 		}
 	}
-	if len(f.source.WorkgroupVars) > 0 {
+	if len(f.WorkgroupVars) > 0 {
 		used[inputLocalLinear] = true
 	}
 	return used
 }
-
-func (f *loweredFunction) used(id ir.ValueID) bool { return f.coordinates.Uses[id] > 0 }
-func (f *loweredFunction) replaced(id ir.ValueID) bool {
-	return f.coordinates.Replaced[id]
-}
-func (f *loweredFunction) coordinate(id ir.ValueID) (inputKind, uint32) {
-	coordinate := f.coordinates.Values[id]
+func coordinate(f *backend.Coordinates, id ir.ValueID) (inputKind, uint32) {
+	coordinate := f.Values[id]
 	switch coordinate.Space {
 	case backend.Global:
 		return inputGlobalIndex, uint32(coordinate.Dimension)

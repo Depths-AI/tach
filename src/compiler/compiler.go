@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"tach/src/backend"
 	"tach/src/bindings"
+	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/opt"
 	"tach/src/parser"
@@ -59,6 +61,60 @@ func CompileTarget(sourceName, source string, target BuildTarget) (*Result, erro
 	if _, err := ParseBuildTarget(string(target)); err != nil {
 		return nil, err
 	}
+	module, err := lower(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	if err := opt.OptimizeLogical(module); err != nil {
+		return nil, fmt.Errorf("IR optimization: %w", err)
+	}
+
+	result := &Result{SourceName: sourceName, target: target}
+	var webExecutable, spirvExecutable *backend.Executable
+	if target == TargetWeb || target == TargetAll {
+		webExecutable, err = wgsl.Lower(module)
+		if err != nil {
+			return nil, fmt.Errorf("Web executable planning: %w", err)
+		}
+		result.WGSL, err = wgsl.Emit(webExecutable)
+		if err != nil {
+			return nil, fmt.Errorf("WGSL backend: %w", err)
+		}
+	}
+	if target == TargetSPIRV || target == TargetAll {
+		spirvExecutable, err = spirv.Lower(module)
+		if err != nil {
+			return nil, fmt.Errorf("SPIR-V executable planning: %w", err)
+		}
+		result.SPIRV, err = spirv.Emit(spirvExecutable)
+		if err != nil {
+			return nil, fmt.Errorf("SPIR-V backend: %w", err)
+		}
+	}
+	if target == TargetAll {
+		result.IR = "=== optimized logical program ===\n" + flow.Dump(module) + "=== kernel templates ===\n" + ir.Dump(module.Kernel) + "=== web executable ===\n" + backend.Dump(webExecutable) + "=== spirv executable ===\n" + backend.Dump(spirvExecutable)
+		result.SPIRVAsm, err = spirv.Disassemble(result.SPIRV)
+		if err != nil {
+			return nil, fmt.Errorf("SPIR-V disassembly: %w", err)
+		}
+	}
+	generated, err := bindings.Generate(module, webExecutable, spirvExecutable, result.WGSL)
+	if err != nil {
+		return nil, fmt.Errorf("bindings: %w", err)
+	}
+	result.JavaScript, result.TypeScript, result.Metadata = generated.JavaScript, generated.Declarations, generated.MetadataJSON
+	return result, nil
+}
+
+func Describe(sourceName, source string) ([]byte, error) {
+	module, err := lower(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	return bindings.Describe(module, sourceName)
+}
+
+func lower(sourceName, source string) (*flow.Module, error) {
 	astModule, err := parser.Parse(sourceName, source)
 	if err != nil {
 		return nil, err
@@ -67,40 +123,15 @@ func CompileTarget(sourceName, source string, target BuildTarget) (*Result, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := opt.Run(module); err != nil {
-		return nil, fmt.Errorf("IR optimization: %w", err)
-	}
+	return module, nil
+}
 
-	result := &Result{SourceName: sourceName, target: target}
-	if target == TargetAll {
-		result.IR = ir.Dump(module)
+func DescribeFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	if target == TargetWeb || target == TargetAll {
-		result.WGSL, err = wgsl.Emit(module)
-		if err != nil {
-			return nil, fmt.Errorf("WGSL backend: %w", err)
-		}
-		generated, err := bindings.Generate(module, result.WGSL)
-		if err != nil {
-			return nil, fmt.Errorf("bindings: %w", err)
-		}
-		result.JavaScript = generated.JavaScript
-		result.TypeScript = generated.Declarations
-		result.Metadata = generated.MetadataJSON
-	}
-	if target == TargetSPIRV || target == TargetAll {
-		result.SPIRV, err = spirv.Emit(module)
-		if err != nil {
-			return nil, fmt.Errorf("SPIR-V backend: %w", err)
-		}
-	}
-	if target == TargetAll {
-		result.SPIRVAsm, err = spirv.Disassemble(result.SPIRV)
-		if err != nil {
-			return nil, fmt.Errorf("SPIR-V disassembly: %w", err)
-		}
-	}
-	return result, nil
+	return Describe(path, string(data))
 }
 
 func CompileFile(path string) (*Result, error) {
@@ -129,7 +160,6 @@ func WriteDirectory(result *Result, dir, base string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-
 	if _, err := ParseBuildTarget(string(result.target)); err != nil {
 		return nil, fmt.Errorf("compilation result has invalid build target %q", result.target)
 	}
@@ -144,7 +174,6 @@ func WriteDirectory(result *Result, dir, base string) ([]string, error) {
 		{base + ".spvasm", []byte(result.SPIRVAsm), TargetAll},
 		{base + ".js", []byte(result.JavaScript), TargetWeb},
 		{base + ".d.ts", []byte(result.TypeScript), TargetWeb},
-		{base + ".tach.json", result.Metadata, TargetAll},
 	}
 	paths := make([]string, 0, len(artifacts))
 	for _, a := range artifacts {

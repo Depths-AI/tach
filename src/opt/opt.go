@@ -4,14 +4,23 @@ import (
 	"fmt"
 	"maps"
 
+	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/source"
 	"tach/src/types"
 )
 
-// Run applies Tach's target-independent Core IR canonicalization passes. Passes
-// are deliberately semantics-based: they know nothing about any backend.
-func Run(m *ir.Module) error {
+func OptimizeLogical(logical *flow.Module) error {
+	if logical == nil {
+		return fmt.Errorf("nil logical module")
+	}
+	if err := OptimizeKernel(logical.Kernel); err != nil {
+		return err
+	}
+	return flow.Verify(logical)
+}
+
+func OptimizeKernel(m *ir.Module) error {
 	if err := ir.Verify(m); err != nil {
 		return fmt.Errorf("pre-optimization IR verification: %w", err)
 	}
@@ -49,32 +58,34 @@ type placeKey struct {
 // commonValues removes repeated pure SSA computations while preserving the
 // structured dominance already present in Core IR.
 func commonValues(m *ir.Module, f *ir.Function) {
-	canonicalizeBlock(m, f.Body, map[ir.ValueID]ir.ValueID{}, map[ir.PlaceID]ir.PlaceID{}, map[ir.PlaceID]int{}, map[valueKey]ir.ValueID{}, map[placeKey]ir.PlaceID{})
+	canonicalizeBlock(f, f.Body, map[ir.ValueID]ir.ValueID{}, map[ir.PlaceID]ir.PlaceID{}, map[ir.PlaceID]int{}, map[valueKey]ir.ValueID{}, map[placeKey]ir.PlaceID{})
 }
 
 func hoistLoopInvariants(m *ir.Module, f *ir.Function) {
 	resources := placeResourceRoots(f)
-	hoistNestedLoops(m, f.Body, resources)
+	hoistNestedLoops(f, f.Body, resources)
 }
 
-func hoistNestedLoops(m *ir.Module, block *ir.Block, resources map[ir.PlaceID]int) {
+func hoistNestedLoops(f *ir.Function, block *ir.Block, resources map[ir.PlaceID]int) {
 	out := make([]ir.Instr, 0, len(block.Instrs))
 	for _, in := range block.Instrs {
 		switch x := in.(type) {
 		case *ir.If:
-			hoistNestedLoops(m, x.Then, resources)
-			hoistNestedLoops(m, x.Else, resources)
+			hoistNestedLoops(f, x.Then, resources)
+			hoistNestedLoops(f, x.Else, resources)
 		case *ir.Loop:
-			hoistNestedLoops(m, x.Cond, resources)
-			hoistNestedLoops(m, x.Body, resources)
-			out = append(out, takeLoopInvariants(m, x, resources)...)
+			hoistNestedLoops(f, x.Cond, resources)
+			hoistNestedLoops(f, x.Body, resources)
+			out = append(out, takeLoopInvariants(f, x, resources)...)
+		case *ir.Scope:
+			hoistNestedLoops(f, x.Body, resources)
 		}
 		out = append(out, in)
 	}
 	block.Instrs = out
 }
 
-func takeLoopInvariants(m *ir.Module, loop *ir.Loop, resources map[ir.PlaceID]int) []ir.Instr {
+func takeLoopInvariants(f *ir.Function, loop *ir.Loop, resources map[ir.PlaceID]int) []ir.Instr {
 	values, places := loopDefinitions(loop)
 	var hoisted []ir.Instr
 	for {
@@ -82,7 +93,7 @@ func takeLoopInvariants(m *ir.Module, loop *ir.Loop, resources map[ir.PlaceID]in
 		for _, block := range []*ir.Block{loop.Cond, loop.Body} {
 			kept := block.Instrs[:0]
 			for _, in := range block.Instrs {
-				if loopInvariant(m, in, values, places, resources, block == loop.Cond) {
+				if loopInvariant(f, in, values, places, resources, block == loop.Cond) {
 					hoisted = append(hoisted, in)
 					forgetDefinition(in, values, places)
 					changed = true
@@ -129,6 +140,8 @@ func loopDefinitions(loop *ir.Loop) (map[ir.ValueID]bool, map[ir.PlaceID]bool) {
 				}
 				collect(x.Cond)
 				collect(x.Body)
+			case *ir.Scope:
+				collect(x.Body)
 			}
 		}
 	}
@@ -146,7 +159,7 @@ func forgetDefinition(in ir.Instr, values map[ir.ValueID]bool, places map[ir.Pla
 	}
 }
 
-func loopInvariant(m *ir.Module, in ir.Instr, values map[ir.ValueID]bool, places map[ir.PlaceID]bool, resources map[ir.PlaceID]int, allowLoad bool) bool {
+func loopInvariant(f *ir.Function, in ir.Instr, values map[ir.ValueID]bool, places map[ir.PlaceID]bool, resources map[ir.PlaceID]int, allowLoad bool) bool {
 	value := func(id ir.ValueID) bool { return id == 0 || !values[id] }
 	place := func(id ir.PlaceID) bool { return id == 0 || !places[id] }
 	all := func(ids []ir.ValueID) bool {
@@ -183,7 +196,7 @@ func loopInvariant(m *ir.Module, in ir.Instr, values map[ir.ValueID]bool, places
 	case *ir.Load:
 		// The condition always executes once. A body load does not execute when
 		// the loop has zero iterations, so it must be cached lazily instead.
-		return allowLoad && place(x.Place) && immutableResource(m, resources, x.Place)
+		return allowLoad && place(x.Place) && immutableResource(f, resources, x.Place)
 	case *ir.ArrayLength:
 		return place(x.Place)
 	default:
@@ -191,10 +204,9 @@ func loopInvariant(m *ir.Module, in ir.Instr, values map[ir.ValueID]bool, places
 	}
 }
 
-func immutableResource(m *ir.Module, resources map[ir.PlaceID]int, place ir.PlaceID) bool {
-	resource, ok := resources[place]
-	return ok && resource >= 0 && resource < len(m.Resources) &&
-		m.Resources[resource].Access == ir.Read
+func immutableResource(f *ir.Function, resources map[ir.PlaceID]int, place ir.PlaceID) bool {
+	buffer, ok := resources[place]
+	return ok && buffer >= 0 && buffer < len(f.BufferParams) && f.BufferParams[buffer].Access == ir.Read
 }
 
 func placeResourceRoots(f *ir.Function) map[ir.PlaceID]int {
@@ -204,7 +216,7 @@ func placeResourceRoots(f *ir.Function) map[ir.PlaceID]int {
 		for _, in := range block.Instrs {
 			switch x := in.(type) {
 			case *ir.PlaceRoot:
-				resources[x.Result] = x.Resource
+				resources[x.Result] = x.Buffer
 			case *ir.PlaceWorkgroup:
 				resources[x.Result] = -1
 			case *ir.PlaceField:
@@ -216,6 +228,8 @@ func placeResourceRoots(f *ir.Function) map[ir.PlaceID]int {
 				walk(x.Else)
 			case *ir.Loop:
 				walk(x.Cond)
+				walk(x.Body)
+			case *ir.Scope:
 				walk(x.Body)
 			}
 		}
@@ -236,31 +250,33 @@ type promotedBufferValue struct {
 func promoteLoopBufferValues(m *ir.Module, f *ir.Function) {
 	resources := placeResourceRoots(f)
 	next := maximumValueID(f)
-	promoteNestedLoops(m, f.Body, resources, &next)
+	promoteNestedLoops(f, f.Body, resources, &next)
 }
 
-func promoteNestedLoops(m *ir.Module, block *ir.Block, resources map[ir.PlaceID]int, next *ir.ValueID) {
+func promoteNestedLoops(f *ir.Function, block *ir.Block, resources map[ir.PlaceID]int, next *ir.ValueID) {
 	out := make([]ir.Instr, 0, len(block.Instrs))
 	for _, in := range block.Instrs {
 		switch x := in.(type) {
 		case *ir.If:
-			promoteNestedLoops(m, x.Then, resources, next)
-			promoteNestedLoops(m, x.Else, resources, next)
+			promoteNestedLoops(f, x.Then, resources, next)
+			promoteNestedLoops(f, x.Else, resources, next)
 		case *ir.Loop:
-			promoteNestedLoops(m, x.Cond, resources, next)
-			promoteNestedLoops(m, x.Body, resources, next)
-			before, after := promoteLoop(m, x, resources, next)
+			promoteNestedLoops(f, x.Cond, resources, next)
+			promoteNestedLoops(f, x.Body, resources, next)
+			before, after := promoteLoop(f, x, resources, next)
 			out = append(out, before...)
 			out = append(out, in)
 			out = append(out, after...)
 			continue
+		case *ir.Scope:
+			promoteNestedLoops(f, x.Body, resources, next)
 		}
 		out = append(out, in)
 	}
 	block.Instrs = out
 }
 
-func promoteLoop(m *ir.Module, loop *ir.Loop, resources map[ir.PlaceID]int, next *ir.ValueID) (before, after []ir.Instr) {
+func promoteLoop(f *ir.Function, loop *ir.Loop, resources map[ir.PlaceID]int, next *ir.ValueID) (before, after []ir.Instr) {
 	continuation, ok := loop.Body.Term.(*ir.Continue)
 	if !ok || loopHasUnsafeExitOrSync(loop) {
 		return nil, nil
@@ -289,11 +305,11 @@ func promoteLoop(m *ir.Module, loop *ir.Loop, resources map[ir.PlaceID]int, next
 		reads := loads[place]
 		writes := stores[place]
 		resource, exists := resources[place]
-		if len(reads) != 1 || loopPlaces[place] || !exists || resource < 0 || resource >= len(m.Resources) || !zeroable(reads[0].Type) {
+		if len(reads) != 1 || loopPlaces[place] || !exists || resource < 0 || resource >= len(f.BufferParams) || !zeroable(reads[0].Type) {
 			continue
 		}
 		var store *ir.Store
-		if len(writes) == 0 && immutableResource(m, resources, place) {
+		if len(writes) == 0 && immutableResource(f, resources, place) {
 			// Cache an invariant read on the first executed iteration.
 		} else if len(writes) == 1 &&
 			loadOrder[reads[0]] < storeOrder[writes[0]] {
@@ -528,7 +544,7 @@ func maximumValueID(f *ir.Function) ir.ValueID {
 	return maximum
 }
 
-func canonicalizeBlock(m *ir.Module, b *ir.Block, replacements map[ir.ValueID]ir.ValueID, placeReplacements map[ir.PlaceID]ir.PlaceID, placeResources map[ir.PlaceID]int, available map[valueKey]ir.ValueID, availablePlaces map[placeKey]ir.PlaceID) {
+func canonicalizeBlock(f *ir.Function, b *ir.Block, replacements map[ir.ValueID]ir.ValueID, placeReplacements map[ir.PlaceID]ir.PlaceID, placeResources map[ir.PlaceID]int, available map[valueKey]ir.ValueID, availablePlaces map[placeKey]ir.PlaceID) {
 	resolve := func(id ir.ValueID) ir.ValueID {
 		for replacements[id] != 0 {
 			id = replacements[id]
@@ -546,11 +562,13 @@ func canonicalizeBlock(m *ir.Module, b *ir.Block, replacements map[ir.ValueID]ir
 		rewriteOperands(in, resolve, resolvePlace)
 		switch x := in.(type) {
 		case *ir.If:
-			canonicalizeBlock(m, x.Then, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
-			canonicalizeBlock(m, x.Else, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
+			canonicalizeBlock(f, x.Then, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
+			canonicalizeBlock(f, x.Else, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
 		case *ir.Loop:
-			canonicalizeBlock(m, x.Cond, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
-			canonicalizeBlock(m, x.Body, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
+			canonicalizeBlock(f, x.Cond, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
+			canonicalizeBlock(f, x.Body, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
+		case *ir.Scope:
+			canonicalizeBlock(f, x.Body, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
 		}
 		if definition, ok := in.(ir.PlaceDef); ok {
 			key, resource := reusablePlace(in, placeResources)
@@ -561,7 +579,7 @@ func canonicalizeBlock(m *ir.Module, b *ir.Block, replacements map[ir.ValueID]ir
 			}
 			availablePlaces[key] = definition.ResultPlace()
 		}
-		key, pure := pureValueKey(m, in, placeResources)
+		key, pure := pureValueKey(f, in, placeResources)
 		definition, defines := in.(ir.ValueDef)
 		if pure && defines && definition.ResultValue() != 0 {
 			if previous := available[key]; previous != 0 {
@@ -579,7 +597,7 @@ func canonicalizeBlock(m *ir.Module, b *ir.Block, replacements map[ir.ValueID]ir
 func reusablePlace(in ir.Instr, resources map[ir.PlaceID]int) (placeKey, int) {
 	switch x := in.(type) {
 	case *ir.PlaceRoot:
-		return placeKey{kind: 1, aux: x.Resource}, x.Resource
+		return placeKey{kind: 1, aux: x.Buffer}, x.Buffer
 	case *ir.PlaceWorkgroup:
 		return placeKey{kind: 2, aux: x.Workgroup}, -1
 	case *ir.PlaceField:
@@ -656,7 +674,7 @@ func rewriteTerm(term ir.Term, resolve func(ir.ValueID) ir.ValueID) {
 	}
 }
 
-func pureValueKey(m *ir.Module, in ir.Instr, resources map[ir.PlaceID]int) (valueKey, bool) {
+func pureValueKey(f *ir.Function, in ir.Instr, resources map[ir.PlaceID]int) (valueKey, bool) {
 	key := valueKey{}
 	// DECISION: Four operands cover today's scalar/vector operations. Wider
 	// composites and calls skip CSE until profiles justify an allocated key.
@@ -691,8 +709,7 @@ func pureValueKey(m *ir.Module, in ir.Instr, resources map[ir.PlaceID]int) (valu
 		return set(9, x.Type.String(), x.Function, x.Args...)
 	case *ir.Load:
 		resource, ok := resources[x.Place]
-		if !ok || resource < 0 || resource >= len(m.Resources) ||
-			m.Resources[resource].Access != ir.Read {
+		if !ok || resource < 0 || resource >= len(f.BufferParams) || f.BufferParams[resource].Access != ir.Read {
 			return key, false
 		}
 		key, _ = set(10, x.Type.String(), "")

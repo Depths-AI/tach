@@ -6,6 +6,7 @@ import {
   type BufferState,
   type ComputeBuffer,
   type ComputeCommand,
+	type CommandOptions,
   type LaunchOptions,
   type LaunchSize,
   type PreparedCommand,
@@ -41,25 +42,23 @@ interface HostLayout {
 
 interface ResourceDefinition {
   readonly name: string;
-  readonly group: number;
-  readonly binding: number;
-  readonly kind: "storage";
-  readonly access: "read" | "read_write";
+	readonly type: string;
   readonly byteSize?: number;
   readonly minimumByteSize: number;
   readonly runtime: boolean;
   readonly layout: HostLayout;
 }
 
-interface KernelParameterDefinition {
+interface PublicParameterDefinition {
   readonly name: string;
-  readonly resource?: number;
+	readonly kind: "buffer" | "value";
+	readonly type: string;
+	readonly resource?: number;
 }
 
 interface ParameterFieldDefinition {
-  readonly parameter: number;
-  readonly path: readonly string[];
-  readonly offset: number;
+	readonly type: string;
+	readonly byteOffset: number;
   readonly layout: HostLayout;
 }
 
@@ -71,18 +70,25 @@ interface ParameterBlockDefinition {
 }
 
 interface KernelDefinition {
-  readonly name: string;
   readonly entryPoint: string;
-  readonly dimensions: 1 | 2 | 3;
   readonly workgroupSize: readonly [number, number, number];
-  readonly parameters: readonly KernelParameterDefinition[];
+	readonly bindings: readonly { readonly group: 0; readonly binding: number; readonly access: "read" | "read_write"; readonly type: string; readonly minimumByteSize: number }[];
   readonly parameterBlock?: ParameterBlockDefinition;
 }
 
+interface ShapeExpression { readonly op: "constant"|"parameter"|"resourceLength"|"launchAxis"|"add"|"sub"|"mul"|"div"|"rem"|"min"|"max"|"ceilDiv"; readonly value?: number; readonly parameter?: number; readonly resource?: number; readonly path?: readonly string[]; readonly axis?: 0|1|2; readonly left?: ShapeExpression; readonly right?: ShapeExpression }
+interface ValueSource { readonly kind: "parameter"|"bool"|"i32"|"u32"|"f32Bits"|"shape"|"repeat"; readonly parameter?: number; readonly path?: readonly string[]; readonly value?: number|boolean; readonly expression?: ShapeExpression }
+interface StepDefinition { readonly kind: "dispatch"|"barrier"; readonly kernel?: number; readonly domain?: readonly ShapeExpression[]; readonly resources: readonly { readonly binding?: number; readonly kind: "external"|"transient"; readonly resource: number }[]; readonly parameters?: readonly ValueSource[] }
+interface TransientDefinition { readonly type: string; readonly stride: number; readonly alignment: number; readonly minimumByteSize: number; readonly length: ShapeExpression; readonly color: number; readonly firstStep: number; readonly lastStep: number }
+interface ProgramPlanDefinition { readonly program: number; readonly transients: readonly TransientDefinition[]; readonly steps: readonly StepDefinition[]; readonly repeat: "program"|"invocation-loop" }
+interface PublicProgramDefinition { readonly name: string; readonly parameters: readonly PublicParameterDefinition[]; readonly resources: readonly ResourceDefinition[]; readonly launch?: { readonly dimensions: 1|2|3; readonly inferFromResource?: number } }
+
 export interface ModuleDefinition {
-  readonly source: string;
-  readonly resources: readonly ResourceDefinition[];
-  readonly kernels: readonly KernelDefinition[];
+	readonly shader: string;
+	readonly schema: 1;
+	readonly types: readonly unknown[];
+	readonly programs: readonly PublicProgramDefinition[];
+	readonly target: { readonly kernels: readonly KernelDefinition[]; readonly programs: readonly ProgramPlanDefinition[] };
 }
 
 interface CompiledKernel {
@@ -97,9 +103,9 @@ interface DeviceCache {
 
 export interface DefinedModule {
   command(
-    kernel: number,
+		program: number,
     values: readonly unknown[],
-    options?: LaunchOptions,
+		options?: LaunchOptions | CommandOptions,
   ): ComputeCommand;
 }
 
@@ -433,13 +439,25 @@ function materialize<T>(state: BufferState<T>, resource: ResourceDefinition): GP
   }
 }
 
-function runtimeLength(resource: ResourceDefinition, state: BufferState<unknown>): number | undefined {
+function runtimeLength(
+  resource: ResourceDefinition,
+  state: BufferState<unknown>,
+  path: readonly string[] = [],
+): number | undefined {
   if (!resource.runtime) return undefined;
-  if (resource.layout.kind === "runtime") {
-    return state.byteLength / required(resource.layout.stride, `${resource.name} stride`);
+	let bytes = state.byteLength || logicalByteLength(resource.layout, state.value, resource.name);
+  let layout = resource.layout;
+  for (const name of path) {
+    const field = layout.fields?.find((candidate) => candidate.name === name);
+    if (!field) throw new TypeError(`${resource.name} has no layout field ${name}`);
+    bytes -= field.offset;
+    layout = field.type;
   }
-  const tail = resource.layout.fields?.at(-1)?.type;
-  return (state.byteLength - required(resource.layout.size, `${resource.name} prefix size`)) /
+  if (layout.kind === "runtime") {
+		return bytes / required(layout.stride, `${resource.name} stride`);
+  }
+  const tail = layout.fields?.at(-1)?.type;
+	return (bytes - required(layout.size, `${resource.name} prefix size`)) /
     required(tail?.stride, `${resource.name} tail stride`);
 }
 
@@ -465,12 +483,6 @@ function workgroups(
   ];
 }
 
-function defaultLaunchSize(info: KernelDefinition): LaunchSize {
-  if (info.dimensions === 1) return info.workgroupSize[0];
-  if (info.dimensions === 2) return [info.workgroupSize[0], info.workgroupSize[1]];
-  return info.workgroupSize;
-}
-
 function launchOptions(value: LaunchOptions | undefined): {
   readonly size: LaunchSize | undefined;
   readonly repeat: number;
@@ -480,259 +492,53 @@ function launchOptions(value: LaunchOptions | undefined): {
     throw new TypeError("launch options must be an object");
   }
   const repeat = value.repeat ?? 1;
-  if (!Number.isSafeInteger(repeat) || repeat <= 0) {
-    throw new RangeError("repeat must be a positive integer");
+  if (!Number.isInteger(repeat) || repeat <= 0 || repeat > 0xffff_ffff) {
+		throw new RangeError("repeat must be a positive integer within uint32");
   }
   return { size: value.size, repeat };
 }
 
-function packParameters(
-  info: KernelDefinition,
-  block: ParameterBlockDefinition,
-  values: readonly unknown[],
-): Uint8Array {
-  const bytes = new Uint8Array(block.byteSize);
-  const view = new DataView(bytes.buffer);
-  for (const field of block.fields) {
-    const parameter = required(info.parameters[field.parameter], `${info.name} parameter ${field.parameter}`);
-    let value = values[field.parameter];
-    let path = `${info.name}.${parameter.name}`;
-    for (const name of field.path) {
-      if (value === null || typeof value !== "object" || !(name in value)) {
-        throw new TypeError(`${path} is missing field ${name}`);
-      }
-      value = (value as Record<string, unknown>)[name];
-      path += `.${name}`;
-    }
-    writeValue(view, field.offset, field.layout, value, path);
-  }
-  return bytes;
-}
-
-async function compileKernel(
-  device: GPUDevice,
-  shaderModule: GPUShaderModule,
-  resources: readonly ResourceDefinition[],
-  info: KernelDefinition,
-): Promise<CompiledKernel> {
-  const grouped = new Map<number, GPUBindGroupLayoutEntry[]>();
-  let maxGroup = -1;
-  for (const parameter of info.parameters) {
-    if (parameter.resource === undefined) continue;
-    const resource = required(resources[parameter.resource], parameter.name);
-    maxGroup = Math.max(maxGroup, resource.group);
-    let entries = grouped.get(resource.group);
-    if (!entries) grouped.set(resource.group, entries = []);
-    entries.push({
-      binding: resource.binding,
-      visibility: shaderStage.compute,
-      buffer: {
-        type: resource.access === "read_write" ? "storage" : "read-only-storage",
-        minBindingSize: resource.minimumByteSize,
-      },
-    });
-  }
-  if (info.parameterBlock) {
-    const block = info.parameterBlock;
-    maxGroup = Math.max(maxGroup, block.group);
-    let entries = grouped.get(block.group);
-    if (!entries) grouped.set(block.group, entries = []);
-    entries.push({
-      binding: block.binding,
-      visibility: shaderStage.compute,
-      buffer: { type: "uniform", minBindingSize: block.byteSize, hasDynamicOffset: true },
-    });
-  }
-
-  const bindGroupLayouts: GPUBindGroupLayout[] = [];
-  for (let group = 0; group <= maxGroup; group++) {
-    const entries = grouped.get(group) ?? [];
-    entries.sort((left, right) => left.binding - right.binding);
-    bindGroupLayouts.push(device.createBindGroupLayout({
-      label: `Tach ${info.name} group ${group}`,
-      entries,
-    }));
-  }
-  const layout = device.createPipelineLayout({
-    label: `Tach ${info.name} layout`,
-    bindGroupLayouts,
-  });
-  const pipeline = await device.createComputePipelineAsync({
-    label: `Tach ${info.name}`,
-    layout,
-    compute: { module: shaderModule, entryPoint: info.entryPoint },
-  });
+async function compileKernel(device: GPUDevice, shaderModule: GPUShaderModule, info: KernelDefinition): Promise<CompiledKernel> {
+  const entries: GPUBindGroupLayoutEntry[] = info.bindings.map((binding) => ({ binding: binding.binding, visibility: shaderStage.compute, buffer: { type: binding.access === "read_write" ? "storage" : "read-only-storage", minBindingSize: binding.minimumByteSize } }));
+  if (info.parameterBlock) entries.push({ binding: info.parameterBlock.binding, visibility: shaderStage.compute, buffer: { type: "uniform", minBindingSize: info.parameterBlock.byteSize, hasDynamicOffset: true } });
+  entries.sort((left, right) => left.binding - right.binding);
+  const bindGroupLayouts = [device.createBindGroupLayout({ label: `Tach ${info.entryPoint} group 0`, entries })];
+  const layout = device.createPipelineLayout({ label: `Tach ${info.entryPoint} layout`, bindGroupLayouts });
+  const pipeline = await device.createComputePipelineAsync({ label: `Tach ${info.entryPoint}`, layout, compute: { module: shaderModule, entryPoint: info.entryPoint } });
   return { bindGroupLayouts, pipeline };
 }
 
-export function defineModule(definition: ModuleDefinition): DefinedModule {
-  const deviceCache = new WeakMap<GPUDevice, DeviceCache>();
-
-  async function compiled(
-    owner: RuntimeOwner,
-    kernelIndex: number,
-    info: KernelDefinition,
-  ): Promise<CompiledKernel> {
-    let state = deviceCache.get(owner.device);
-    if (!state) {
-      state = { pipelines: new Map() };
-      deviceCache.set(owner.device, state);
-    }
-    let pipeline = state.pipelines.get(kernelIndex);
-    if (!pipeline) {
-      pipeline = owner.capture(info.name, "kernel", () => {
-        state.module ??= owner.device.createShaderModule({
-          label: "Tach shader module",
-          code: definition.source,
-        });
-        const pending = compileKernel(owner.device, state.module, definition.resources, info);
-        return { finish: () => pending };
-      });
-      state.pipelines.set(kernelIndex, pipeline);
-    }
-    try {
-      return await pipeline;
-    } catch (cause) {
-      state.pipelines.delete(kernelIndex);
-      throw normalizeError(cause, "kernel", info.name);
-    }
+function checkedU32(value: unknown, path: string): number { if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 0xffff_ffff) throw new RangeError(`${path} must be uint32`); return value; }
+function pathValue(value: unknown, path: readonly string[] | undefined, name: string): unknown { let current=value; for(const field of path??[]){if(current===null||typeof current!=="object"||!(field in current))throw new TypeError(`${name} is missing field ${field}`);current=(current as Record<string,unknown>)[field]};return current }
+function shapeValue(expression: ShapeExpression, values: readonly unknown[], resourceDefinitions: readonly ResourceDefinition[], resources: readonly BufferState<unknown>[], launch: readonly number[]): number {
+  switch(expression.op){
+    case "constant": return checkedU32(expression.value, "shape constant");
+    case "parameter": return checkedU32(pathValue(values[required(expression.parameter,"shape parameter")],expression.path,"shape parameter"),"shape parameter");
+    case "resourceLength": { const index=required(expression.resource,"shape resource"); const state=required(resources[index],"shape resource"); return checkedU32(runtimeLength(required(resourceDefinitions[index],"shape resource"),state,expression.path),"resource length"); }
+    case "launchAxis": return checkedU32(launch[expression.axis??0],"launch axis");
   }
-
-  function command(
-    kernelIndex: number,
-    values: readonly unknown[],
-    options?: LaunchOptions,
-  ): ComputeCommand {
-    const info = definition.kernels[kernelIndex];
-    if (!info) {
-      throw new TachError("kernel", `unknown Tach kernel ${kernelIndex}`, {
-        operation: "kernel",
-      });
-    }
-    if (values.length !== info.parameters.length) {
-      throw new TachError(
-        "kernel",
-        `${info.name} received the wrong number of parameters`,
-        { operation: info.name },
-      );
-    }
-
-    let owner: RuntimeOwner | undefined;
-    const storage = new Map<number, BufferState<unknown>>();
-    const parametersByBuffer = new Map<BufferState<unknown>, string>();
-    for (let index = 0; index < info.parameters.length; index++) {
-      const parameter = required(info.parameters[index], `${info.name} parameter ${index}`);
-      if (parameter.resource === undefined) continue;
-      required(definition.resources[parameter.resource], parameter.name);
-      const state = getBufferState(
-        values[index] as ComputeBuffer<unknown>,
-        `${info.name}.${parameter.name}`,
-      );
-      if (owner && state.owner !== owner) {
-        throw new TachError(
-          "buffer",
-          `${info.name} compute buffers belong to different Tach sessions`,
-          { operation: info.name },
-        );
-      }
-      const previous = parametersByBuffer.get(state);
-      if (previous) {
-        throw new TachError(
-          "buffer",
-          `${info.name}.${parameter.name} aliases ${info.name}.${previous}; buffer parameters require distinct compute buffers`,
-          { operation: info.name },
-        );
-      }
-      owner = state.owner;
-      parametersByBuffer.set(state, parameter.name);
-      storage.set(index, state);
-    }
-    if (!owner) {
-      throw new TachError(
-        "kernel",
-        `${info.name} has no compute buffer`,
-        { operation: info.name },
-      );
-    }
-    owner.assertHealthy(info.name);
-    let configured: ReturnType<typeof launchOptions>;
-    const parameters: Uint8Array[] = [];
-    try {
-      configured = launchOptions(options);
-      if (info.parameterBlock) parameters.push(packParameters(info, info.parameterBlock, values));
-    } catch (cause) {
-      throw normalizeError(cause, "kernel", info.name);
-    }
-
-    return createComputeCommand({
-      owner,
-      async prepare(): Promise<PreparedCommand> {
-        const kernel = await compiled(owner, kernelIndex, info);
-        return {
-          parameters,
-          encode(pass, parameterBindings) {
-            owner.assertHealthy(info.name);
-            const entriesByGroup = new Map<number, BufferBindGroupEntry[]>();
-            let inferredSize: number | undefined;
-            let parameterOffset = 0;
-            for (let index = 0; index < info.parameters.length; index++) {
-              const parameter = required(
-                info.parameters[index],
-                `${info.name} parameter ${index}`,
-              );
-              if (parameter.resource === undefined) continue;
-              const resource = required(definition.resources[parameter.resource], parameter.name);
-              const state = required(storage.get(index), parameter.name);
-              const binding: GPUBufferBinding = { buffer: materialize(state, resource) };
-              if (info.dimensions === 1) inferredSize ??= runtimeLength(resource, state);
-              let entries = entriesByGroup.get(resource.group);
-              if (!entries) entriesByGroup.set(resource.group, entries = []);
-              entries.push({ binding: resource.binding, resource: binding });
-            }
-            if (info.parameterBlock) {
-              const block = info.parameterBlock;
-              const parameter = required(parameterBindings[0], `${info.name} parameter block`);
-              let entries = entriesByGroup.get(block.group);
-              if (!entries) entriesByGroup.set(block.group, entries = []);
-              entries.push({
-                binding: block.binding,
-                resource: { buffer: parameter.buffer, size: block.byteSize },
-              });
-              parameterOffset = parameter.offset ?? 0;
-            }
-
-            pass.setPipeline(kernel.pipeline);
-            for (let group = 0; group < kernel.bindGroupLayouts.length; group++) {
-              const entries = entriesByGroup.get(group) ?? [];
-              entries.sort((left, right) => left.binding - right.binding);
-              pass.setBindGroup(
-                group,
-                owner.bindGroup(
-                  `Tach ${info.name} group ${group}`,
-                  required(kernel.bindGroupLayouts[group], `${info.name} group ${group}`),
-                  entries,
-                ),
-                group === info.parameterBlock?.group ? [parameterOffset] : [],
-              );
-            }
-            const groups = workgroups(
-              configured.size ?? inferredSize ?? defaultLaunchSize(info),
-              info.workgroupSize,
-              info.dimensions,
-            );
-            // DECISION: Preserve global dispatch boundaries until Core IR can
-            // prove that an invocation-local repeat has no cross-invocation effects.
-            for (let index = 0; index < configured.repeat; index++) {
-              pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
-            }
-          },
-        };
-      },
-    });
-  }
-
-  return Object.freeze({ command });
+  const left=shapeValue(required(expression.left,"shape left"),values,resourceDefinitions,resources,launch), right=shapeValue(required(expression.right,"shape right"),values,resourceDefinitions,resources,launch);
+  if(expression.op==="min")return Math.min(left,right);if(expression.op==="max")return Math.max(left,right);
+  const a=BigInt(left),b=BigInt(right);let result:bigint;switch(expression.op){case"add":result=a+b;break;case"sub":result=a-b;break;case"mul":result=a*b;break;case"div":if(b===0n)throw new RangeError("shape division by zero");result=a/b;break;case"rem":if(b===0n)throw new RangeError("shape remainder by zero");result=a%b;break;case"ceilDiv":if(b===0n)throw new RangeError("ceilDiv denominator must be positive");result=(a+b-1n)/b;break;default:throw new TypeError("invalid shape operation")};return checkedU32(Number(result),"shape result");
 }
+function valueOf(source: ValueSource, program:PublicProgramDefinition, values: readonly unknown[], resources: readonly BufferState<unknown>[], launch: readonly number[], repeat:number): unknown { switch(source.kind){case"parameter":return pathValue(values[required(source.parameter,"value parameter")],source.path,"value parameter");case"bool":return source.value;case"i32":case"u32":return source.value;case"f32Bits":{const bits=checkedU32(source.value,"f32 bits");return new Float32Array(new Uint32Array([bits]).buffer)[0]};case"shape":return shapeValue(required(source.expression,"shape expression"),values,program.resources,resources,launch);case"repeat":return repeat} }
+function packBlock(program:PublicProgramDefinition,block: ParameterBlockDefinition, sources: readonly ValueSource[], values: readonly unknown[], resources: readonly BufferState<unknown>[], launch: readonly number[], repeat:number): Uint8Array { if(sources.length!==block.fields.length)throw new TypeError("parameter source count mismatch");const bytes=new Uint8Array(block.byteSize),view=new DataView(bytes.buffer);for(let i=0;i<block.fields.length;i++){const field=required(block.fields[i],"parameter field"),source=required(sources[i],"parameter source");let path=`${program.name} parameter ${i}`;if(source.kind==="parameter"){path=`${program.name}.${required(program.parameters[required(source.parameter,"parameter")],"parameter").name}`;for(const name of source.path??[])path+=`.${name}`}writeValue(view,field.byteOffset,field.layout,valueOf(source,program,values,resources,launch,repeat),path)}return bytes }
+
+export function defineModule(definition: ModuleDefinition): DefinedModule {
+  if(definition.schema!==1||definition.target.programs.length!==definition.programs.length)throw new TypeError("invalid generated Tach schema");
+  const deviceCache=new WeakMap<GPUDevice,DeviceCache>();
+  async function compiled(owner:RuntimeOwner,index:number):Promise<CompiledKernel>{const info=required(definition.target.kernels[index],`kernel ${index}`);let state=deviceCache.get(owner.device);if(!state){state={pipelines:new Map()};deviceCache.set(owner.device,state)}let pending=state.pipelines.get(index);if(!pending){pending=owner.capture(info.entryPoint,"kernel",()=>{state!.module??=owner.device.createShaderModule({label:"Tach shader module",code:definition.shader});return{finish:()=>compileKernel(owner.device,state!.module!,info)}});state.pipelines.set(index,pending)}try{return await pending}catch(cause){state.pipelines.delete(index);throw normalizeError(cause,"kernel",info.entryPoint)}}
+  function command(programIndex:number,values:readonly unknown[],options?:LaunchOptions|CommandOptions):ComputeCommand{
+    const info=required(definition.programs[programIndex],`program ${programIndex}`),plan=required(definition.target.programs[programIndex],`program plan ${programIndex}`);if(values.length!==info.parameters.length)throw new TachError("kernel",`${info.name} received the wrong number of parameters`,{operation:info.name});
+    let owner:RuntimeOwner|undefined;const storage:BufferState<unknown>[]=[];const seen=new Map<BufferState<unknown>,string>();
+    for(let i=0;i<info.parameters.length;i++){const parameter=required(info.parameters[i],`${info.name} parameter ${i}`);if(parameter.kind!=="buffer")continue;const resourceIndex=required(parameter.resource,parameter.name),state=getBufferState(values[i] as ComputeBuffer<unknown>,`${info.name}.${parameter.name}`);required(info.resources[resourceIndex],parameter.name);if(owner&&state.owner!==owner)throw new TachError("buffer",`${info.name} compute buffers belong to different Tach sessions`,{operation:info.name});const previous=seen.get(state);if(previous)throw new TachError("buffer",`${info.name}.${parameter.name} aliases ${info.name}.${previous}; buffer parameters require distinct compute buffers`,{operation:info.name});owner=state.owner;seen.set(state,parameter.name);storage[resourceIndex]=state}
+    if(!owner)throw new TachError("kernel",`${info.name} has no compute buffer`,{operation:info.name});owner.assertHealthy(info.name);let configured:ReturnType<typeof launchOptions>;try{configured=launchOptions(options as LaunchOptions|undefined)}catch(cause){throw normalizeError(cause,"kernel",info.name)}let launch:number[]=[];const launchKernel=info.launch?required(definition.target.kernels[required(plan.steps.find(s=>s.kind==="dispatch")?.kernel,"launch kernel")],"launch kernel"):undefined;if(info.launch){if(configured.size!==undefined&&(typeof configured.size==="number"?info.launch.dimensions!==1:!Array.isArray(configured.size)||configured.size.length!==info.launch.dimensions))throw new TachError("kernel",`kernel requires an exact ${info.launch.dimensions}D launch size`,{operation:info.name});if(configured.size!==undefined){launch=typeof configured.size==="number"?[configured.size]:[...configured.size]}else if(info.launch.inferFromResource===undefined){const size=defaultLaunch(info.launch.dimensions,launchKernel!.workgroupSize);launch=typeof size==="number"?[size]:[...size]}}
+		for(const step of plan.steps){if(step.kind!=="dispatch"||(step.parameters??[]).some(source=>source.kind==="shape"||source.kind==="repeat"))continue;const kernel=required(definition.target.kernels[required(step.kernel,"dispatch kernel")],"kernel");if(kernel.parameterBlock)try{packBlock(info,kernel.parameterBlock,step.parameters??[],values,storage,launch,configured.repeat)}catch(cause){throw normalizeError(cause,"kernel",info.name)}}let transientBytes:number[]=[];
+    return createComputeCommand({owner,async prepare():Promise<PreparedCommand>{for(let i=0;i<storage.length;i++){const state=storage[i],resource=info.resources[i];if(state&&resource)materialize(state,resource)}if(info.launch&&launch.length===0){const index=required(info.launch.inferFromResource,"launch resource");const size=required(runtimeLength(required(info.resources[index],"launch resource"),required(storage[index],"launch buffer")),"launch size");launch=[size]}transientBytes=plan.transients.map(t=>{const length=shapeValue(t.length,values,info.resources,storage,launch);if(length===0)throw new RangeError("transient length must be positive");const bytes=length*t.stride;if(!Number.isSafeInteger(bytes)||bytes>0xffff_ffff)throw new RangeError("transient byte size overflow");return bytes});const compiledKernels=new Map<number,CompiledKernel>();for(const step of plan.steps)if(step.kind==="dispatch"&&!compiledKernels.has(required(step.kernel,"dispatch kernel")))compiledKernels.set(step.kernel!,await compiled(owner!,step.kernel!));const parameters:Uint8Array[]=[];for(const step of plan.steps){if(step.kind!=="dispatch")continue;const kernel=required(definition.target.kernels[required(step.kernel,"dispatch kernel")],"kernel");if(kernel.parameterBlock)parameters.push(packBlock(info,kernel.parameterBlock,step.parameters??[],values,storage,launch,configured.repeat))}return{parameters,scratch:plan.transients.map((t,i)=>({color:t.color,byteSize:required(transientBytes[i],"transient bytes")})),encode(pass,parameterBindings,scratch){const record=()=>{let parameterIndex=0;for(const step of plan.steps){if(step.kind!=="dispatch")continue;const kernelIndex=required(step.kernel,"dispatch kernel"),kernel=required(definition.target.kernels[kernelIndex],"kernel"),compiledKernel=required(compiledKernels.get(kernelIndex),"compiled kernel");const entries:BufferBindGroupEntry[]=[];for(const source of step.resources){const binding=required(source.binding,"resource binding");if(source.kind==="external"){const state=required(storage[source.resource],"external resource"),resource=required(info.resources[source.resource],"external resource");entries.push({binding,resource:{buffer:materialize(state,resource)}})}else{const transient=required(plan.transients[source.resource],"transient");entries.push({binding,resource:{buffer:required(scratch.get(transient.color),"scratch buffer"),size:required(transientBytes[source.resource],"transient byte size")}})}}let dynamic:number[]=[];if(kernel.parameterBlock){const parameter=required(parameterBindings[parameterIndex++],"parameter binding");entries.push({binding:kernel.parameterBlock.binding,resource:{buffer:parameter.buffer,size:kernel.parameterBlock.byteSize}});dynamic=[parameter.offset??0]}entries.sort((a,b)=>a.binding-b.binding);pass.setPipeline(compiledKernel.pipeline);pass.setBindGroup(0,owner!.bindGroup(`Tach ${kernel.entryPoint} group 0`,compiledKernel.bindGroupLayouts[0]!,entries),dynamic);const domain=(step.domain??[]).map(axis=>shapeValue(axis,values,info.resources,storage,launch));const groups=workgroups(domain.length===1?domain[0]!:domain as [number,number,number],kernel.workgroupSize,domain.length as 1|2|3);pass.dispatchWorkgroups(...groups)}};if(plan.repeat==="program")for(let i=0;i<configured.repeat;i++)record();else record()}}}})}
+  return Object.freeze({command});
+}
+
+function defaultLaunch(dimensions:1|2|3,workgroup:readonly[number,number,number]):LaunchSize{return dimensions===1?workgroup[0]:dimensions===2?[workgroup[0],workgroup[1]]:workgroup}
 
 function align4(value: number): number {
   return Math.ceil(value / 4) * 4;

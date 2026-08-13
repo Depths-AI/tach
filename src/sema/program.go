@@ -1,0 +1,365 @@
+package sema
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+
+	"tach/src/ast"
+	"tach/src/flow"
+	"tach/src/ir"
+	"tach/src/types"
+)
+
+type programSymbol struct {
+	resource  flow.ResourceID
+	shape     flow.ShapeID
+	type_     *types.Type
+	parameter int
+}
+
+func (c *Checker) lowerPrograms() error {
+	for _, declaration := range c.ast.Decls {
+		function, ok := declaration.(*ast.FunctionDecl)
+		if !ok || !function.Exported {
+			continue
+		}
+		var program *flow.Program
+		var err error
+		if len(function.Indices) > 0 {
+			program, err = c.lowerIndexedProgram(function)
+		} else {
+			program, err = c.lowerProgram(function)
+		}
+		if err != nil {
+			return err
+		}
+		c.flow.Programs = append(c.flow.Programs, program)
+	}
+	return nil
+}
+
+func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*flow.Program, error) {
+	stage := c.mod.Function(declaration.Name)
+	program := &flow.Program{Name: declaration.Name, Span: declaration.Span, Indexed: true, Rank: len(stage.Indices)}
+	symbols, current, err := c.addProgramParameters(program, declaration)
+	if err != nil {
+		return nil, err
+	}
+	dispatch := flow.Dispatch{Stage: stage.Name, Span: declaration.Span}
+	for axis := range stage.Indices {
+		dispatch.Domain = append(dispatch.Domain, program.AddShape(flow.Shape{Op: flow.ShapeLaunchAxis, Axis: uint8(axis), Span: declaration.Span}))
+	}
+	if err := c.bindStageArguments(program, &dispatch, stage, declaration.Params, symbols, current); err != nil {
+		return nil, err
+	}
+	id := program.AddDispatch(dispatch)
+	c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current)
+	finishResources(program, current)
+	return program, nil
+}
+
+func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, error) {
+	if len(declaration.Attrs) > 0 {
+		return nil, diag(declaration.Span, "attributes are invalid on public program %s", declaration.Name)
+	}
+	program := &flow.Program{Name: declaration.Name, Span: declaration.Span}
+	symbols, current, err := c.addProgramParameters(program, declaration)
+	if err != nil {
+		return nil, err
+	}
+	for _, statement := range declaration.Body.Stmts {
+		switch x := statement.(type) {
+		case *ast.VarStmt:
+			if x.Mutable || x.Type != nil {
+				return nil, diag(x.Span, "program bodies permit only untyped const declarations and run statements")
+			}
+			if _, exists := symbols[x.Name]; exists {
+				return nil, diag(x.Span, "%q is already defined", x.Name)
+			}
+			if transient, ok := x.Value.(*ast.TransientExpr); ok {
+				elem, err := c.resolveType(transient.Elem)
+				if err != nil {
+					return nil, err
+				}
+				if !types.IsTransientElement(elem) {
+					return nil, diag(transient.Span, "transient element %s must have a fixed host-shareable non-atomic footprint", elem)
+				}
+				length, err := c.lowerShape(program, transient.Count, symbols)
+				if err != nil {
+					return nil, err
+				}
+				resource := program.AddResource(flow.Resource{Name: x.Name, Kind: flow.Transient, Type: types.Runtime(elem), Length: length, Parameter: -1, Span: x.Span})
+				initial := program.AddVersion(flow.Version{Resource: resource, Defined: false})
+				program.Resource(resource).Initial = initial
+				symbols[x.Name] = programSymbol{resource: resource, type_: types.Runtime(elem), parameter: -1}
+				current[resource] = initial
+			} else {
+				shape, err := c.lowerShape(program, x.Value, symbols)
+				if err != nil {
+					return nil, err
+				}
+				symbols[x.Name] = programSymbol{shape: shape, type_: types.TU32, parameter: -1}
+			}
+		case *ast.RunStmt:
+			stage := c.mod.Function(x.Stage)
+			if stage == nil || stage.Kind != ir.Stage {
+				return nil, diag(x.Span, "run target %q is not an indexed stage", x.Stage)
+			}
+			if len(x.Domain.Axes) != len(stage.Indices) {
+				return nil, diag(x.Domain.Span, "run domain has rank %d, stage %s has rank %d", len(x.Domain.Axes), stage.Name, len(stage.Indices))
+			}
+			dispatch := flow.Dispatch{Stage: stage.Name, Span: x.Span}
+			for _, axis := range x.Domain.Axes {
+				shape, err := c.lowerShape(program, axis, symbols)
+				if err != nil {
+					return nil, err
+				}
+				dispatch.Domain = append(dispatch.Domain, shape)
+			}
+			if len(x.Args) != len(stage.SourceParams) {
+				return nil, diag(x.Span, "stage %s expects %d arguments, got %d", stage.Name, len(stage.SourceParams), len(x.Args))
+			}
+			if err := c.bindRunArguments(program, &dispatch, stage, x.Args, symbols, current); err != nil {
+				return nil, err
+			}
+			id := program.AddDispatch(dispatch)
+			c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current)
+		default:
+			return nil, diag(statement.GetSpan(), "public program bodies permit only const declarations and run statements")
+		}
+	}
+	if len(program.Dispatches) == 0 {
+		return nil, diag(declaration.Body.Span, "public program %s requires at least one run", declaration.Name)
+	}
+	finishResources(program, current)
+	return program, nil
+}
+
+func (c *Checker) addProgramParameters(program *flow.Program, declaration *ast.FunctionDecl) (map[string]programSymbol, map[flow.ResourceID]flow.VersionID, error) {
+	symbols := map[string]programSymbol{}
+	current := map[flow.ResourceID]flow.VersionID{}
+	for position, parameter := range declaration.Params {
+		sig := c.funcs[declaration.Name].params[position]
+		if sig.buffer {
+			resource := program.AddResource(flow.Resource{Name: parameter.Name, Kind: flow.External, Type: sig.ty, Parameter: position, Span: parameter.Span})
+			initial := program.AddVersion(flow.Version{Resource: resource, Defined: true})
+			program.Resource(resource).Initial = initial
+			program.Parameters = append(program.Parameters, flow.Parameter{Name: parameter.Name, Kind: flow.BufferParameter, Type: sig.ty, Resource: resource, Span: parameter.Span})
+			symbols[parameter.Name] = programSymbol{resource: resource, type_: sig.ty, parameter: position}
+			current[resource] = initial
+		} else {
+			program.Parameters = append(program.Parameters, flow.Parameter{Name: parameter.Name, Kind: flow.ValueParameter, Type: sig.ty, Span: parameter.Span})
+			symbols[parameter.Name] = programSymbol{type_: sig.ty, parameter: position}
+		}
+	}
+	return symbols, current, nil
+}
+
+func (c *Checker) bindStageArguments(program *flow.Program, dispatch *flow.Dispatch, stage *ir.Function, params []ast.Param, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) error {
+	args := make([]ast.Expr, len(params))
+	for i, parameter := range params {
+		args[i] = &ast.IdentExpr{Name: parameter.Name, Span: parameter.Span}
+	}
+	return c.bindRunArguments(program, dispatch, stage, args, symbols, current)
+}
+
+func (c *Checker) bindRunArguments(program *flow.Program, dispatch *flow.Dispatch, stage *ir.Function, args []ast.Expr, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) error {
+	seen := map[flow.ResourceID]bool{}
+	for sourcePosition, formal := range stage.SourceParams {
+		argument := args[sourcePosition]
+		if formal.Kind == ir.SourceBuffer {
+			identifier, ok := argument.(*ast.IdentExpr)
+			symbol, exists := symbols[identifierName(identifier)]
+			if !ok || !exists || symbol.resource == 0 {
+				return diag(argument.GetSpan(), "buffer argument %s must name an external buffer or transient", formal.Name)
+			}
+			if seen[symbol.resource] {
+				return diag(argument.GetSpan(), "stage %s receives resource %s in multiple buffer formals", stage.Name, identifier.Name)
+			}
+			seen[symbol.resource] = true
+			if !types.Equal(stage.BufferParams[formal.Buffer].Type, symbol.type_) {
+				return diag(argument.GetSpan(), "buffer argument for %s has type %s, want %s", formal.Name, symbol.type_, stage.BufferParams[formal.Buffer].Type)
+			}
+			dispatch.Buffers = append(dispatch.Buffers, flow.BufferArgument{Formal: formal.Buffer, Resource: symbol.resource, Input: current[symbol.resource]})
+			continue
+		}
+		value, err := c.lowerProgramValue(program, argument, stage.Params[len(dispatch.Values)].Type, symbols)
+		if err != nil {
+			return err
+		}
+		value.Formal = len(dispatch.Values)
+		dispatch.Values = append(dispatch.Values, value)
+	}
+	return nil
+}
+
+func identifierName(identifier *ast.IdentExpr) string {
+	if identifier == nil {
+		return ""
+	}
+	return identifier.Name
+}
+
+func (c *Checker) finishDispatch(program *flow.Program, dispatch *flow.Dispatch, id flow.DispatchID, current map[flow.ResourceID]flow.VersionID) {
+	stage := c.mod.Function(dispatch.Stage)
+	summary := ir.AnalyzeAccess(stage)
+	for i := range dispatch.Buffers {
+		argument := &dispatch.Buffers[i]
+		if stage.BufferParams[argument.Formal].Access == ir.Mutable {
+			input := program.Version(argument.Input)
+			defined := input != nil && input.Defined || summary.Buffers[argument.Formal].CompleteWrite
+			output := program.AddVersion(flow.Version{Resource: argument.Resource, Previous: argument.Input, Producer: id, Defined: defined})
+			argument.Output = output
+			current[argument.Resource] = output
+		}
+	}
+}
+
+func finishResources(program *flow.Program, current map[flow.ResourceID]flow.VersionID) {
+	for i := range program.Resources {
+		program.Resources[i].Final = current[program.Resources[i].ID]
+	}
+}
+
+func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, want *types.Type, symbols map[string]programSymbol) (flow.ValueArgument, error) {
+	if identifier, ok := expression.(*ast.IdentExpr); ok {
+		symbol, exists := symbols[identifier.Name]
+		if exists && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(symbol.type_, want) {
+			return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter}, nil
+		}
+		if exists && symbol.shape != 0 && types.Equal(want, types.TU32) {
+			return flow.ValueArgument{Kind: flow.ValueShape, Shape: symbol.shape}, nil
+		}
+	}
+	if symbol, path, got, ok := programPath(expression, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(got, want) {
+		return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter, Path: path}, nil
+	}
+	if want.Kind == types.U32 {
+		shape, err := c.lowerShape(program, expression, symbols)
+		if err == nil {
+			return flow.ValueArgument{Kind: flow.ValueShape, Shape: shape}, nil
+		}
+	}
+	switch x := expression.(type) {
+	case *ast.BoolExpr:
+		if want.Kind == types.Bool {
+			bits := uint32(0)
+			if x.Value {
+				bits = 1
+			}
+			return flow.ValueArgument{Kind: flow.ValueBool, Bits: bits}, nil
+		}
+	case *ast.NumberExpr:
+		raw, _ := splitNumberLiteral(x.Raw)
+		switch want.Kind {
+		case types.I32:
+			value, err := strconv.ParseInt(raw, 0, 32)
+			if err == nil {
+				return flow.ValueArgument{Kind: flow.ValueI32, Bits: uint32(int32(value))}, nil
+			}
+		case types.U32:
+			value, err := strconv.ParseUint(raw, 0, 32)
+			if err == nil {
+				return flow.ValueArgument{Kind: flow.ValueU32, Bits: uint32(value)}, nil
+			}
+		case types.F32:
+			value, err := strconv.ParseFloat(raw, 32)
+			if err == nil {
+				return flow.ValueArgument{Kind: flow.ValueF32Bits, Bits: math.Float32bits(float32(value))}, nil
+			}
+		}
+	}
+	return flow.ValueArgument{}, diag(expression.GetSpan(), "program argument is not a supported %s value source", want)
+}
+
+func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol) (flow.ShapeID, error) {
+	switch x := expression.(type) {
+	case *ast.NumberExpr:
+		raw, prefixed := splitNumberLiteral(x.Raw)
+		if !prefixed && strings.ContainsAny(raw, ".eE") {
+			return 0, diag(x.Span, "shape literal must be uint32")
+		}
+		value, err := strconv.ParseUint(raw, 0, 32)
+		if err != nil {
+			return 0, diag(x.Span, "shape literal is outside uint32")
+		}
+		return program.AddShape(flow.Shape{Op: flow.ShapeConstant, Value: uint32(value), Span: x.Span}), nil
+	case *ast.IdentExpr:
+		symbol, ok := symbols[x.Name]
+		if !ok {
+			return 0, diag(x.Span, "unknown shape symbol %s", x.Name)
+		}
+		if symbol.shape != 0 {
+			return symbol.shape, nil
+		}
+		if symbol.parameter >= 0 && symbol.resource == 0 && types.Equal(symbol.type_, types.TU32) {
+			return program.AddShape(flow.Shape{Op: flow.ShapeParameter, Parameter: symbol.parameter, Span: x.Span}), nil
+		}
+	case *ast.MemberExpr:
+		if x.Name == "length" {
+			if symbol, path, final, ok := programPath(x.Base, symbols); ok && symbol.resource != 0 && final.Kind == types.RuntimeArray {
+				return program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: symbol.resource, Path: path, Span: x.Span}), nil
+			}
+		}
+		if symbol, path, final, ok := programPath(x, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(final, types.TU32) {
+			return program.AddShape(flow.Shape{Op: flow.ShapeParameter, Parameter: symbol.parameter, Path: path, Span: x.Span}), nil
+		}
+	case *ast.BinaryExpr:
+		op := map[string]flow.ShapeOp{"+": flow.ShapeAdd, "-": flow.ShapeSub, "*": flow.ShapeMul, "/": flow.ShapeDiv, "%": flow.ShapeRem}[x.Op]
+		if op == 0 {
+			break
+		}
+		left, err := c.lowerShape(program, x.Left, symbols)
+		if err != nil {
+			return 0, err
+		}
+		right, err := c.lowerShape(program, x.Right, symbols)
+		if err != nil {
+			return 0, err
+		}
+		return program.AddShape(flow.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
+	case *ast.CallExpr:
+		identifier, ok := x.Callee.(*ast.IdentExpr)
+		if !ok || len(x.Args) != 2 {
+			break
+		}
+		op := map[string]flow.ShapeOp{"min": flow.ShapeMin, "max": flow.ShapeMax, "ceilDiv": flow.ShapeCeilDiv}[identifier.Name]
+		if op == 0 {
+			break
+		}
+		left, err := c.lowerShape(program, x.Args[0], symbols)
+		if err != nil {
+			return 0, err
+		}
+		right, err := c.lowerShape(program, x.Args[1], symbols)
+		if err != nil {
+			return 0, err
+		}
+		return program.AddShape(flow.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
+	}
+	return 0, diag(expression.GetSpan(), "expression is not a checked uint32 shape expression")
+}
+
+func programPath(expression ast.Expr, symbols map[string]programSymbol) (programSymbol, []string, *types.Type, bool) {
+	switch x := expression.(type) {
+	case *ast.IdentExpr:
+		symbol, ok := symbols[x.Name]
+		return symbol, nil, symbol.type_, ok
+	case *ast.MemberExpr:
+		symbol, path, parent, ok := programPath(x.Base, symbols)
+		if !ok || parent == nil || parent.Kind != types.Struct {
+			return programSymbol{}, nil, nil, false
+		}
+		field := types.FieldIndex(parent, x.Name)
+		if field < 0 {
+			return programSymbol{}, nil, nil, false
+		}
+		return symbol, append(path, x.Name), parent.Fields[field].Type, true
+	default:
+		return programSymbol{}, nil, nil, false
+	}
+}
+
+var _ = fmt.Sprintf

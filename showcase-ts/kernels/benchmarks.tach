@@ -1,254 +1,464 @@
-type ParticleParams = {
-  dt: float32,
-  count: uint32,
-  steps: uint32,
-};
+@docs(
+  title("Tach GPU benchmark kernels"),
+  summary("GPU workloads for simulation, numerical computing, procedural scene rendering, and triangle-mesh software rendering.")
+);
 
-type FractalParams = {
-  width: uint32,
-  height: uint32,
-  maxIterations: uint32,
-  scale: float32,
-  centerX: float32,
-  centerY: float32,
-};
+@docs(
+  summary("Particle workload dimensions and integration step."),
+  field(count, "Number of particle components dispatched by the host."),
+  field(dt, "Prediction time step.")
+)
+type ParticleParams = { count: uint32, dt: float32 };
 
-type MatrixParams = {
-  size: uint32,
-};
+@docs(
+  summary("Dimensions and continuous parameters for image workloads."),
+  field(width, "Image width in pixels."),
+  field(height, "Image height in pixels."),
+  field(scale, "Complex-plane distance represented by one fractal pixel."),
+  field(time, "Animation time used by the procedural field.")
+)
+type ImageParams = { width: uint32, height: uint32, scale: float32, time: float32 };
 
-type OptionParams = {
-  count: uint32,
-};
+@docs(
+  summary("Logical element count supplied with a benchmark launch."),
+  field(count, "Number of elements dispatched by the host.")
+)
+type CountParams = { count: uint32 };
 
-type RenderParams = {
-  width: uint32,
-  height: uint32,
-  time: float32,
-};
+@docs(
+  summary("Viewport and animation parameters for the GPGPU mesh renderer."),
+  field(width, "Output width in pixels."),
+  field(height, "Output height in pixels."),
+  field(time, "Animation time applied during vertex transformation.")
+)
+type MeshParams = { width: uint32, height: uint32, time: float32 };
 
-function normalCDF(x: float32): float32 {
-  const magnitude = abs(x);
-  const t = 1.0 / (1.0 + 0.2316419 * magnitude);
-  const polynomial = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-  const density = 0.398942280 * exp(-0.5 * magnitude * magnitude);
-  const positive = 1.0 - density * polynomial;
-  return x < 0.0 ? 1.0 - positive : positive;
+@docs(
+  summary("Performs one quadratic Mandelbrot orbit iteration."),
+  param(z, "Current complex orbit value."),
+  param(c, "Complex point being evaluated."),
+  returns("The next complex orbit value.")
+)
+function fractalStep(z: float32x2, c: float32x2): float32x2 {
+  return float32x2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y);
 }
 
+@docs(
+  summary("Performs two Mandelbrot orbit iterations."),
+  param(z, "Initial complex orbit value."),
+  param(c, "Complex point being evaluated."),
+  returns("The orbit value after two iterations.")
+)
+function fractal2(z: float32x2, c: float32x2): float32x2 {
+  return fractalStep(fractalStep(z, c), c);
+}
+
+@docs(
+  summary("Performs four Mandelbrot orbit iterations."),
+  param(z, "Initial complex orbit value."),
+  param(c, "Complex point being evaluated."),
+  returns("The orbit value after four iterations.")
+)
+function fractal4(z: float32x2, c: float32x2): float32x2 {
+  return fractal2(fractal2(z, c), c);
+}
+
+@docs(
+  summary("Performs sixteen Mandelbrot orbit iterations through fixed composition."),
+  param(z, "Initial complex orbit value."),
+  param(c, "Complex point being evaluated."),
+  returns("The orbit value after sixteen iterations.")
+)
+function fractal16(z: float32x2, c: float32x2): float32x2 {
+  return fractal4(fractal4(fractal4(fractal4(z, c), c), c), c);
+}
+
+@docs(
+  summary("Approximates the standard normal cumulative distribution."),
+  param(x, "Standardized input value."),
+  returns("Approximate probability that a standard normal variable is at most x.")
+)
+function normalCDF(x: float32): float32 {
+  const a = abs(x);
+  const t = 1.0 / (1.0 + 0.2316419 * a);
+  // Polynomial coefficients form a compact single-precision CDF approximation.
+  const p = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const y = 1.0 - 0.398942280 * exp(-0.5 * a * a) * p;
+  return x < 0.0 ? 1.0 - y : y;
+}
+
+@docs(
+  summary("Clamps a scalar to the inclusive unit interval."),
+  param(x, "Value to clamp."),
+  returns("Zero below the interval, one above it, and x inside it.")
+)
 function saturate(x: float32): float32 {
   return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
 }
 
-function smoothRange(edge0: float32, edge1: float32, x: float32): float32 {
-  const t = saturate((x - edge0) / (edge1 - edge0));
-  return t * t * (3.0 - 2.0 * t);
+@docs(
+  summary("Packs a linear RGB color into an opaque RGBA8 pixel."),
+  param(color, "RGB color with independently clamped components."),
+  returns("The packed opaque RGBA8 pixel.")
+)
+function packColor(color: float32x3): uint32 {
+  const red = uint32(saturate(color.x) * 255.0);
+  const green = uint32(saturate(color.y) * 255.0);
+  const blue = uint32(saturate(color.z) * 255.0);
+  return red | (green << 8) | (blue << 16) | (255 << 24);
 }
 
-function blend(base: float32, layer: float32, amount: float32): float32 {
-  return base + (layer - base) * saturate(amount);
+@docs(
+  summary("Evaluates the signed-distance scene used by the procedural endpoint."),
+  param(point, "World-space sample position."),
+  param(time, "Animation time for the moving forms."),
+  returns("Distance to the nearest terrain or analytic form.")
+)
+function sceneDistance(point: float32x3, time: float32): float32 {
+  const terrain = point.y + 0.85 - sin(point.x * 1.7 + time * 0.35) * 0.12 - cos(point.z * 1.3) * 0.08;
+  const first = length(point - float32x3(sin(time * 0.4) * 0.7, -0.05, 2.5)) - 0.8;
+  const secondPoint = point - float32x3(-1.05, -0.25 + cos(time * 0.6) * 0.15, 3.5);
+  const second = length(float32x3(secondPoint.x, secondPoint.y * 1.45, secondPoint.z)) - 0.62;
+  let nearest = terrain;
+  if (first < nearest) {
+    nearest = first;
+  }
+  if (second < nearest) {
+    nearest = second;
+  }
+  return nearest;
 }
 
-function hashPixel(x: uint32, y: uint32): float32 {
-  let value = x * 374761393 + y * 668265263;
-  value = (value ^ (value >> 13)) * 1274126177;
-  value ^= value >> 16;
-  return float32(value & 65535) / 65535.0;
+@docs(
+  summary("Returns the signed twice-area of a screen-space triangle edge."),
+  param(a, "First edge endpoint."),
+  param(b, "Second edge endpoint."),
+  param(point, "Point tested against the directed edge."),
+  returns("The signed edge function value.")
+)
+function edge(a: float32x2, b: float32x2, point: float32x2): float32 {
+  return (point.x - a.x) * (b.y - a.y) - (point.y - a.y) * (b.x - a.x);
 }
 
-export function integrateParticles[i](
-  positions: buffer<float32[]>,
-  velocities: buffer<float32[]>,
-  params: ParticleParams,
-) {
-  if (i < params.count) {
-    for (let step = 0; step < params.steps; step++) {
-      positions[i] += velocities[i] * params.dt;
-    }
-  }
+@docs(
+  summary("Predicts particle components with one explicit Euler step."),
+  coordinate(i, "Particle-component index."),
+  param(positions, "Current particle components."),
+  param(velocities, "Velocity components paired with the positions."),
+  param(predicted, "Predicted components written for the commit stage."),
+  param(params, "Workload count and prediction time step.")
+)
+export function particlePredict[i](positions: buffer<float32[]>, velocities: buffer<float32[]>, predicted: buffer<float32[]>, params: ParticleParams) {
+  predicted[i] = positions[i] + velocities[i] * params.dt;
 }
 
-export function mandelbrot[x, y](
-  output: buffer<uint32[]>,
-  params: FractalParams,
-) {
-  if (x >= params.width || y >= params.height) {
-    return;
-  }
-
-  const cx = (float32(x) - float32(params.width) * 0.5) * params.scale + params.centerX;
-  const cy = (float32(y) - float32(params.height) * 0.5) * params.scale + params.centerY;
-  let zx = 0.0;
-  let zy = 0.0;
-  let iteration = 0;
-  while (iteration < params.maxIterations && zx * zx + zy * zy <= 4.0) {
-    const nextX = zx * zx - zy * zy + cx;
-    zy = 2.0 * zx * zy + cy;
-    zx = nextX;
-    iteration++;
-  }
-  output[y * params.width + x] = iteration;
+@docs(
+  summary("Applies damping and a small bias to predicted particle components."),
+  coordinate(i, "Particle-component index."),
+  param(predicted, "Predicted components from the first stage."),
+  param(output, "Final particle components written by this stage.")
+)
+export function particleCommit[i](predicted: buffer<float32[]>, output: buffer<float32[]>) {
+  output[i] = predicted[i] * 0.99991 + 0.00003;
 }
 
-@workgroup(16, 16)
-export function multiplyMatrices[column, row](
-  left: buffer<float32[]>,
-  right: buffer<float32[]>,
-  output: buffer<float32[]>,
-  params: MatrixParams,
-) {
-  let leftTile: shared<float32[256]>;
-  let rightTile: shared<float32[256]>;
-
-  const localColumn = column % 16;
-  const localRow = row % 16;
-  const local = localRow * 16 + localColumn;
-  let sum = 0.0;
-  let tile = 0;
-  while (tile < params.size) {
-    const leftColumn = tile + localColumn;
-    const rightRow = tile + localRow;
-    if (row < params.size && leftColumn < params.size) {
-      leftTile[local] = left[row * params.size + leftColumn];
-    } else {
-      leftTile[local] = 0.0;
-    }
-    if (rightRow < params.size && column < params.size) {
-      rightTile[local] = right[rightRow * params.size + column];
-    } else {
-      rightTile[local] = 0.0;
-    }
-    workgroupBarrier();
-
-    for (let k = 0; k < 16; k++) {
-      sum += leftTile[localRow * 16 + k] * rightTile[k * 16 + localColumn];
-    }
-    workgroupBarrier();
-    tile += 16;
-  }
-
-  if (row < params.size && column < params.size) {
-    output[row * params.size + column] = sum;
-  }
+@docs(
+  summary("Computes a fixed-depth Mandelbrot orbit magnitude for each pixel."),
+  coordinate(i, "Linear pixel index."),
+  param(orbit, "Squared orbit magnitudes written for colorization."),
+  param(params, "Image dimensions and complex-plane scale.")
+)
+export function fractalOrbit[i](orbit: buffer<float32[]>, params: ImageParams) {
+  const x = i % params.width;
+  const y = i / params.width;
+  // Center the pixel grid and translate it toward the informative Mandelbrot region.
+  const c = float32x2((float32(x) - float32(params.width) * 0.5) * params.scale - 0.6, (float32(y) - float32(params.height) * 0.5) * params.scale);
+  const z = fractal16(float32x2(0.0, 0.0), c);
+  orbit[i] = dot(z, z);
 }
 
-export function priceOptions[i](
-  output: buffer<float32[]>,
-  params: OptionParams,
-) {
-  if (i >= params.count) {
-    return;
-  }
+@docs(
+  summary("Maps orbit magnitudes to packed RGBA8 pixels."),
+  coordinate(i, "Linear pixel index."),
+  param(orbit, "Squared orbit magnitudes produced by fractalOrbit."),
+  param(pixels, "Packed RGBA8 output pixels.")
+)
+export function fractalColor[i](orbit: buffer<float32[]>, pixels: buffer<uint32[]>) {
+  const raw = log2(orbit[i] + 1.0) * 24.0;
+  const value = uint32(raw < 0.0 ? 0.0 : raw > 255.0 ? 255.0 : raw);
+  // Pack red, green, blue, and opaque alpha into one uint32 pixel.
+  pixels[i] = value | ((value * 3) << 8) | ((255 - value) << 16) | (255 << 24);
+}
 
+@docs(
+  summary("Computes one cell from each batched 4 × 4 matrix product."),
+  coordinate(i, "Linear output-cell index across all matrix batches."),
+  param(left, "Left-hand matrices in row-major order."),
+  param(right, "Right-hand matrices in row-major order."),
+  param(product, "Raw matrix-product cells written by this stage.")
+)
+export function matrixProduct[i](left: buffer<float32[]>, right: buffer<float32[]>, product: buffer<float32[]>) {
+  const base = (i / 16) * 16;
+  const cell = i % 16;
+  // Split the linear cell into its row and column within one 4 × 4 matrix.
+  const row = cell / 4;
+  const column = cell % 4;
+  product[i] = left[base + row * 4] * right[base + column] +
+    left[base + row * 4 + 1] * right[base + 4 + column] +
+    left[base + row * 4 + 2] * right[base + 8 + column] +
+    left[base + row * 4 + 3] * right[base + 12 + column];
+}
+
+@docs(
+  summary("Applies a bounded activation to matrix-product cells."),
+  coordinate(i, "Linear matrix-cell index."),
+  param(product, "Raw cells produced by matrixProduct."),
+  param(output, "Activated matrix cells.")
+)
+export function matrixActivate[i](product: buffer<float32[]>, output: buffer<float32[]>) {
+  const value = product[i];
+  output[i] = value / (1.0 + abs(value));
+}
+
+@docs(
+  summary("Prices a deterministic family of European call options with Black–Scholes."),
+  coordinate(i, "Option index and deterministic input seed."),
+  param(prices, "Calculated call prices."),
+  param(params, "Logical option count paired with the host launch.")
+)
+export function optionPrice[i](prices: buffer<float32[]>, params: CountParams) {
   const spot = 80.0 + float32(i % 400) * 0.1;
   const strike = 90.0 + float32(i % 200) * 0.1;
   const years = 0.25 + float32(i % 365) / 365.0;
   const volatility = 0.15 + float32(i % 100) * 0.001;
-  const rate = 0.03;
-  const sigmaRootTime = volatility * sqrt(years);
-  const d1 = (log(spot / strike) + (rate + 0.5 * volatility * volatility) * years) / sigmaRootTime;
-  const d2 = d1 - sigmaRootTime;
-  output[i] = spot * normalCDF(d1) - strike * exp(-rate * years) * normalCDF(d2);
+  const root = volatility * sqrt(years);
+  // d1 and d2 share root; the expression below uses d2 = d1 - root directly.
+  const d1 = (log(spot / strike) + (0.03 + 0.5 * volatility * volatility) * years) / root;
+  prices[i] = spot * normalCDF(d1) - strike * exp(-0.03 * years) * normalCDF(d1 - root);
 }
 
-export function proceduralScene[x, y](
-  rgba: buffer<uint32[]>,
-  params: RenderParams,
-) {
-  if (x >= params.width || y >= params.height) {
-    return;
-  }
+@docs(
+  summary("Adds a small nonlinear risk adjustment to option prices."),
+  coordinate(i, "Option index."),
+  param(prices, "Call prices produced by optionPrice."),
+  param(output, "Risk-adjusted prices.")
+)
+export function optionRisk[i](prices: buffer<float32[]>, output: buffer<float32[]>) {
+  const price = prices[i];
+  output[i] = price + sqrt(abs(price)) * 0.01;
+}
 
-  const u = (float32(x) + 0.5) / float32(params.width);
-  const v = (float32(y) + 0.5) / float32(params.height);
+@docs(
+  summary("Traverses the analytic scene and records one world-space surface sample per pixel."),
+  coordinate(i, "Linear pixel index."),
+  param(surface, "World position and positive hit distance, or a negative miss marker."),
+  param(params, "Image dimensions and animation time.")
+)
+function proceduralTrace[i](surface: buffer<float32x4[]>, params: ImageParams) {
+  const x = i % params.width;
+  const y = i / params.width;
   const aspect = float32(params.width) / float32(params.height);
-  const px = (u - 0.5) * aspect;
-  const py = 0.5 - v;
-
-  let red = 0.015 + 0.18 * v;
-  let green = 0.025 + 0.06 * v;
-  let blue = 0.11 + 0.22 * (1.0 - v);
-
-  const cloudWave = 0.5 + 0.5 * sin(px * 5.0 + sin(py * 9.0 + params.time) * 1.7);
-  const auroraHeight = 0.14 + 0.055 * sin(px * 3.2 + params.time * 0.7) +
-    0.025 * sin(px * 11.0 - params.time);
-  const aurora = exp(-abs(py - auroraHeight) * 20.0) * (0.35 + 0.65 * cloudWave);
-  red += aurora * 0.08;
-  green += aurora * 0.42;
-  blue += aurora * 0.48;
-
-  const sunX = px - 0.33;
-  const sunY = py - 0.12;
-  const sunDistance = sqrt(sunX * sunX + sunY * sunY);
-  const halo = exp(-sunDistance * 7.0);
-  const disk = smoothRange(0.145, 0.125, sunDistance);
-  const rings = exp(-abs(sunDistance - 0.205) * 95.0) +
-    0.55 * exp(-abs(sunDistance - 0.255) * 120.0);
-  red += halo * 0.38 + rings * 0.55;
-  green += halo * 0.08 + rings * 0.12;
-  blue += halo * 0.16 + rings * 0.68;
-  red = blend(red, 1.0, disk * 0.96);
-  green = blend(green, 0.44 + 0.3 * (sunY / 0.145 + 0.5), disk * 0.96);
-  blue = blend(blue, 0.16, disk * 0.96);
-
-  const cellSize = 12;
-  const cellX = x / cellSize;
-  const cellY = y / cellSize;
-  const seed = hashPixel(cellX, cellY);
-  if (seed > 0.91 && py > -0.06) {
-    const centerX = 2.0 + hashPixel(cellX + 17, cellY + 31) * 8.0;
-    const centerY = 2.0 + hashPixel(cellX + 47, cellY + 11) * 8.0;
-    const starX = float32(x % cellSize) - centerX;
-    const starY = float32(y % cellSize) - centerY;
-    const core = exp(-(starX * starX + starY * starY) * 1.7);
-    const rays = 0.22 * exp(-abs(starX) * 4.0 - abs(starY) * 0.45) +
-      0.22 * exp(-abs(starY) * 4.0 - abs(starX) * 0.45);
-    const sparkle = (core + rays) * (0.45 + seed * 0.8);
-    red += sparkle;
-    green += sparkle * 0.88;
-    blue += sparkle * 1.15;
+  const u = (2.0 * (float32(x) + 0.5) / float32(params.width) - 1.0) * aspect;
+  const v = 1.0 - 2.0 * (float32(y) + 0.5) / float32(params.height);
+  const origin = float32x3(0.0, 0.35, -4.0);
+  const direction = normalize(float32x3(u, v, 1.65));
+  let point = origin;
+  let travel = 0.0;
+  let distance = 1.0;
+  let step = 0;
+  while (step < 64 && travel < 14.0 && distance > 0.002) {
+    point = origin + direction * travel;
+    distance = sceneDistance(point, params.time);
+    travel += distance > 0.002 ? distance : 0.002;
+    step++;
   }
+  const hit = distance <= 0.006 && travel < 14.0;
+  surface[i] = float32x4(point.x, point.y, point.z, hit ? travel : -1.0);
+}
 
-  const distantHeight = -0.075 + 0.045 * sin(px * 6.5 + 0.4) +
-    0.022 * sin(px * 16.0 - 1.3);
-  const distant = smoothRange(distantHeight + 0.018, distantHeight - 0.012, py);
-  red = blend(red, 0.075, distant);
-  green = blend(green, 0.045, distant);
-  blue = blend(blue, 0.16, distant);
-  const ridge = exp(-abs(py - distantHeight) * 150.0);
-  red += ridge * 0.24;
-  blue += ridge * 0.38;
+@docs(
+  summary("Reconstructs procedural normals and shades the final packed pixel."),
+  coordinate(i, "Linear pixel index."),
+  param(surface, "Surface samples produced by proceduralTrace."),
+  param(pixels, "Packed RGBA8 output pixels."),
+  param(params, "Image dimensions and animation time.")
+)
+function proceduralShade[i](surface: buffer<float32x4[]>, pixels: buffer<uint32[]>, params: ImageParams) {
+  if (i < pixels.length) {
+    const sample = surface[i];
+    const y = i / params.width;
+    const sky = float32(y) / float32(params.height);
+    let color = float32x3(0.06 + sky * 0.08, 0.10 + sky * 0.12, 0.18 + sky * 0.16);
+    if (sample.w > 0.0) {
+      const point = float32x3(sample.x, sample.y, sample.z);
+      const epsilon = 0.004;
+      const center = sceneDistance(point, params.time);
+      const normal = normalize(float32x3(
+        sceneDistance(point + float32x3(epsilon, 0.0, 0.0), params.time) - center,
+        sceneDistance(point + float32x3(0.0, epsilon, 0.0), params.time) - center,
+        sceneDistance(point + float32x3(0.0, 0.0, epsilon), params.time) - center
+      ));
+      const diffuseRaw = dot(normal, normalize(float32x3(-0.45, 0.8, -0.35)));
+      const diffuse = diffuseRaw > 0.0 ? diffuseRaw : 0.0;
+      const bands = 0.5 + 0.5 * sin(point.x * 4.0 + point.z * 2.0 + params.time);
+      const base = point.y < -0.55 ? float32x3(0.18, 0.28, 0.12) : float32x3(0.24 + bands * 0.28, 0.10 + bands * 0.12, 0.20 + (1.0 - bands) * 0.35);
+      const fog = saturate(sample.w / 14.0);
+      const lit = base * (0.18 + diffuse * 0.82);
+      color = lit * (1.0 - fog * 0.55) + float32x3(0.10, 0.15, 0.24) * fog * 0.55;
+    }
+    pixels[i] = packColor(color);
+  }
+}
 
-  const nearHeight = -0.19 + 0.065 * sin(px * 4.3 - 0.8) +
-    0.038 * sin(px * 12.5 + 1.7);
-  const near = smoothRange(nearHeight + 0.014, nearHeight - 0.018, py);
-  red = blend(red, 0.018, near);
-  green = blend(green, 0.025, near);
-  blue = blend(blue, 0.055, near);
+@docs(
+  summary("Produces one complete procedural scene frame entirely through GPGPU stages."),
+  param(pixels, "Packed RGBA8 frame output."),
+  param(params, "Image dimensions and animation time.")
+)
+export function proceduralFrame(pixels: buffer<uint32[]>, params: ImageParams) {
+  const surface = transient<float32x4>(pixels.length);
+  run proceduralTrace(surface, params) over pixels.length;
+  run proceduralShade(surface, pixels, params) over pixels.length;
+}
 
-  const ground = smoothRange(-0.20, -0.235, py);
-  const perspective = 0.57 + py;
-  const verticalGrid = exp(-abs(sin(px * 14.0 / perspective)) * 22.0);
-  const horizontalGrid = exp(-abs(sin(1.35 / perspective + params.time * 0.35)) * 24.0);
-  const grid = saturate(verticalGrid + horizontalGrid);
-  const reflection = exp(-abs(px - 0.33) * 7.0) *
-    (0.45 + 0.55 * sin(py * 210.0 + sin(px * 19.0) * 2.0));
-  red = blend(red, 0.018 + grid * 0.55 + reflection * 0.32, ground);
-  green = blend(green, 0.035 + grid * 0.12 + reflection * 0.06, ground);
-  blue = blend(blue, 0.09 + grid * 0.72 + reflection * 0.42, ground);
+@docs(
+  summary("Transforms world-space mesh vertices into screen coordinates."),
+  coordinate(i, "Vertex index."),
+  param(vertices, "World-space XYZ positions with a material layer in W."),
+  param(screen, "Screen X, screen Y, normalized depth, and material layer."),
+  param(params, "Viewport and animation parameters.")
+)
+function meshTransform[i](vertices: buffer<float32x4[]>, screen: buffer<float32x4[]>, params: MeshParams) {
+  const point = vertices[i];
+  const wobble = sin(params.time * 0.7 + point.w * 1.9) * 0.035;
+  const depth = point.z + wobble;
+  const inverse = 1.0 / depth;
+  screen[i] = float32x4(
+    (point.x * inverse * 0.5 + 0.5) * float32(params.width),
+    (0.5 - point.y * inverse * 0.5) * float32(params.height),
+    saturate((depth - 1.0) / 7.0),
+    point.w
+  );
+}
 
-  const vignette = saturate(1.0 - (px * px * 0.5 + (v - 0.5) * (v - 0.5)) * 1.35);
-  const grain = 0.97 + hashPixel(x + 101, y + 79) * 0.06;
-  const scanline = 0.975 + 0.025 * sin(float32(y) * 1.65);
-  const exposure = (0.62 + 0.38 * vignette) * grain * scanline;
-  red *= exposure;
-  green *= exposure;
-  blue *= exposure;
-  const alpha = 0.94 + 0.06 * vignette;
+@docs(
+  summary("Clears packed depth and triangle ownership for one mesh frame."),
+  coordinate(i, "Pixel index."),
+  param(visibility, "Atomic packed depth and triangle identifiers.")
+)
+function meshClear[i](visibility: buffer<atomic<uint32>[]>) {
+  if (i < visibility.length) {
+    atomicStore(visibility[i], 0xffff_ffff);
+  }
+}
 
-  const red8 = uint32(saturate(red) * 255.0 + 0.5);
-  const green8 = uint32(saturate(green) * 255.0 + 0.5);
-  const blue8 = uint32(saturate(blue) * 255.0 + 0.5);
-  const alpha8 = uint32(saturate(alpha) * 255.0 + 0.5);
-  rgba[y * params.width + x] = red8 | (green8 << 8) | (blue8 << 16) | (alpha8 << 24);
+@docs(
+  summary("Rasterizes one projected triangle through atomic pixel ownership."),
+  coordinate(triangle, "Triangle index."),
+  param(screen, "Transformed screen-space vertices."),
+  param(indices, "Three vertex indices per triangle."),
+  param(visibility, "Atomic packed depth and triangle identifiers."),
+  param(params, "Viewport dimensions.")
+)
+function meshRaster[triangle](screen: buffer<float32x4[]>, indices: buffer<uint32[]>, visibility: buffer<atomic<uint32>[]>, params: MeshParams) {
+  const first = triangle * 3;
+  if (first + 2 < indices.length && triangle < 0x000f_ffff) {
+    const a = screen[indices[first]];
+    const b = screen[indices[first + 1]];
+    const c = screen[indices[first + 2]];
+    const pa = float32x2(a.x, a.y);
+    const pb = float32x2(b.x, b.y);
+    const pc = float32x2(c.x, c.y);
+    const area = edge(pa, pb, pc);
+    const areaMagnitude = abs(area);
+    if (areaMagnitude > 0.0001) {
+      const minimumX = pa.x < pb.x ? (pa.x < pc.x ? pa.x : pc.x) : (pb.x < pc.x ? pb.x : pc.x);
+      const minimumY = pa.y < pb.y ? (pa.y < pc.y ? pa.y : pc.y) : (pb.y < pc.y ? pb.y : pc.y);
+      const maximumX = pa.x > pb.x ? (pa.x > pc.x ? pa.x : pc.x) : (pb.x > pc.x ? pb.x : pc.x);
+      const maximumY = pa.y > pb.y ? (pa.y > pc.y ? pa.y : pc.y) : (pb.y > pc.y ? pb.y : pc.y);
+      const x0 = clamp(int32(floor(minimumX)), 0, int32(params.width) - 1);
+      const y0 = clamp(int32(floor(minimumY)), 0, int32(params.height) - 1);
+      const x1 = clamp(int32(ceil(maximumX)), 0, int32(params.width) - 1);
+      const y1 = clamp(int32(ceil(maximumY)), 0, int32(params.height) - 1);
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const point = float32x2(float32(x) + 0.5, float32(y) + 0.5);
+          const wa = edge(pb, pc, point) / area;
+          const wb = edge(pc, pa, point) / area;
+          const wc = 1.0 - wa - wb;
+          if (wa >= 0.0 && wb >= 0.0 && wc >= 0.0) {
+            const depth = saturate(wa * a.z + wb * b.z + wc * c.z);
+            const packed = (uint32(depth * 4094.0) << 20) | triangle;
+            atomicMin(visibility[uint32(y) * params.width + uint32(x)], packed);
+          }
+        }
+      }
+    }
+  }
+}
+
+@docs(
+  summary("Shades the visible triangle selected for one output pixel."),
+  coordinate(i, "Pixel index."),
+  param(vertices, "World-space mesh vertices."),
+  param(screen, "Transformed screen-space vertices."),
+  param(indices, "Three vertex indices per triangle."),
+  param(visibility, "Atomic packed depth and triangle identifiers."),
+  param(pixels, "Packed RGBA8 frame output."),
+  param(params, "Viewport dimensions.")
+)
+function meshShade[i](vertices: buffer<float32x4[]>, screen: buffer<float32x4[]>, indices: buffer<uint32[]>, visibility: buffer<atomic<uint32>[]>, pixels: buffer<uint32[]>, params: MeshParams) {
+  if (i < pixels.length) {
+    const owner = atomicLoad(visibility[i]);
+    let color = float32x3(0.035, 0.055, 0.09);
+    if (owner != 0xffff_ffff) {
+      const triangle = owner & 0x000f_ffff;
+      const first = triangle * 3;
+      const ia = indices[first];
+      const ib = indices[first + 1];
+      const ic = indices[first + 2];
+      const va = vertices[ia];
+      const vb = vertices[ib];
+      const vc = vertices[ic];
+      const sa = screen[ia];
+      const sb = screen[ib];
+      const sc = screen[ic];
+      const x = i % params.width;
+      const y = i / params.width;
+      const point = float32x2(float32(x) + 0.5, float32(y) + 0.5);
+      const area = edge(float32x2(sa.x, sa.y), float32x2(sb.x, sb.y), float32x2(sc.x, sc.y));
+      const wa = edge(float32x2(sb.x, sb.y), float32x2(sc.x, sc.y), point) / area;
+      const wb = edge(float32x2(sc.x, sc.y), float32x2(sa.x, sa.y), point) / area;
+      const wc = 1.0 - wa - wb;
+      const a = float32x3(va.x, va.y, va.z);
+      const b = float32x3(vb.x, vb.y, vb.z);
+      const c = float32x3(vc.x, vc.y, vc.z);
+      const normal = normalize(cross(b - a, c - a));
+      const diffuseRaw = abs(dot(normal, normalize(float32x3(-0.35, 0.75, -0.55))));
+      const layer = wa * va.w + wb * vb.w + wc * vc.w;
+      const world = a * wa + b * wb + c * wc;
+      const phase = 0.5 + 0.5 * sin(world.x * 2.1 + world.y * 3.7 + world.z * 1.3 + layer * 2.3);
+      const base = float32x3(0.12 + phase * 0.58, 0.18 + (1.0 - phase) * 0.42, 0.28 + phase * 0.35);
+      const depth = float32(owner >> 20) / 4094.0;
+      const lit = base * (0.20 + diffuseRaw * 0.80);
+      color = lit * (1.0 - depth * 0.35) + float32x3(0.06, 0.09, 0.14) * depth * 0.35;
+    }
+    pixels[i] = packColor(color);
+  }
+}
+
+@docs(
+  summary("Produces one complete triangle-mesh frame with a GPGPU software rasterizer."),
+  param(vertices, "World-space XYZ positions with a material layer in W."),
+  param(indices, "Three vertex indices per triangle."),
+  param(visibility, "Per-pixel atomic depth and triangle ownership scratch."),
+  param(pixels, "Packed RGBA8 frame output."),
+  param(params, "Viewport and animation parameters.")
+)
+export function meshFrame(vertices: buffer<float32x4[]>, indices: buffer<uint32[]>, visibility: buffer<atomic<uint32>[]>, pixels: buffer<uint32[]>, params: MeshParams) {
+  const screen = transient<float32x4>(vertices.length);
+  run meshTransform(vertices, screen, params) over vertices.length;
+  run meshClear(visibility) over visibility.length;
+  run meshRaster(screen, indices, visibility, params) over indices.length / 3;
+  run meshShade(vertices, screen, indices, visibility, pixels, params) over pixels.length;
 }

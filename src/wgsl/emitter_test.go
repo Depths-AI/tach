@@ -5,10 +5,23 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/flow"
+	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
 	"tach/src/wgsl"
 )
+
+func emit(m *flow.Module) (string, error) {
+	if err := opt.OptimizeLogical(m); err != nil {
+		return "", err
+	}
+	executable, err := wgsl.Lower(m)
+	if err != nil {
+		return "", err
+	}
+	return wgsl.Emit(executable)
+}
 
 func TestParticlesWGSL(t *testing.T) {
 	src, err := os.ReadFile("../../examples/particles.tach")
@@ -23,7 +36,7 @@ func TestParticlesWGSL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := wgsl.Emit(m)
+	out, err := emit(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +77,7 @@ export function clear[i](data: buffer<uint32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := wgsl.Emit(m)
+	out, err := emit(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +102,7 @@ export function coordinates[x, y](out: buffer<uint32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := wgsl.Emit(m)
+	out, err := emit(m)
 	if err != nil {
 		t.Fatal(err)
 	}

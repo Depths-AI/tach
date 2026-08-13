@@ -6,6 +6,7 @@ type Node interface{ GetSpan() source.Span }
 
 type Module struct {
 	File  string
+	Attrs []Attribute
 	Decls []Decl
 }
 type Decl interface {
@@ -23,6 +24,7 @@ func (a Attribute) GetSpan() source.Span { return a.Span }
 
 type TypeDecl struct {
 	Name   string
+	Attrs  []Attribute
 	Fields []Field
 	Span   source.Span
 }
@@ -36,28 +38,19 @@ type Field struct {
 	Span source.Span
 }
 
-type FuncDecl struct {
-	Name   string
-	Params []Param
-	Return TypeExpr
-	Body   *BlockStmt
-	Span   source.Span
+type FunctionDecl struct {
+	Name     string
+	Exported bool
+	Attrs    []Attribute
+	Indices  []Index
+	Params   []Param
+	Return   TypeExpr
+	Body     *BlockStmt
+	Span     source.Span
 }
 
-func (*FuncDecl) declNode()              {}
-func (d *FuncDecl) GetSpan() source.Span { return d.Span }
-
-type ComputeDecl struct {
-	Name    string
-	Attrs   []Attribute
-	Indices []Index
-	Params  []Param
-	Body    *BlockStmt
-	Span    source.Span
-}
-
-func (*ComputeDecl) declNode()              {}
-func (d *ComputeDecl) GetSpan() source.Span { return d.Span }
+func (*FunctionDecl) declNode()              {}
+func (d *FunctionDecl) GetSpan() source.Span { return d.Span }
 
 type Index struct {
 	Name string
@@ -205,6 +198,23 @@ type ReturnStmt struct {
 func (*ReturnStmt) stmtNode()              {}
 func (s *ReturnStmt) GetSpan() source.Span { return s.Span }
 
+type RunStmt struct {
+	Stage  string
+	Args   []Expr
+	Domain Domain
+	Span   source.Span
+}
+
+func (*RunStmt) stmtNode()              {}
+func (s *RunStmt) GetSpan() source.Span { return s.Span }
+
+type Domain struct {
+	Axes []Expr
+	Span source.Span
+}
+
+func (d Domain) GetSpan() source.Span { return d.Span }
+
 type Expr interface {
 	Node
 	exprNode()
@@ -224,6 +234,14 @@ type NumberExpr struct {
 
 func (*NumberExpr) exprNode()              {}
 func (e *NumberExpr) GetSpan() source.Span { return e.Span }
+
+type StringExpr struct {
+	Value string
+	Span  source.Span
+}
+
+func (*StringExpr) exprNode()              {}
+func (e *StringExpr) GetSpan() source.Span { return e.Span }
 
 type BoolExpr struct {
 	Value bool
@@ -294,6 +312,15 @@ type StructLiteralExpr struct {
 
 func (*StructLiteralExpr) exprNode()              {}
 func (e *StructLiteralExpr) GetSpan() source.Span { return e.Span }
+
+type TransientExpr struct {
+	Elem  TypeExpr
+	Count Expr
+	Span  source.Span
+}
+
+func (*TransientExpr) exprNode()              {}
+func (e *TransientExpr) GetSpan() source.Span { return e.Span }
 
 type LiteralField struct {
 	Name  string

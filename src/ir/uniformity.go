@@ -84,14 +84,14 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 			// Tach helpers are value-only and cannot observe kernel indices,
 			// resources, workgroup memory, atomics, or barriers. Therefore equal
 			// arguments imply equal results across the workgroup.
-			if callee := fmap[x.Function]; callee == nil || callee.Compute {
+			if callee := fmap[x.Function]; callee == nil || callee.Kind == Stage {
 				u = false
 			}
 			if x.Result != 0 {
 				e.values[x.Result] = u
 			}
 		case *PlaceRoot:
-			e.places[x.Result] = uniformPlace{addr: true, resource: x.Resource}
+			e.places[x.Result] = uniformPlace{addr: true, resource: x.Buffer}
 		case *PlaceWorkgroup:
 			e.places[x.Result] = uniformPlace{addr: true, resource: -1}
 		case *PlaceField:
@@ -155,6 +155,10 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 			var err error
 			e, control, err = analyzeUniformLoop(m, f, x, e, fmap, control, checkBarriers)
 			if err != nil {
+				return e, control, err
+			}
+		case *Scope:
+			if _, _, err := analyzeUniformBlock(m, f, x.Body, e.clone(), fmap, control, checkBarriers); err != nil {
 				return e, control, err
 			}
 		default:

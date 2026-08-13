@@ -397,25 +397,22 @@ func resultID(in Instruction) uint32 {
 		return a[0]
 	case OpTypeVoid, OpTypeBool, OpTypeInt, OpTypeFloat, OpTypeVector, OpTypeArray, OpTypeRuntimeArray, OpTypeStruct, OpTypePointer, OpTypeFunction, OpLabel:
 		return a[0]
-	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
-		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
-		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
-		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
-		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
-		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd,
-		OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual,
-		OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual,
-		OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual,
-		OpAtomicLoad, OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
-		OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpPhi, OpExtInst, OpDot:
+	}
+	if hasResultType(in.Op) {
 		return a[1]
 	}
 	return 0
 }
 
 func resultTypeID(in Instruction) uint32 {
-	a := in.Operands
-	switch in.Op {
+	if hasResultType(in.Op) {
+		return in.Operands[0]
+	}
+	return 0
+}
+
+func hasResultType(op Op) bool {
+	switch op {
 	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
 		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
@@ -427,9 +424,9 @@ func resultTypeID(in Instruction) uint32 {
 		OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual,
 		OpAtomicLoad, OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
 		OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpPhi, OpExtInst, OpDot:
-		return a[0]
+		return true
 	}
-	return 0
+	return false
 }
 func (v *validation) def(id uint32, idx int, what string) error {
 	if id == 0 || id >= v.m.Bound {
@@ -1726,7 +1723,7 @@ func (v *validation) validateDecorationsAndABI() error {
 		}
 	}
 
-	pairs := map[[2]uint32]uint32{}
+	pairs := map[[2]uint32][]uint32{}
 	for id, storage := range v.globalVars {
 		d := v.decoration(id)
 		vt := v.types[v.valueType[id]]
@@ -1751,10 +1748,14 @@ func (v *validation) validateDecorationsAndABI() error {
 				return fmt.Errorf("descriptor variable %%%d requires DescriptorSet and Binding", id)
 			}
 			pair := [2]uint32{*d.set, *d.binding}
-			if prev, ok := pairs[pair]; ok {
-				return fmt.Errorf("descriptor variables %%%d and %%%d share set=%d binding=%d", prev, id, pair[0], pair[1])
+			for _, prev := range pairs[pair] {
+				for _, function := range v.functions {
+					if v.functionUsesGlobal(function, prev) && v.functionUsesGlobal(function, id) {
+						return fmt.Errorf("descriptor variables %%%d and %%%d share set=%d binding=%d in function %%%d", prev, id, pair[0], pair[1], function.id)
+					}
+				}
 			}
-			pairs[pair] = id
+			pairs[pair] = append(pairs[pair], id)
 			st := v.types[vt.elem]
 			if st == nil || st.kind != typeStruct || !v.decoration(vt.elem).block {
 				return fmt.Errorf("descriptor variable %%%d must point to Block struct", id)
@@ -1780,6 +1781,19 @@ func (v *validation) validateDecorationsAndABI() error {
 		}
 	}
 	return nil
+}
+
+func (v *validation) functionUsesGlobal(function *functionInfo, global uint32) bool {
+	for _, label := range function.order {
+		for _, index := range function.blocks[label].insts {
+			for _, operand := range valueUses(v.m.Instructions[index]) {
+				if v.pointerRoot[operand] == global {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (v *validation) requireHostABILayout(id uint32, seen map[uint32]bool) error {

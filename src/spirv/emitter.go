@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"tach/src/abi"
+	"tach/src/backend"
 	"tach/src/ir"
 	"tach/src/layout"
 	"tach/src/types"
@@ -15,20 +16,15 @@ import (
 
 // Emit lowers verified Tach IR to a SPIR-V 1.3 compute module and immediately
 // parses and validates the produced binary with Tach's own SPIR-V validator.
-func Emit(m *ir.Module) ([]byte, error) {
-	if err := ir.Verify(m); err != nil {
-		return nil, fmt.Errorf("IR verification: %w", err)
+func Emit(executable *backend.Executable) ([]byte, error) {
+	if err := backend.Verify(executable); err != nil {
+		return nil, fmt.Errorf("executable verification: %w", err)
 	}
-	p, err := lower(m)
+	p, err := lower(executable)
 	if err != nil {
 		return nil, err
 	}
-	optimize(p)
-	parameters, err := abi.PlanParameters(m)
-	if err != nil {
-		return nil, err
-	}
-	b := newBuilder(p, parameters)
+	b := newBuilder(p)
 	if err := b.build(); err != nil {
 		return nil, err
 	}
@@ -44,9 +40,8 @@ func Emit(m *ir.Module) ([]byte, error) {
 }
 
 type builder struct {
-	p          *program
-	m          *ir.Module
-	parameters *abi.ParameterPlan
+	p *program
+	m *ir.Module
 
 	nextID uint32
 
@@ -60,16 +55,17 @@ type builder struct {
 	typesGlobals []uint32
 	functions    []uint32
 
-	types        map[string]uint32
-	pointers     map[string]uint32
-	fnTypes      map[string]uint32
-	constants    map[string]uint32
-	funcIDs      map[string]uint32
-	resourceIDs  []uint32
-	parameterIDs map[*ir.Function]uint32
-	inputIDs     map[inputKind]uint32
-	workgroupIDs map[string][]uint32
-	glsl450      uint32
+	types           map[string]uint32
+	pointers        map[string]uint32
+	fnTypes         map[string]uint32
+	constants       map[string]uint32
+	funcIDs         map[string]uint32
+	resourceIDs     map[*ir.Function][]uint32
+	parameterBlocks map[*ir.Function]*abi.ParameterBlock
+	parameterIDs    map[*ir.Function]uint32
+	inputIDs        map[inputKind]uint32
+	workgroupIDs    map[string][]uint32
+	glsl450         uint32
 }
 
 type typeRole uint8
@@ -79,20 +75,21 @@ const (
 	typeHostABI
 )
 
-func newBuilder(p *program, parameters *abi.ParameterPlan) *builder {
+func newBuilder(p *program) *builder {
 	return &builder{
-		p:            p,
-		m:            p.source,
-		parameters:   parameters,
-		nextID:       1,
-		types:        map[string]uint32{},
-		pointers:     map[string]uint32{},
-		fnTypes:      map[string]uint32{},
-		constants:    map[string]uint32{},
-		funcIDs:      map[string]uint32{},
-		parameterIDs: map[*ir.Function]uint32{},
-		inputIDs:     map[inputKind]uint32{},
-		workgroupIDs: map[string][]uint32{},
+		p:               p,
+		m:               p.source,
+		nextID:          1,
+		types:           map[string]uint32{},
+		pointers:        map[string]uint32{},
+		fnTypes:         map[string]uint32{},
+		constants:       map[string]uint32{},
+		funcIDs:         map[string]uint32{},
+		resourceIDs:     map[*ir.Function][]uint32{},
+		parameterBlocks: map[*ir.Function]*abi.ParameterBlock{},
+		parameterIDs:    map[*ir.Function]uint32{},
+		inputIDs:        map[inputKind]uint32{},
+		workgroupIDs:    map[string][]uint32{},
 	}
 }
 
@@ -361,37 +358,45 @@ func (b *builder) emitStructDebugTypes() error {
 }
 
 func (b *builder) emitResources() error {
-	b.resourceIDs = make([]uint32, len(b.m.Resources))
-	for i, r := range b.m.Resources {
-		physical, err := b.typeID(r.Type, typeHostABI)
-		if err != nil {
-			return fmt.Errorf("resource %s type: %w", r.Name, err)
-		}
-		wrapper := b.id()
-		emit(&b.typesGlobals, OpTypeStruct, wrapper, physical)
-		emit(&b.annotations, OpDecorate, wrapper, DecorationBlock)
-		emit(&b.annotations, OpMemberDecorate, wrapper, 0, DecorationOffset, 0)
-		emit(&b.debug, OpName, append([]uint32{wrapper}, encodeString("__tach_resource_"+strconv.Itoa(i))...)...)
-		emit(&b.debug, OpMemberName, append([]uint32{wrapper, 0}, encodeString("data")...)...)
+	for kernelIndex := range b.p.executable.PhysicalKernels {
+		kernel := &b.p.executable.PhysicalKernels[kernelIndex]
+		b.resourceIDs[kernel.Function] = make([]uint32, len(kernel.Function.BufferParams))
+		for i, r := range kernel.Function.BufferParams {
+			physical, err := b.typeID(r.Type, typeHostABI)
+			if err != nil {
+				return fmt.Errorf("resource %s type: %w", r.Name, err)
+			}
+			wrapper := b.id()
+			emit(&b.typesGlobals, OpTypeStruct, wrapper, physical)
+			emit(&b.annotations, OpDecorate, wrapper, DecorationBlock)
+			emit(&b.annotations, OpMemberDecorate, wrapper, 0, DecorationOffset, 0)
+			emit(&b.debug, OpName, append([]uint32{wrapper}, encodeString(fmt.Sprintf("__tach_resource_%d_%d", kernelIndex, i))...)...)
+			emit(&b.debug, OpMemberName, append([]uint32{wrapper, 0}, encodeString("data")...)...)
 
-		storage := uint32(StorageStorageBuffer)
-		ptr := b.id()
-		emit(&b.typesGlobals, OpTypePointer, ptr, storage, wrapper)
-		varID := b.id()
-		b.resourceIDs[i] = varID
-		emit(&b.typesGlobals, OpVariable, ptr, varID, storage)
-		emit(&b.annotations, OpDecorate, varID, DecorationDescriptorSet, 0)
-		emit(&b.annotations, OpDecorate, varID, DecorationBinding, uint32(i))
-		if r.Access == ir.Read && !types.ContainsAtomic(r.Type) {
-			emit(&b.annotations, OpDecorate, varID, DecorationNonWritable)
+			storage := uint32(StorageStorageBuffer)
+			ptr := b.id()
+			emit(&b.typesGlobals, OpTypePointer, ptr, storage, wrapper)
+			varID := b.id()
+			b.resourceIDs[kernel.Function][i] = varID
+			emit(&b.typesGlobals, OpVariable, ptr, varID, storage)
+			emit(&b.annotations, OpDecorate, varID, DecorationDescriptorSet, 0)
+			emit(&b.annotations, OpDecorate, varID, DecorationBinding, uint32(i))
+			if r.Access == ir.Read && !types.ContainsAtomic(r.Type) {
+				emit(&b.annotations, OpDecorate, varID, DecorationNonWritable)
+			}
+			emit(&b.debug, OpName, append([]uint32{varID}, encodeString(r.Name)...)...)
 		}
-		emit(&b.debug, OpName, append([]uint32{varID}, encodeString(r.Name)...)...)
 	}
 	return nil
 }
 
 func (b *builder) emitParameterBlocks() error {
-	for _, block := range b.parameters.Blocks {
+	for i := range b.p.executable.PhysicalKernels {
+		block := b.p.executable.PhysicalKernels[i].Parameters
+		if block == nil {
+			continue
+		}
+		b.parameterBlocks[block.Function] = block
 		typeID, err := b.typeID(block.Type, typeHostABI)
 		if err != nil {
 			return fmt.Errorf("kernel %s parameter block type: %w", block.Function.Name, err)
@@ -432,7 +437,7 @@ func inputInfo(k inputKind) (*types.Type, uint32, string) {
 func (b *builder) emitInputs() error {
 	used := map[inputKind]bool{}
 	for _, f := range b.m.Functions {
-		for k := range b.p.functions[f].inputs() {
+		for k := range inputs(f, b.p.functions[f]) {
 			used[k] = true
 		}
 	}
@@ -457,7 +462,7 @@ func (b *builder) emitInputs() error {
 
 func (b *builder) emitWorkgroups() error {
 	for _, f := range b.m.Functions {
-		if !f.Compute || len(f.WorkgroupVars) == 0 {
+		if f.Kind != ir.Stage || len(f.WorkgroupVars) == 0 {
 			continue
 		}
 		ids := make([]uint32, len(f.WorkgroupVars))
@@ -479,12 +484,12 @@ func (b *builder) emitWorkgroups() error {
 func (b *builder) emitEntryPoints() {
 	order := []inputKind{inputGlobalIndex, inputLocalIndex, inputLocalLinear}
 	for _, f := range b.m.Functions {
-		if !f.Compute {
+		if f.Kind != ir.Stage {
 			continue
 		}
-		used := b.p.functions[f].inputs()
+		used := inputs(f, b.p.functions[f])
 		ops := []uint32{ExecutionModelGLCompute, b.funcIDs[f.Name]}
-		ops = append(ops, encodeString(abi.KernelEntry(f.Name))...)
+		ops = append(ops, encodeString(f.Name)...)
 		// SPIR-V 1.3 entry-point interfaces contain Input/Output variables only.
 		for _, k := range order {
 			if used[k] {
@@ -492,7 +497,8 @@ func (b *builder) emitEntryPoints() {
 			}
 		}
 		emit(&b.entryPoints, OpEntryPoint, ops...)
-		emit(&b.execModes, OpExecutionMode, b.funcIDs[f.Name], ExecutionModeLocalSize, f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
+		workgroup := b.p.kernels[f].Workgroup
+		emit(&b.execModes, OpExecutionMode, b.funcIDs[f.Name], ExecutionModeLocalSize, workgroup[0], workgroup[1], workgroup[2])
 	}
 }
 
@@ -579,6 +585,7 @@ type fnEmitter struct {
 
 	currentLabel uint32
 	terminated   bool
+	scopeMerges  []uint32
 }
 
 func (b *builder) emitFunction(f *ir.Function) error {
@@ -587,7 +594,7 @@ func (b *builder) emitFunction(f *ir.Function) error {
 		return err
 	}
 	parameters := f.Params
-	if f.Compute {
+	if f.Kind == ir.Stage {
 		parameters = nil
 	}
 	fnType, err := b.functionTypeID(f.Return, parameters)
@@ -596,7 +603,7 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	}
 	fid := b.funcIDs[f.Name]
 	control := FunctionControlNone
-	if !f.Compute {
+	if f.Kind == ir.Helper {
 		control = FunctionControlInline | FunctionControlConst
 	}
 	emit(&b.functions, OpFunction, retType, fid, control, fnType)
@@ -635,10 +642,10 @@ func (b *builder) emitFunction(f *ir.Function) error {
 }
 
 func (s *fnEmitter) emitParameters() error {
-	if !s.f.Compute || len(s.f.Params) == 0 {
+	if s.f.Kind != ir.Stage || len(s.f.Params) == 0 {
 		return nil
 	}
-	block := s.b.parameters.For(s.f)
+	block := s.b.parameterBlocks[s.f]
 	if block == nil || s.b.parameterIDs[s.f] == 0 {
 		return fmt.Errorf("kernel %s parameter block was not declared", s.f.Name)
 	}
@@ -722,8 +729,8 @@ func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int,
 func (s *fnEmitter) emitCoordinates() error {
 	lowered := s.b.p.functions[s.f]
 	active := false
-	for _, value := range lowered.coordinates.Order {
-		active = active || lowered.used(value)
+	for _, value := range lowered.Order {
+		active = active || lowered.Uses[value] > 0
 	}
 	if !active {
 		return nil
@@ -732,11 +739,11 @@ func (s *fnEmitter) emitCoordinates() error {
 	if err != nil {
 		return err
 	}
-	for _, value := range lowered.coordinates.Order {
-		if !lowered.used(value) {
+	for _, value := range lowered.Order {
+		if lowered.Uses[value] == 0 {
 			continue
 		}
-		input, dimension := lowered.coordinate(value)
+		input, dimension := coordinate(lowered, value)
 		loaded := s.inputs[input]
 		if loaded == 0 {
 			variable := s.b.inputIDs[input]
@@ -829,6 +836,7 @@ const (
 	blockNormal blockMode = iota
 	blockYield
 	blockContinue
+	blockScope
 )
 
 type blockExit struct {
@@ -896,6 +904,13 @@ func (s *fnEmitter) emitBlockExit(bl *ir.Block, mode blockMode) (blockExit, erro
 			vals[i] = v
 		}
 		return blockExit{kind: blockContinue, vals: vals, pred: pred, falls: true}, nil
+	case *ir.ExitScope:
+		if len(s.scopeMerges) == 0 {
+			return blockExit{}, fmt.Errorf("exit_scope outside scope")
+		}
+		emit(&s.b.functions, OpBranch, s.scopeMerges[len(s.scopeMerges)-1])
+		s.terminated = true
+		return blockExit{kind: blockScope, pred: pred}, nil
 	default:
 		return blockExit{}, fmt.Errorf("unknown block terminator %T", bl.Term)
 	}
@@ -1041,13 +1056,13 @@ func (s *fnEmitter) storePlace(p spvPlace, value uint32) error {
 func (s *fnEmitter) emitInstr(in ir.Instr) error {
 	if definition, ok := in.(ir.ValueDef); ok {
 		lowered := s.b.p.functions[s.f]
-		if lowered.replaced(definition.ResultValue()) {
+		if lowered.Replaced[definition.ResultValue()] {
 			return nil
 		}
 	}
 	switch x := in.(type) {
 	case *ir.Const:
-		if !s.b.p.functions[s.f].used(x.Result) {
+		if s.b.p.functions[s.f].Uses[x.Result] == 0 {
 			return nil
 		}
 		id, err := s.b.constant(x.Type, x.Raw)
@@ -1169,9 +1184,41 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		return s.emitIf(x)
 	case *ir.Loop:
 		return s.emitLoop(x)
+	case *ir.Scope:
+		return s.emitScope(x)
 	default:
 		return fmt.Errorf("unsupported IR instruction %T", in)
 	}
+	return nil
+}
+
+func (s *fnEmitter) emitScope(scope *ir.Scope) error {
+	header, body, cont, merge := s.b.id(), s.b.id(), s.b.id(), s.b.id()
+	again, err := s.b.constant(types.TBool, "false")
+	if err != nil {
+		return err
+	}
+	emit(&s.b.functions, OpBranch, header)
+	emit(&s.b.functions, OpLabel, header)
+	emit(&s.b.functions, OpLoopMerge, merge, cont, LoopControlNone)
+	emit(&s.b.functions, OpBranch, body)
+	s.terminated = true
+	emit(&s.b.functions, OpLabel, body)
+	s.currentLabel, s.terminated = body, false
+	s.scopeMerges = append(s.scopeMerges, merge)
+	exit, err := s.emitBlockExit(scope.Body, blockScope)
+	s.scopeMerges = s.scopeMerges[:len(s.scopeMerges)-1]
+	if err != nil {
+		return err
+	}
+	if exit.falls {
+		emit(&s.b.functions, OpBranch, cont)
+		s.terminated = true
+	}
+	emit(&s.b.functions, OpLabel, cont)
+	emit(&s.b.functions, OpBranchConditional, again, header, merge)
+	emit(&s.b.functions, OpLabel, merge)
+	s.currentLabel, s.terminated = merge, false
 	return nil
 }
 
@@ -1368,8 +1415,9 @@ func (s *fnEmitter) emitBarrier(x *ir.Barrier) error {
 }
 
 func (s *fnEmitter) emitPlaceRoot(x *ir.PlaceRoot) error {
-	if x.Resource < 0 || x.Resource >= len(s.b.m.Resources) {
-		return fmt.Errorf("resource index %d out of bounds", x.Resource)
+	resources := s.b.resourceIDs[s.f]
+	if x.Buffer < 0 || x.Buffer >= len(resources) {
+		return fmt.Errorf("buffer index %d out of bounds", x.Buffer)
 	}
 	storage := uint32(StorageStorageBuffer)
 	ptrType, err := s.b.pointerID(storage, x.Type)
@@ -1381,10 +1429,10 @@ func (s *fnEmitter) emitPlaceRoot(x *ir.PlaceRoot) error {
 		return err
 	}
 	id := s.b.id()
-	emit(&s.b.functions, OpAccessChain, ptrType, id, s.b.resourceIDs[x.Resource], zero)
+	emit(&s.b.functions, OpAccessChain, ptrType, id, resources[x.Buffer], zero)
 	p := spvPlace{ptr: id, ty: x.Type, storage: storage}
 	if x.Type.Kind == types.RuntimeArray {
-		p.arrayBase = s.b.resourceIDs[x.Resource]
+		p.arrayBase = resources[x.Buffer]
 		p.arrayMember = 0
 		p.hasArrayLen = true
 	}

@@ -1,15 +1,26 @@
-# Tach browser harness
+# Tach browser correctness harness
 
-This private npm workspace exercises Tach's generated JavaScript compute
-commands, explicit multi-command submission boundary, TypeScript-facing data
-contract, `@depths/tach` lifecycle, and WebGPU kernels. It consumes the exact
-same package surface as an application; it does not contain or expose a Go
-library.
+This private Playwright workspace compiles every maintained example and runs
+its generated JavaScript module through Chromium WebGPU. It exercises the same
+`@depths/tach` package surface an application uses; it does not call Go from
+the browser or maintain handwritten shader fixtures.
+
+The seven examples cover atomics/shared memory, bitwise operations, structured
+control, `for` lowering, math intrinsics and vectors, structs, and scalar
+runtime arrays. Each case checks:
+
+- generated WGSL reports no Chromium compilation errors;
+- execution produces the expected typed data;
+- no uncaptured WebGPU error occurs; and
+- buffers, commands, parameters, submission, and scoped cleanup use the public
+  runtime contract.
+
+An additional case submits commands with different parameter values in one
+submission and across submissions to check parameter isolation and ordering.
 
 ## Setup
 
-Install the root workspace, build the native development compiler, and install
-Chromium:
+From the repository root:
 
 ```sh
 npm ci
@@ -17,30 +28,45 @@ npm run compiler
 npm run install:browser --workspace=@tach/browser-test
 ```
 
-`@depths/tach/compiler` resolves `dist/tach` in this repository. `TACH_BIN`
-selects an explicit compiler on any operating system.
+The package compiler resolver finds `dist/tach` or `dist/tach.exe` in this
+development checkout. `TACH_BIN` can select an explicit executable.
 
-## Commands
+## Run
 
-- `npm test --workspace=@tach/browser-test` compiles every example and always
-  runs the complete interface and
-  WebGPU execution suite. Chromium prefers a physical adapter and automatically
-  falls back to its bundled CPU-backed SwiftShader adapter when necessary. The
-  report labels the run `hardware-accelerated` or `software-emulated` using
-  `GPUAdapterInfo.isFallbackAdapter` plus known software-adapter identities.
-- `npm run start --workspace=@tach/browser-test` serves the inspection UI at
-  <http://127.0.0.1:4173> after
-  `npm run build:examples --workspace=@tach/browser-test`.
+```sh
+npm test --workspace=@tach/browser-test
+```
 
-SwiftShader processes only trusted local shaders in this harness because
-enabling Chromium's software fallback reduces its normal security guarantees.
-No command changes between the GPU-less VPS and a GPU-equipped Windows machine:
-run the workspace test on both and compare the reported execution mode.
+Playwright's global setup deletes and regenerates `browser-test/build/` by
+calling the public Node compiler API once for each `examples/*.tach` file. The
+test then starts the local server, loads those generated `.js` and `.wgsl`
+artifacts, and executes serially with one Chromium worker.
 
-Every run writes a terminal-friendly Markdown summary to `test-report.md` and
-the richer Playwright report to `playwright-report/index.html`. Both reports are
-generated locally and ignored by Git.
+Chromium is launched headless with WebGPU enabled. Hardware is preferred;
+`--enable-unsafe-swiftshader` permits Chromium's software implementation on a
+GPU-less host. Software fallback is appropriate here only because all shaders
+are trusted local compiler output. The first case logs whether adapter metadata
+looks hardware-accelerated or software-emulated.
 
-The harness builds generated fixtures into `browser-test/build/`; npm packages,
-browser reports, traces, and generated fixtures are intentionally ignored by
-Git.
+For an interactive browser window:
+
+```sh
+npm run test:headed --workspace=@tach/browser-test
+```
+
+The harness uses Playwright's line reporter and leaves no custom Markdown
+report. Failures, traces, and standard Playwright artifacts use the workspace's
+ignored output directories.
+
+## Inspect generated examples
+
+Build fixtures and run the static server without the test runner:
+
+```sh
+npm run build:examples --workspace=@tach/browser-test
+npm run start --workspace=@tach/browser-test
+```
+
+The server listens at <http://127.0.0.1:4173>. It serves only files beneath the
+harness or built `@depths/tach` package roots, rejects path traversal, disables
+caching, and enables cross-origin isolation headers.

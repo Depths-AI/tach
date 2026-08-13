@@ -15,9 +15,10 @@
     "dev": "npm run kernel && vite",
     "install:browser": "playwright install chromium",
     "preview": "vite preview",
-    "test": "npm run build && playwright test",
-    "benchmark": "npm run build && playwright test --config=playwright.full.config.mjs",
-    "benchmark:gpu": "npm run build && playwright test --config=playwright.gpu.config.mjs"
+    "test": "npm run benchmark:cpu",
+    "benchmark": "npm run benchmark:gpu && npm run benchmark:cpu",
+    "benchmark:gpu": "npm run build && playwright test --config=playwright.gpu.config.mjs",
+    "benchmark:cpu": "npm run build && playwright test --config=playwright.cpu.config.mjs"
   },
   "dependencies": {
     "@depths/tach": "0.0.0"

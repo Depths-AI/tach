@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
 )
@@ -19,7 +20,12 @@ func compileSourceForMutation(t *testing.T, source string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin, err := Emit(m)
+	opt.OptimizeLogical(m)
+	executable, err := Lower(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := Emit(executable)
 	if err != nil {
 		t.Fatal(err)
 	}

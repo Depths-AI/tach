@@ -2,69 +2,47 @@ package wgsl
 
 import (
 	"tach/src/backend"
+	"tach/src/flow"
 	"tach/src/ir"
 )
 
-type loweredFunction struct {
-	source      *ir.Function
-	coordinates *backend.Coordinates
-}
-
 type program struct {
-	source    *ir.Module
-	functions map[*ir.Function]*loweredFunction
+	executable *backend.Executable
+	source     *ir.Module
+	functions  map[*ir.Function]*backend.Coordinates
+	kernels    map[*ir.Function]*backend.PhysicalKernel
 }
 
-func lower(m *ir.Module) (*program, error) {
-	p := &program{source: m, functions: map[*ir.Function]*loweredFunction{}}
-	for _, f := range m.Functions {
-		coordinates, err := backend.LowerCoordinates(f)
-		if err != nil {
-			return nil, err
-		}
-		p.functions[f] = &loweredFunction{source: f, coordinates: coordinates}
+func Lower(logical *flow.Module) (*backend.Executable, error) {
+	return backend.Lower(logical, backend.WebProfile)
+}
+
+func lower(executable *backend.Executable) (*program, error) {
+	functions, kernels, err := executable.IndexFunctions()
+	if err != nil {
+		return nil, err
 	}
-	return p, nil
+	return &program{executable: executable, source: executable.KernelModule, functions: functions, kernels: kernels}, nil
 }
 
-func optimize(p *program) {
-	for _, f := range p.functions {
-		backend.OptimizeCoordinates(f.source, f.coordinates)
-	}
-}
-
-func (f *loweredFunction) needs(space backend.CoordinateSpace) bool {
-	for id, coordinate := range f.coordinates.Values {
-		if coordinate.Space == space && f.coordinates.Uses[id] > 0 {
+func needs(f *backend.Coordinates, space backend.CoordinateSpace) bool {
+	for id, coordinate := range f.Values {
+		if coordinate.Space == space && f.Uses[id] > 0 {
 			return true
 		}
 	}
 	return false
 }
-
-func (f *loweredFunction) needsGlobal() bool { return f.needs(backend.Global) }
-func (f *loweredFunction) needsLocal() bool  { return f.needs(backend.Local) }
-func (f *loweredFunction) needsLocalLinear() bool {
-	return f.needs(backend.LocalLinear)
-}
-func (f *loweredFunction) replaced(id ir.ValueID) bool {
-	return f.coordinates.Replaced[id]
-}
-func (f *loweredFunction) uses(id ir.ValueID) int { return f.coordinates.Uses[id] }
-
-func (f *loweredFunction) expression(id ir.ValueID) (string, bool) {
-	coordinate, ok := f.coordinates.Values[id]
+func expression(f *backend.Coordinates, id ir.ValueID) (string, bool) {
+	coordinate, ok := f.Values[id]
 	if !ok {
 		return "", false
 	}
-	name := "_tach_global_index"
-	suffix := "." + []string{"x", "y", "z"}[coordinate.Dimension]
-	switch coordinate.Space {
-	case backend.Local:
+	name, suffix := "_tach_global_index", "."+[]string{"x", "y", "z"}[coordinate.Dimension]
+	if coordinate.Space == backend.Local {
 		name = "_tach_local_index"
-	case backend.LocalLinear:
-		name = "_tach_local_linear"
-		suffix = ""
+	} else if coordinate.Space == backend.LocalLinear {
+		name, suffix = "_tach_local_linear", ""
 	}
 	return name + suffix, true
 }

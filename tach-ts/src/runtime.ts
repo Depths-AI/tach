@@ -8,6 +8,7 @@ const bufferUsage = {
   mapRead: 0x0001,
   copyDst: 0x0008,
   uniform: 0x0040,
+	storage: 0x0080,
 } as const;
 
 const mapMode = {
@@ -30,9 +31,12 @@ export interface ComputeCommand {
 
 export type LaunchSize = number | readonly [x: number, y: number] | readonly [x: number, y: number, z: number];
 
-export interface LaunchOptions<Size extends LaunchSize = LaunchSize> {
-  readonly size?: Size;
+export interface CommandOptions {
   readonly repeat?: number;
+}
+
+export interface LaunchOptions<Size extends LaunchSize = LaunchSize> extends CommandOptions {
+	readonly size?: Size;
 }
 
 export interface TachOptions {
@@ -68,11 +72,15 @@ export interface BufferBindGroupEntry {
 
 export interface PreparedCommand {
   readonly parameters: readonly Uint8Array[];
+	readonly scratch: readonly ScratchRequirement[];
   encode(
     pass: GPUComputePassEncoder,
     parameters: readonly GPUBufferBinding[],
+		scratch: ReadonlyMap<number, GPUBuffer>,
   ): void;
 }
+
+export interface ScratchRequirement { readonly color: number; readonly byteSize: number; }
 
 export interface CommandState {
   readonly owner: RuntimeOwner;
@@ -135,6 +143,8 @@ class Session implements Tach, RuntimeOwner {
   #deferredFailure?: TachError;
   #parameters: GPUBuffer | undefined;
   #parameterCapacity = 0;
+	readonly #scratch = new Map<number, { buffer: GPUBuffer; capacity: number }>();
+	readonly #retired: GPUBuffer[] = [];
   #closed = false;
   #lost?: GPUDeviceLostInfo;
 
@@ -190,6 +200,7 @@ class Session implements Tach, RuntimeOwner {
     await this.waitForSubmissions("idle");
     try {
       await this.device.queue.onSubmittedWorkDone();
+		for (const buffer of this.#retired.splice(0)) buffer.destroy();
       await Promise.all([...this.#checks]);
     } catch (cause) {
       throw normalizeError(cause, "device-lost", "idle");
@@ -267,18 +278,36 @@ class Session implements Tach, RuntimeOwner {
   #record(commands: readonly PreparedCommand[]): void {
     this.#captureDeferred("submit", "kernel", () => {
       const parameterBindings = this.#writeParameters(commands);
+		const scratch = this.#resolveScratch(commands);
       const encoder = this.device.createCommandEncoder({ label: "Tach submission" });
       const pass = encoder.beginComputePass({ label: "Tach compute pass" });
       let parameterIndex = 0;
       for (const command of commands) {
         const next = parameterIndex + command.parameters.length;
-        command.encode(pass, parameterBindings.slice(parameterIndex, next));
+		command.encode(pass, parameterBindings.slice(parameterIndex, next), scratch);
         parameterIndex = next;
       }
       pass.end();
       this.device.queue.submit([encoder.finish()]);
     });
   }
+
+	#resolveScratch(commands: readonly PreparedCommand[]): ReadonlyMap<number, GPUBuffer> {
+		const required = new Map<number, number>();
+		for (const command of commands) for (const item of command.scratch) required.set(item.color, Math.max(required.get(item.color) ?? 0, item.byteSize));
+		const out = new Map<number, GPUBuffer>();
+		for (const [color, byteSize] of required) {
+			let allocation = this.#scratch.get(color);
+			if (!allocation || allocation.capacity < byteSize) {
+				let capacity = Math.max(4096, allocation?.capacity ?? 0); while (capacity < byteSize) capacity *= 2;
+				const buffer = this.device.createBuffer({ label: `Tach scratch ${color}`, size: align(capacity, 4), usage: bufferUsage.storage });
+				if (allocation) this.#retired.push(allocation.buffer);
+				allocation = { buffer, capacity }; this.#scratch.set(color, allocation); this.#bindGroups.clear();
+			}
+			out.set(color, allocation.buffer);
+		}
+		return out;
+	}
 
   #writeParameters(commands: readonly PreparedCommand[]): readonly GPUBufferBinding[] {
     const alignment = this.device.limits?.minUniformBufferOffsetAlignment ?? 256;
@@ -317,7 +346,7 @@ class Session implements Tach, RuntimeOwner {
       size: align(capacity, 4),
       usage: bufferUsage.copyDst | bufferUsage.uniform,
     });
-    this.#parameters?.destroy();
+		if (this.#parameters) this.#retired.push(this.#parameters);
     this.#parameters = next;
     this.#parameterCapacity = capacity;
     this.#bindGroups.clear();
@@ -429,7 +458,10 @@ class Session implements Tach, RuntimeOwner {
     if (this.#closed) return;
     for (const state of [...this.#buffers]) destroyBufferState(state);
     this.#parameters?.destroy();
+		for (const allocation of this.#scratch.values()) allocation.buffer.destroy();
+		for (const buffer of this.#retired) buffer.destroy();
     this.#parameters = undefined;
+		this.#scratch.clear(); this.#retired.length = 0;
     this.#bindGroups.clear();
     this.device.removeEventListener("uncapturederror", this.#onUncaptured);
     this.#closed = true;

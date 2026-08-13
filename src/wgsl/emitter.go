@@ -5,15 +5,17 @@ import (
 	"strings"
 
 	"tach/src/abi"
+	"tach/src/backend"
 	"tach/src/ir"
 	"tach/src/types"
 )
 
-func kernelName(name string) string       { return abi.KernelEntry(name) }
-func mangleFunc(name string) string       { return "_tach_f_" + abi.Mangle(name) }
-func mangleType(name string) string       { return "_tach_t_" + abi.Mangle(name) }
-func resourceName(i int) string           { return fmt.Sprintf("_tach_r%d", i) }
-func wrapperName(i int) string            { return fmt.Sprintf("_tach_resource_%d", i) }
+func mangleFunc(name string) string          { return "_tach_f_" + abi.Mangle(name) }
+func mangleType(name string) string          { return "_tach_t_" + abi.Mangle(name) }
+func resourceName(kernel, buffer int) string { return fmt.Sprintf("_tach_r%d_%d", kernel, buffer) }
+func wrapperName(kernel, buffer int) string {
+	return fmt.Sprintf("_tach_resource_%d_%d", kernel, buffer)
+}
 func fieldName(i int, name string) string { return fmt.Sprintf("f%d_%s", i, abi.Mangle(name)) }
 func workgroupName(f *ir.Function, i int) string {
 	return fmt.Sprintf("_tach_w_%s_%d", abi.Mangle(f.Name), i)
@@ -22,27 +24,26 @@ func workgroupName(f *ir.Function, i int) string {
 type emitter struct {
 	p           *program
 	m           *ir.Module
-	parameters  *abi.ParameterPlan
 	b           strings.Builder
 	indent      int
 	structIndex map[string]int
 	funcIndex   map[string]int
+	kernelIndex map[*ir.Function]int
 }
 
-func Emit(m *ir.Module) (string, error) {
-	if err := ir.Verify(m); err != nil {
+func Emit(executable *backend.Executable) (string, error) {
+	if err := backend.Verify(executable); err != nil {
 		return "", err
 	}
-	p, err := lower(m)
+	p, err := lower(executable)
 	if err != nil {
 		return "", err
 	}
-	optimize(p)
-	parameters, err := abi.PlanParameters(m)
-	if err != nil {
-		return "", err
+	m := executable.KernelModule
+	e := &emitter{p: p, m: m, structIndex: map[string]int{}, funcIndex: map[string]int{}, kernelIndex: map[*ir.Function]int{}}
+	for i := range executable.PhysicalKernels {
+		e.kernelIndex[executable.PhysicalKernels[i].Function] = i
 	}
-	e := &emitter{p: p, m: m, parameters: parameters, structIndex: map[string]int{}, funcIndex: map[string]int{}}
 	for i, t := range m.Structs {
 		e.structIndex[t.Name] = i
 	}
@@ -55,16 +56,18 @@ func Emit(m *ir.Module) (string, error) {
 		e.emitStruct(t)
 		e.line("")
 	}
-	for i, r := range m.Resources {
-		e.emitResource(i, r)
-		e.line("")
-	}
-	for _, block := range parameters.Blocks {
-		e.emitParameterBlock(block)
-		e.line("")
+	for kernelIndex, kernel := range executable.PhysicalKernels {
+		for bufferIndex, buffer := range kernel.Function.BufferParams {
+			e.emitResource(kernelIndex, bufferIndex, buffer)
+			e.line("")
+		}
+		if kernel.Parameters != nil {
+			e.emitParameterBlock(kernel.Parameters)
+			e.line("")
+		}
 	}
 	for _, f := range m.Functions {
-		if !f.Compute {
+		if f.Kind == ir.Helper {
 			continue
 		}
 		for i, w := range f.WorkgroupVars {
@@ -75,7 +78,7 @@ func Emit(m *ir.Module) (string, error) {
 		}
 	}
 	for _, f := range m.Functions {
-		if !f.Compute {
+		if f.Kind == ir.Helper {
 			if err := e.emitFunction(f); err != nil {
 				return "", err
 			}
@@ -83,7 +86,7 @@ func Emit(m *ir.Module) (string, error) {
 		}
 	}
 	for _, f := range m.Functions {
-		if f.Compute {
+		if f.Kind == ir.Stage {
 			if err := e.emitFunction(f); err != nil {
 				return "", err
 			}
@@ -148,8 +151,8 @@ func (e *emitter) emitStruct(t *types.Type) {
 	e.indent--
 	e.line("}")
 }
-func (e *emitter) emitResource(i int, r ir.Resource) {
-	w := wrapperName(i)
+func (e *emitter) emitResource(kernel, buffer int, r ir.BufferParam) {
+	w := wrapperName(kernel, buffer)
 	e.line("// Tach resource: %s", r.Name)
 	e.line("struct %s {", w)
 	e.indent++
@@ -168,15 +171,15 @@ func (e *emitter) emitResource(i int, r ir.Resource) {
 	if r.Access == ir.Mutable || types.ContainsAtomic(r.Type) {
 		access = "read_write"
 	}
-	e.line("@group(0) @binding(%d) var<storage, %s> %s: %s;", i, access, resourceName(i), w)
+	e.line("@group(0) @binding(%d) var<storage, %s> %s: %s;", buffer, access, resourceName(kernel, buffer), w)
 }
 
 func parameterTypeName(block *abi.ParameterBlock) string {
-	return fmt.Sprintf("_tach_parameters_%d", block.Binding)
+	return "_tach_parameters_" + abi.Mangle(block.Function.Name)
 }
 
 func parameterResourceName(block *abi.ParameterBlock) string {
-	return fmt.Sprintf("_tach_p%d", block.Binding)
+	return "_tach_p_" + abi.Mangle(block.Function.Name)
 }
 
 func (e *emitter) emitParameterBlock(block *abi.ParameterBlock) {
@@ -206,26 +209,27 @@ func hasRuntimeTail(t *types.Type) bool {
 }
 
 func (e *emitter) funcName(f *ir.Function) string {
-	if f.Compute {
-		return kernelName(f.Name)
+	if f.Kind == ir.Stage {
+		return f.Name
 	}
 	return mangleFunc(f.Name)
 }
 func (e *emitter) emitFunction(f *ir.Function) error {
-	if f.Compute {
+	if f.Kind == ir.Stage {
 		e.line("// Tach compute entry: %s", f.Name)
-		e.line("@compute @workgroup_size(%d, %d, %d)", f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
+		workgroup := e.p.kernels[f].Workgroup
+		e.line("@compute @workgroup_size(%d, %d, %d)", workgroup[0], workgroup[1], workgroup[2])
 	}
 	var params []string
-	if f.Compute {
+	if f.Kind == ir.Stage {
 		lowered := e.p.functions[f]
-		if lowered.needsGlobal() {
+		if needs(lowered, backend.Global) {
 			params = append(params, "@builtin(global_invocation_id) _tach_global_index: vec3<u32>")
 		}
-		if lowered.needsLocal() {
+		if needs(lowered, backend.Local) {
 			params = append(params, "@builtin(local_invocation_id) _tach_local_index: vec3<u32>")
 		}
-		if lowered.needsLocalLinear() {
+		if needs(lowered, backend.LocalLinear) {
 			params = append(params, "@builtin(local_invocation_index) _tach_local_linear: u32")
 		}
 	} else {
@@ -237,24 +241,24 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	if f.Return.Kind != types.Void {
 		head += fmt.Sprintf(" -> %s", e.typeName(f.Return))
 	}
-	e.line(head + " {")
+	e.line("%s {", head)
 	e.indent++
 	st := &fnState{e: e, f: f, lowered: e.p.functions[f], values: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]placeExpr{}}
-	for _, id := range st.lowered.coordinates.Order {
-		if st.lowered.uses(id) == 0 {
+	for _, id := range st.lowered.Order {
+		if st.lowered.Uses[id] == 0 {
 			continue
 		}
-		expression, _ := st.lowered.expression(id)
-		e.line("let %s: u32 = %s;", v(id), expression)
+		value, _ := expression(st.lowered, id)
+		e.line("let %s: u32 = %s;", v(id), value)
 		st.def(id, types.TU32)
 	}
 	for _, p := range f.Params {
-		if !f.Compute {
+		if f.Kind == ir.Helper {
 			st.values[p.ID] = p.Type
 		}
 	}
-	if f.Compute {
-		block := e.parameters.For(f)
+	if f.Kind == ir.Stage {
+		block := e.p.kernels[f].Parameters
 		cursor := 0
 		for parameter, p := range f.Params {
 			expression, err := e.parameterExpression(block, parameter, p.Type, &cursor)
@@ -311,7 +315,7 @@ type placeExpr struct {
 type fnState struct {
 	e       *emitter
 	f       *ir.Function
-	lowered *loweredFunction
+	lowered *backend.Coordinates
 	values  map[ir.ValueID]*types.Type
 	places  map[ir.PlaceID]placeExpr
 }
@@ -352,6 +356,8 @@ func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result, loop *ir.Loop
 		}
 		s.e.line("continue;")
 	case *ir.Unreachable:
+	case *ir.ExitScope:
+		s.e.line("break;")
 	default:
 		return fmt.Errorf("unknown WGSL block terminator %T", b.Term)
 	}
@@ -359,12 +365,12 @@ func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result, loop *ir.Loop
 }
 func (s *fnState) emitInstr(in ir.Instr) error {
 	e := s.e
-	if definition, ok := in.(ir.ValueDef); ok && s.lowered != nil && s.lowered.replaced(definition.ResultValue()) {
+	if definition, ok := in.(ir.ValueDef); ok && s.lowered != nil && s.lowered.Replaced[definition.ResultValue()] {
 		return nil
 	}
 	switch x := in.(type) {
 	case *ir.Const:
-		if s.lowered != nil && s.lowered.uses(x.Result) == 0 {
+		if s.lowered != nil && s.lowered.Uses[x.Result] == 0 {
 			return nil
 		}
 		raw := x.Raw
@@ -435,9 +441,8 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 			s.def(x.Result, x.Type)
 		}
 	case *ir.PlaceRoot:
-		r := s.e.m.Resources[x.Resource]
-		s.places[x.Result] = placeExpr{expr: resourceName(x.Resource) + ".data", ty: x.Type, resource: x.Resource}
-		_ = r
+		kernel := s.e.kernelIndex[s.f]
+		s.places[x.Result] = placeExpr{expr: resourceName(kernel, x.Buffer) + ".data", ty: x.Type, resource: x.Buffer}
 	case *ir.PlaceWorkgroup:
 		if x.Workgroup < 0 || x.Workgroup >= len(s.f.WorkgroupVars) {
 			return fmt.Errorf("invalid workgroup place %d", x.Workgroup)
@@ -563,6 +568,19 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		e.line("if (!%s) { break; }", v(cy.Values[0]))
 		if err := s.emitBlock(x.Body, nil, x); err != nil {
 			return err
+		}
+		e.indent--
+		e.line("}")
+	case *ir.Scope:
+		e.line("loop {")
+		e.indent++
+		if err := s.emitBlock(x.Body, nil, nil); err != nil {
+			return err
+		}
+		if _, exits := x.Body.Term.(*ir.ExitScope); !exits {
+			if _, returns := x.Body.Term.(*ir.Return); !returns {
+				e.line("break;")
+			}
 		}
 		e.indent--
 		e.line("}")

@@ -1,9 +1,26 @@
+@docs(
+  title("Structured control flow"),
+  summary("Demonstrates bounded loops, branching, and conditional buffer updates.")
+);
+
+@docs(
+  summary("Controls the strided accumulation performed by each invocation."),
+  field(scale, "Multiplier applied to every sampled value."),
+  field(count, "Number of valid input values."),
+  field(enabled, "Whether completed accumulations are written back.")
+)
 type Params = {
   scale: float32,
   count: uint32,
   enabled: bool,
 };
 
+@docs(
+  summary("Accumulates a strided lane of input values and conditionally stores a bounded result."),
+  coordinate(start, "First input index owned by this invocation."),
+  param(data, "Input values and destination for the accumulated result."),
+  param(params, "Loop bounds, scale, and output switch.")
+)
 @workgroup(64)
 export function transform[start](
   data: buffer<float32[]>,
@@ -12,12 +29,14 @@ export function transform[start](
   let i = start;
   let acc = 0.0;
 
+  // Each invocation owns one stride through the logical input.
   while (i < params.count && acc < 1000.0) {
     acc += data[i] * params.scale;
     i += 64;
   }
 
   let out = acc;
+  // Keep the stored value within the example's intended display range.
   if (out > 100.0) {
     out = 100.0;
   } else {

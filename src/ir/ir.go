@@ -13,7 +13,6 @@ type PlaceID uint32
 
 type Module struct {
 	Structs   []*types.Type
-	Resources []Resource
 	Functions []*Function
 }
 
@@ -24,22 +23,49 @@ const (
 	Mutable
 )
 
-type Resource struct {
+type BufferParam struct {
 	Name   string
 	Type   *types.Type // logical resource type; runtime array is allowed for buffers
 	Access Access
 	Span   source.Span
 }
 
+type FunctionKind uint8
+
+const (
+	Helper FunctionKind = iota + 1
+	Stage
+)
+
+type SourceParamKind uint8
+
+const (
+	SourceBuffer SourceParamKind = iota + 1
+	SourceValue
+)
+
+type SourceParam struct {
+	Name   string
+	Kind   SourceParamKind
+	Buffer int
+	Value  ValueID
+}
+
+type WorkgroupConstraint struct {
+	Explicit bool
+	Size     [3]uint32
+}
+
 type Function struct {
 	Name          string
+	Kind          FunctionKind
 	Indices       []Param
+	BufferParams  []BufferParam
 	Params        []Param
+	SourceParams  []SourceParam
 	Return        *types.Type
 	Body          *Block
-	Compute       bool
-	Workgroup     [3]uint32
-	KernelParams  []KernelParam
+	Workgroup     WorkgroupConstraint
 	WorkgroupVars []WorkgroupVar
 	Span          source.Span
 }
@@ -48,12 +74,6 @@ type WorkgroupVar struct {
 	Name string
 	Type *types.Type
 	Span source.Span
-}
-
-type KernelParam struct {
-	Name     string
-	Value    ValueID // zero means this parameter names a buffer resource
-	Resource int
 }
 
 type Param struct {
@@ -224,10 +244,10 @@ func (x *Intrinsic) ResultValue() ValueID    { return x.Result }
 func (x *Intrinsic) ResultType() *types.Type { return x.Type }
 
 type PlaceRoot struct {
-	Result   PlaceID
-	Type     *types.Type
-	Resource int
-	Span     source.Span
+	Result PlaceID
+	Type   *types.Type
+	Buffer int
+	Span   source.Span
 }
 
 func (*PlaceRoot) instrNode()               {}
@@ -327,6 +347,14 @@ type Loop struct {
 func (*Loop) instrNode()            {}
 func (x *Loop) SpanOf() source.Span { return x.Span }
 
+type Scope struct {
+	Body *Block
+	Span source.Span
+}
+
+func (*Scope) instrNode()            {}
+func (x *Scope) SpanOf() source.Span { return x.Span }
+
 type AtomicKind uint8
 
 const (
@@ -401,6 +429,10 @@ type Unreachable struct{}
 
 func (*Unreachable) termNode() {}
 
+type ExitScope struct{}
+
+func (*ExitScope) termNode() {}
+
 func (m *Module) Function(name string) *Function {
 	for _, f := range m.Functions {
 		if f.Name == name {
@@ -408,6 +440,140 @@ func (m *Module) Function(name string) *Function {
 		}
 	}
 	return nil
+}
+
+func Clone(m *Module) *Module {
+	if m == nil {
+		return nil
+	}
+	out := &Module{Structs: append([]*types.Type(nil), m.Structs...), Functions: make([]*Function, len(m.Functions))}
+	for i, f := range m.Functions {
+		g := *f
+		g.Indices = append([]Param(nil), f.Indices...)
+		g.BufferParams = append([]BufferParam(nil), f.BufferParams...)
+		g.Params = append([]Param(nil), f.Params...)
+		g.SourceParams = append([]SourceParam(nil), f.SourceParams...)
+		g.WorkgroupVars = append([]WorkgroupVar(nil), f.WorkgroupVars...)
+		g.Body = cloneBlock(f.Body)
+		out.Functions[i] = &g
+	}
+	return out
+}
+
+func cloneBlock(block *Block) *Block {
+	if block == nil {
+		return nil
+	}
+	out := &Block{Instrs: make([]Instr, len(block.Instrs)), Term: cloneTerm(block.Term)}
+	for i, instruction := range block.Instrs {
+		out.Instrs[i] = cloneInstr(instruction)
+	}
+	return out
+}
+
+func cloneInstr(instruction Instr) Instr {
+	switch x := instruction.(type) {
+	case *Const:
+		y := *x
+		return &y
+	case *Unary:
+		y := *x
+		return &y
+	case *Binary:
+		y := *x
+		return &y
+	case *Convert:
+		y := *x
+		return &y
+	case *Composite:
+		y := *x
+		y.Values = append([]ValueID(nil), x.Values...)
+		return &y
+	case *Extract:
+		y := *x
+		return &y
+	case *VectorIndex:
+		y := *x
+		return &y
+	case *Call:
+		y := *x
+		y.Args = append([]ValueID(nil), x.Args...)
+		return &y
+	case *Intrinsic:
+		y := *x
+		y.Args = append([]ValueID(nil), x.Args...)
+		return &y
+	case *PlaceRoot:
+		y := *x
+		return &y
+	case *PlaceWorkgroup:
+		y := *x
+		return &y
+	case *PlaceField:
+		y := *x
+		return &y
+	case *PlaceIndex:
+		y := *x
+		return &y
+	case *Load:
+		y := *x
+		return &y
+	case *Store:
+		y := *x
+		return &y
+	case *ArrayLength:
+		y := *x
+		return &y
+	case *If:
+		y := *x
+		y.Results = append([]Result(nil), x.Results...)
+		y.Then = cloneBlock(x.Then)
+		y.Else = cloneBlock(x.Else)
+		return &y
+	case *Loop:
+		y := *x
+		y.Results = append([]Result(nil), x.Results...)
+		y.Params = append([]LoopParam(nil), x.Params...)
+		y.Cond = cloneBlock(x.Cond)
+		y.Body = cloneBlock(x.Body)
+		return &y
+	case *Scope:
+		y := *x
+		y.Body = cloneBlock(x.Body)
+		return &y
+	case *Atomic:
+		y := *x
+		return &y
+	case *Barrier:
+		y := *x
+		return &y
+	default:
+		panic(fmt.Sprintf("clone unknown instruction %T", instruction))
+	}
+}
+
+func cloneTerm(term Term) Term {
+	switch x := term.(type) {
+	case nil:
+		return nil
+	case *Yield:
+		y := *x
+		y.Values = append([]ValueID(nil), x.Values...)
+		return &y
+	case *Continue:
+		y := *x
+		y.Values = append([]ValueID(nil), x.Values...)
+		return &y
+	case *Return:
+		y := *x
+		return &y
+	case *Unreachable:
+		return &Unreachable{}
+	case *ExitScope:
+		return &ExitScope{}
+	default:
+		panic(fmt.Sprintf("clone unknown terminator %T", term))
+	}
 }
 
 func Dump(m *Module) string {
@@ -418,12 +584,6 @@ func Dump(m *Module) string {
 			fmt.Fprintf(&b, "  %s: %s\n", f.Name, f.Type)
 		}
 		b.WriteString("}\n\n")
-	}
-	for i, r := range m.Resources {
-		fmt.Fprintf(&b, "buffer @%d %s: %s access=%s\n", i, r.Name, r.Type, r.Access)
-	}
-	if len(m.Resources) > 0 {
-		b.WriteByte('\n')
 	}
 	for _, f := range m.Functions {
 		dumpFunc(&b, f)
@@ -533,8 +693,8 @@ func dumpFunc(b *strings.Builder, f *Function) {
 	for _, parameter := range f.Params {
 		parameterTypes[parameter.ID] = parameter.Type
 	}
-	if f.Compute {
-		fmt.Fprintf(b, "compute @%s[", f.Name)
+	if f.Kind == Stage {
+		fmt.Fprintf(b, "stage @%s[", f.Name)
 		for i, index := range f.Indices {
 			if i > 0 {
 				b.WriteString(", ")
@@ -542,17 +702,21 @@ func dumpFunc(b *strings.Builder, f *Function) {
 			fmt.Fprintf(b, "%s=%%%d", index.Name, index.ID)
 		}
 		b.WriteString("](")
-		for i, p := range f.KernelParams {
+		for i, p := range f.SourceParams {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			if p.Value != 0 {
+			if p.Kind == SourceValue {
 				fmt.Fprintf(b, "%s=%%%d: %s", p.Name, p.Value, parameterTypes[p.Value])
 			} else {
-				fmt.Fprintf(b, "%s=@%d", p.Name, p.Resource)
+				fmt.Fprintf(b, "%s=%%b%d: %s access=%s", p.Name, p.Buffer, f.BufferParams[p.Buffer].Type, f.BufferParams[p.Buffer].Access)
 			}
 		}
-		fmt.Fprintf(b, ") workgroup(%d,%d,%d) {\n", f.Workgroup[0], f.Workgroup[1], f.Workgroup[2])
+		if f.Workgroup.Explicit {
+			fmt.Fprintf(b, ") workgroup(%d,%d,%d) {\n", f.Workgroup.Size[0], f.Workgroup.Size[1], f.Workgroup.Size[2])
+		} else {
+			b.WriteString(") workgroup(auto) {\n")
+		}
 		for i, w := range f.WorkgroupVars {
 			fmt.Fprintf(b, "  workgroup @%d %s: %s\n", i, w.Name, w.Type)
 		}
@@ -591,7 +755,7 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 		case *Intrinsic:
 			fmt.Fprintf(b, "%s%%%d = intrinsic %s%v : %s\n", ind, x.Result, x.Kind, x.Args, x.Type)
 		case *PlaceRoot:
-			fmt.Fprintf(b, "%s&p%d = place.resource @%d : %s\n", ind, x.Result, x.Resource, x.Type)
+			fmt.Fprintf(b, "%s&p%d = place.buffer %%b%d : %s\n", ind, x.Result, x.Buffer, x.Type)
 		case *PlaceWorkgroup:
 			fmt.Fprintf(b, "%s&p%d = place.workgroup @%d : %s\n", ind, x.Result, x.Workgroup, x.Type)
 		case *PlaceField:
@@ -626,6 +790,10 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 			fmt.Fprintf(b, "%sbody\n", ind)
 			dumpBlock(b, x.Body, ind+"  ")
 			fmt.Fprintf(b, "%s}\n", ind)
+		case *Scope:
+			fmt.Fprintf(b, "%sscope {\n", ind)
+			dumpBlock(b, x.Body, ind+"  ")
+			fmt.Fprintf(b, "%s}\n", ind)
 		}
 	}
 	switch t := bl.Term.(type) {
@@ -641,5 +809,7 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 		}
 	case *Unreachable:
 		fmt.Fprintf(b, "%sunreachable\n", ind)
+	case *ExitScope:
+		fmt.Fprintf(b, "%sexit_scope\n", ind)
 	}
 }

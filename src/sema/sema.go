@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"tach/src/ast"
+	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/layout"
 	"tach/src/source"
@@ -16,20 +17,23 @@ import (
 type Checker struct {
 	ast   *ast.Module
 	mod   *ir.Module
+	flow  *flow.Module
 	types map[string]*types.Type
 	funcs map[string]*funcSig
 }
 
 type funcSig struct {
-	name    string
-	params  []namedType
-	ret     *types.Type
-	decl    *ast.FuncDecl
-	compute *ast.ComputeDecl
+	name     string
+	params   []namedType
+	ret      *types.Type
+	decl     *ast.FunctionDecl
+	indexed  bool
+	exported bool
 }
 type namedType struct {
-	name string
-	ty   *types.Type
+	name   string
+	ty     *types.Type
+	buffer bool
 }
 
 type symbol struct {
@@ -37,7 +41,7 @@ type symbol struct {
 	ty        *types.Type
 	value     ir.ValueID
 	mutable   bool
-	resource  int // -1 unless this is a module resource place
+	buffer    int // -1 unless this is a stage buffer place
 	workgroup int // -1 unless this is a function workgroup place
 }
 type env struct{ syms map[string]symbol }
@@ -79,10 +83,14 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block}
 }
 
-func CheckAndLower(m *ast.Module) (*ir.Module, error) {
-	c := &Checker{ast: m, mod: &ir.Module{}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}}
+func CheckAndLower(m *ast.Module) (*flow.Module, error) {
+	kernel := &ir.Module{}
+	c := &Checker{ast: m, mod: kernel, flow: &flow.Module{Kernel: kernel}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}}
 	for _, n := range []string{"void", "bool", "int32", "uint32", "float32", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
+	}
+	if err := c.checkDocumentation(); err != nil {
+		return nil, err
 	}
 	if err := c.collectTypes(); err != nil {
 		return nil, err
@@ -109,7 +117,13 @@ func CheckAndLower(m *ast.Module) (*ir.Module, error) {
 	if err := ir.Verify(c.mod); err != nil {
 		return nil, fmt.Errorf("internal IR verification failed: %w", err)
 	}
-	return c.mod, nil
+	if err := c.lowerPrograms(); err != nil {
+		return nil, err
+	}
+	if err := flow.Verify(c.flow); err != nil {
+		return nil, fmt.Errorf("internal Flow IR verification failed: %w", err)
+	}
+	return c.flow, nil
 }
 
 func (c *Checker) collectTypes() error {
@@ -213,28 +227,34 @@ func (c *Checker) checkTypeCycles() error {
 func (c *Checker) collectFunctions() error {
 	for _, d := range c.ast.Decls {
 		switch x := d.(type) {
-		case *ast.FuncDecl:
+		case *ast.FunctionDecl:
 			if isReservedCallable(x.Name) {
 				return diag(x.Span, "function name %q is reserved by Tach", x.Name)
 			}
 			if _, ok := c.funcs[x.Name]; ok {
 				return diag(x.Span, "function %q is already defined", x.Name)
 			}
-			sig := &funcSig{name: x.Name, decl: x, ret: types.TVoid}
+			sig := &funcSig{name: x.Name, decl: x, ret: types.TVoid, indexed: len(x.Indices) > 0, exported: x.Exported}
 			seen := map[string]bool{}
 			for _, p := range x.Params {
 				if seen[p.Name] {
 					return diag(p.Span, "duplicate parameter %q", p.Name)
 				}
 				seen[p.Name] = true
-				t, err := c.resolveType(p.Type)
+				t, buffer, err := c.parameterType(p.Type, sig.indexed || x.Exported)
 				if err != nil {
 					return err
 				}
-				if t.Kind == types.Void || !types.IsConstructible(t) {
-					return diag(p.Span, "helper parameter %s has invalid value type %s", p.Name, t)
+				if buffer && !sig.indexed && !x.Exported {
+					return diag(p.Span, "helper parameter %s cannot be a buffer", p.Name)
 				}
-				sig.params = append(sig.params, namedType{p.Name, t})
+				sig.params = append(sig.params, namedType{p.Name, t, buffer})
+			}
+			if sig.indexed && x.Return != nil {
+				return diag(x.Return.GetSpan(), "indexed stage %s cannot declare a return type", x.Name)
+			}
+			if !sig.indexed && x.Exported && x.Return != nil {
+				return diag(x.Return.GetSpan(), "public program %s cannot declare a return type", x.Name)
 			}
 			if x.Return != nil {
 				r, err := c.resolveType(x.Return)
@@ -247,14 +267,6 @@ func (c *Checker) collectFunctions() error {
 				sig.ret = r
 			}
 			c.funcs[x.Name] = sig
-		case *ast.ComputeDecl:
-			if isReservedCallable(x.Name) {
-				return diag(x.Span, "kernel name %q is reserved by Tach", x.Name)
-			}
-			if _, ok := c.funcs[x.Name]; ok {
-				return diag(x.Span, "function %q is already defined", x.Name)
-			}
-			c.funcs[x.Name] = &funcSig{name: x.Name, compute: x, ret: types.TVoid}
 		}
 	}
 	return nil
@@ -319,13 +331,15 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 func (c *Checker) lowerFunctions() error {
 	for _, d := range c.ast.Decls {
 		switch x := d.(type) {
-		case *ast.FuncDecl:
-			if err := c.lowerHelper(x); err != nil {
-				return err
-			}
-		case *ast.ComputeDecl:
-			if err := c.lowerCompute(x); err != nil {
-				return err
+		case *ast.FunctionDecl:
+			if len(x.Indices) > 0 {
+				if err := c.lowerStage(x); err != nil {
+					return err
+				}
+			} else if !x.Exported {
+				if err := c.lowerHelper(x); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -334,13 +348,16 @@ func (c *Checker) lowerFunctions() error {
 
 func inferBufferAccess(m *ir.Module) {
 	for _, f := range m.Functions {
+		for i := range f.BufferParams {
+			f.BufferParams[i].Access = ir.Read
+		}
 		roots := map[ir.PlaceID]int{}
 		var walk func(*ir.Block)
 		walk = func(block *ir.Block) {
 			for _, in := range block.Instrs {
 				switch x := in.(type) {
 				case *ir.PlaceRoot:
-					roots[x.Result] = x.Resource
+					roots[x.Result] = x.Buffer
 				case *ir.PlaceField:
 					if resource, ok := roots[x.Base]; ok {
 						roots[x.Result] = resource
@@ -350,10 +367,10 @@ func inferBufferAccess(m *ir.Module) {
 						roots[x.Result] = resource
 					}
 				case *ir.Store:
-					markBufferWritable(m, roots, x.Place)
+					markBufferWritable(f, roots, x.Place)
 				case *ir.Atomic:
 					if x.Op != ir.AtomicLoad {
-						markBufferWritable(m, roots, x.Place)
+						markBufferWritable(f, roots, x.Place)
 					}
 				case *ir.If:
 					walk(x.Then)
@@ -368,22 +385,25 @@ func inferBufferAccess(m *ir.Module) {
 	}
 }
 
-func markBufferWritable(m *ir.Module, roots map[ir.PlaceID]int, place ir.PlaceID) {
-	resource, ok := roots[place]
-	if ok {
-		m.Resources[resource].Access = ir.Mutable
+func markBufferWritable(f *ir.Function, roots map[ir.PlaceID]int, place ir.PlaceID) {
+	buffer, ok := roots[place]
+	if ok && buffer >= 0 && buffer < len(f.BufferParams) {
+		f.BufferParams[buffer].Access = ir.Mutable
 	}
 }
 
-func (c *Checker) lowerHelper(d *ast.FuncDecl) error {
+func (c *Checker) lowerHelper(d *ast.FunctionDecl) error {
+	if len(d.Attrs) > 0 {
+		return diag(d.Span, "attributes are invalid on helper %s", d.Name)
+	}
 	sig := c.funcs[d.Name]
-	f := &ir.Function{Name: d.Name, Return: sig.ret, Body: &ir.Block{}, Span: d.Span}
+	f := &ir.Function{Name: d.Name, Kind: ir.Helper, Return: sig.ret, Body: &ir.Block{}, Span: d.Span}
 	e := newEnv()
 	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body, top: true}
 	for _, p := range sig.params {
 		id := b.value()
 		f.Params = append(f.Params, ir.Param{Name: p.name, ID: id, Type: p.ty})
-		e.syms[p.name] = symbol{name: p.name, ty: p.ty, value: id, resource: -1, workgroup: -1}
+		e.syms[p.name] = symbol{name: p.name, ty: p.ty, value: id, buffer: -1, workgroup: -1}
 	}
 	if err := c.lowerBlock(b, d.Body, e, "function"); err != nil {
 		return err
@@ -397,7 +417,7 @@ func (c *Checker) lowerHelper(d *ast.FuncDecl) error {
 	c.mod.Functions = append(c.mod.Functions, f)
 	return nil
 }
-func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
+func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
 	if len(d.Indices) < 1 || len(d.Indices) > 3 {
 		return diag(d.Span, "kernel %s requires 1 to 3 logical indices", d.Name)
 	}
@@ -405,7 +425,7 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	if err != nil {
 		return err
 	}
-	f := &ir.Function{Name: d.Name, Return: types.TVoid, Body: &ir.Block{}, Compute: true, Workgroup: wg, Span: d.Span}
+	f := &ir.Function{Name: d.Name, Kind: ir.Stage, Return: types.TVoid, Body: &ir.Block{}, Workgroup: wg, Span: d.Span}
 	e := newEnv()
 	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body, top: true}
 	for _, index := range d.Indices {
@@ -414,29 +434,29 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 		}
 		id := b.value()
 		f.Indices = append(f.Indices, ir.Param{Name: index.Name, ID: id, Type: types.TU32})
-		e.syms[index.Name] = symbol{name: index.Name, ty: types.TU32, value: id, resource: -1, workgroup: -1}
+		e.syms[index.Name] = symbol{name: index.Name, ty: types.TU32, value: id, buffer: -1, workgroup: -1}
 	}
 	hasBuffer := false
 	for _, p := range d.Params {
 		if _, used := e.syms[p.Name]; used {
 			return diag(p.Span, "duplicate parameter %q", p.Name)
 		}
-		ty, buffer, err := c.kernelParameterType(p.Type)
+		ty, buffer, err := c.parameterType(p.Type, true)
 		if err != nil {
 			return err
 		}
 		if buffer {
 			hasBuffer = true
-			idx := len(c.mod.Resources)
-			c.mod.Resources = append(c.mod.Resources, ir.Resource{Name: p.Name, Type: ty, Access: ir.Read, Span: p.Span})
-			e.syms[p.Name] = symbol{name: p.Name, ty: ty, resource: idx, workgroup: -1}
-			f.KernelParams = append(f.KernelParams, ir.KernelParam{Name: p.Name, Resource: idx})
+			idx := len(f.BufferParams)
+			f.BufferParams = append(f.BufferParams, ir.BufferParam{Name: p.Name, Type: ty, Access: ir.Read, Span: p.Span})
+			e.syms[p.Name] = symbol{name: p.Name, ty: ty, buffer: idx, workgroup: -1}
+			f.SourceParams = append(f.SourceParams, ir.SourceParam{Name: p.Name, Kind: ir.SourceBuffer, Buffer: idx})
 			continue
 		}
 		id := b.value()
 		f.Params = append(f.Params, ir.Param{Name: p.Name, ID: id, Type: ty})
-		e.syms[p.Name] = symbol{name: p.Name, ty: ty, value: id, resource: -1, workgroup: -1}
-		f.KernelParams = append(f.KernelParams, ir.KernelParam{Name: p.Name, Value: id, Resource: -1})
+		e.syms[p.Name] = symbol{name: p.Name, ty: ty, value: id, buffer: -1, workgroup: -1}
+		f.SourceParams = append(f.SourceParams, ir.SourceParam{Name: p.Name, Kind: ir.SourceValue, Value: id, Buffer: -1})
 	}
 	if !hasBuffer {
 		return diag(d.Span, "kernel %s requires at least one buffer parameter", d.Name)
@@ -447,10 +467,13 @@ func (c *Checker) lowerCompute(d *ast.ComputeDecl) error {
 	if f.Body.Term == nil {
 		f.Body.Term = &ir.Return{}
 	}
+	if !f.Workgroup.Explicit && (len(f.WorkgroupVars) > 0 || blockHasBarrier(f.Body)) {
+		return diag(d.Span, "stage %s uses workgroup-scoped state or barriers and requires explicit @workgroup", d.Name)
+	}
 	c.mod.Functions = append(c.mod.Functions, f)
 	return nil
 }
-func (c *Checker) kernelParameterType(te ast.TypeExpr) (*types.Type, bool, error) {
+func (c *Checker) parameterType(te ast.TypeExpr, allowBuffer bool) (*types.Type, bool, error) {
 	g, ok := te.(*ast.GenericType)
 	if !ok || g.Name != "buffer" {
 		t, err := c.resolveType(te)
@@ -461,6 +484,9 @@ func (c *Checker) kernelParameterType(te ast.TypeExpr) (*types.Type, bool, error
 			return nil, false, diag(te.GetSpan(), "kernel value parameter has invalid type %s", t)
 		}
 		return t, false, nil
+	}
+	if !allowBuffer {
+		return nil, false, diag(te.GetSpan(), "buffer<T> is not valid here")
 	}
 	if len(g.Args) != 1 {
 		return nil, false, diag(g.Span, "buffer<T> takes exactly one type argument")
@@ -478,12 +504,8 @@ func (c *Checker) kernelParameterType(te ast.TypeExpr) (*types.Type, bool, error
 	return t, true, nil
 }
 
-func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
-	defaults := [][3]uint32{{256, 1, 1}, {16, 16, 1}, {8, 8, 4}}
-	// DECISION: Fixed defaults stay within Tach's portable 256-invocation
-	// profile. Device specialization can replace them once target limits are
-	// explicit compiler inputs.
-	out := defaults[dimensions-1]
+func workgroup(attrs []ast.Attribute, dimensions int) (ir.WorkgroupConstraint, error) {
+	out := ir.WorkgroupConstraint{}
 	found := false
 	for _, a := range attrs {
 		if a.Name != "workgroup" {
@@ -496,7 +518,7 @@ func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
 		if len(a.Args) < 1 || len(a.Args) > dimensions {
 			return out, diag(a.Span, "@workgroup expects 1 to %d integer arguments for this kernel", dimensions)
 		}
-		out = [3]uint32{1, 1, 1}
+		out = ir.WorkgroupConstraint{Explicit: true, Size: [3]uint32{1, 1, 1}}
 		for i, e := range a.Args {
 			v, err := constU32(e)
 			if err != nil {
@@ -505,11 +527,11 @@ func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
 			if v == 0 {
 				return out, diag(e.GetSpan(), "workgroup dimension must be positive")
 			}
-			out[i] = v
+			out.Size[i] = v
 		}
 		limits := [3]uint32{256, 256, 64}
 		invocations := uint64(1)
-		for i, dimension := range out {
+		for i, dimension := range out.Size {
 			if dimension > limits[i] {
 				return out, diag(a.Span, "@workgroup dimension %d exceeds Tach's portable limit %d", i, limits[i])
 			}
@@ -520,6 +542,28 @@ func workgroup(attrs []ast.Attribute, dimensions int) ([3]uint32, error) {
 		}
 	}
 	return out, nil
+}
+
+func blockHasBarrier(block *ir.Block) bool {
+	for _, instruction := range block.Instrs {
+		switch x := instruction.(type) {
+		case *ir.Barrier:
+			return true
+		case *ir.If:
+			if blockHasBarrier(x.Then) || blockHasBarrier(x.Else) {
+				return true
+			}
+		case *ir.Loop:
+			if blockHasBarrier(x.Cond) || blockHasBarrier(x.Body) {
+				return true
+			}
+		case *ir.Scope:
+			if blockHasBarrier(x.Body) {
+				return true
+			}
+		}
+	}
+	return false
 }
 func constU32(e ast.Expr) (uint32, error) {
 	n, ok := e.(*ast.NumberExpr)
@@ -557,7 +601,7 @@ func (c *Checker) lowerBlock(b *fnBuilder, src *ast.BlockStmt, e env, kind strin
 func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 	switch x := s.(type) {
 	case *ast.WorkgroupStmt:
-		if !b.fn.Compute {
+		if b.fn.Kind != ir.Stage {
 			return diag(x.Span, "shared variables are only valid inside kernels")
 		}
 		if !b.top {
@@ -575,7 +619,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		}
 		idx := len(b.fn.WorkgroupVars)
 		b.fn.WorkgroupVars = append(b.fn.WorkgroupVars, ir.WorkgroupVar{Name: x.Name, Type: ty, Span: x.Span})
-		e.syms[x.Name] = symbol{name: x.Name, ty: ty, resource: -1, workgroup: idx}
+		e.syms[x.Name] = symbol{name: x.Name, ty: ty, buffer: -1, workgroup: idx}
 		return nil
 	case *ast.VarStmt:
 		if _, ok := e.syms[x.Name]; ok {
@@ -599,7 +643,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		if t.Kind == types.Void {
 			return diag(x.Value.GetSpan(), "cannot bind a void expression")
 		}
-		e.syms[x.Name] = symbol{name: x.Name, ty: t, value: id, mutable: x.Mutable, resource: -1, workgroup: -1}
+		e.syms[x.Name] = symbol{name: x.Name, ty: t, value: id, mutable: x.Mutable, buffer: -1, workgroup: -1}
 		return nil
 	case *ast.AssignStmt:
 		return c.lowerAssign(b, e, x.Target, x.Op, x.Value, x.Span)
@@ -641,7 +685,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, rhs ast.Expr, span source.Span) error {
 	if id, ok := target.(*ast.IdentExpr); ok {
 		sym, exists := e.syms[id.Name]
-		if exists && sym.resource < 0 && sym.workgroup < 0 {
+		if exists && sym.buffer < 0 && sym.workgroup < 0 {
 			if !sym.mutable {
 				return diag(target.GetSpan(), "cannot assign to immutable value %s", id.Name)
 			}
@@ -753,7 +797,7 @@ func carriedNames(blocks []*ast.BlockStmt, e env) []string {
 	}
 	var out []string
 	for name, s := range e.syms {
-		if set[name] && s.resource < 0 && s.workgroup < 0 && s.mutable {
+		if set[name] && s.buffer < 0 && s.workgroup < 0 && s.mutable {
 			out = append(out, name)
 		}
 	} // deterministic source-independent order by name
@@ -897,7 +941,7 @@ func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
 	// that existed before the loop remain visible after it through loop results.
 	for name, outer := range e.syms {
 		inner, ok := loopEnv.syms[name]
-		if !ok || outer.resource >= 0 || outer.workgroup >= 0 {
+		if !ok || outer.buffer >= 0 || outer.workgroup >= 0 {
 			continue
 		}
 		outer.value = inner.value
@@ -923,12 +967,12 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		return id, types.TBool, nil
 	case *ast.IdentExpr:
 		if s, ok := e.syms[v.Name]; ok {
-			if s.resource >= 0 {
+			if s.buffer >= 0 {
 				if !types.IsConstructible(s.ty) {
 					return 0, nil, diag(v.Span, "runtime-sized resource %s must be accessed through its fixed fields or indexed tail", v.Name)
 				}
 				p := b.place()
-				b.emit(&ir.PlaceRoot{Result: p, Type: s.ty, Resource: s.resource, Span: v.Span})
+				b.emit(&ir.PlaceRoot{Result: p, Type: s.ty, Buffer: s.buffer, Span: v.Span})
 				id := b.value()
 				b.emit(&ir.Load{Result: id, Type: s.ty, Place: p, Span: v.Span})
 				return id, s.ty, nil
@@ -1486,7 +1530,7 @@ func isReservedCallable(name string) bool {
 	if _, ok := atomicBuiltin(name); ok {
 		return true
 	}
-	if name == "workgroupBarrier" || name == "bufferBarrier" {
+	if name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" {
 		return true
 	}
 	return types.ParseBuiltin(name) != nil
@@ -1634,7 +1678,7 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 		if len(x.Args) != 0 {
 			return 0, nil, diag(x.Span, "%s expects no arguments", id.Name)
 		}
-		if !b.fn.Compute {
+		if b.fn.Kind != ir.Stage {
 			return 0, nil, diag(x.Span, "%s is only valid inside kernels", id.Name)
 		}
 		kind := ir.BarrierWorkgroup
@@ -1679,7 +1723,7 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 		return r, pt.Elem, nil
 	}
 	sig := c.funcs[id.Name]
-	if sig == nil || sig.compute != nil {
+	if sig == nil || sig.indexed || sig.exported {
 		return 0, nil, diag(id.Span, "unknown callable function %q", id.Name)
 	}
 	if len(x.Args) != len(sig.params) {
@@ -1831,12 +1875,12 @@ func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *type
 	switch v := x.(type) {
 	case *ast.IdentExpr:
 		s, ok := e.syms[v.Name]
-		if !ok || (s.resource < 0 && s.workgroup < 0) {
+		if !ok || (s.buffer < 0 && s.workgroup < 0) {
 			return 0, nil, diag(v.Span, "%s is not an addressable GPU place", v.Name)
 		}
 		p := b.place()
-		if s.resource >= 0 {
-			b.emit(&ir.PlaceRoot{Result: p, Type: s.ty, Resource: s.resource, Span: v.Span})
+		if s.buffer >= 0 {
+			b.emit(&ir.PlaceRoot{Result: p, Type: s.ty, Buffer: s.buffer, Span: v.Span})
 		} else {
 			b.emit(&ir.PlaceWorkgroup{Result: p, Type: s.ty, Workgroup: s.workgroup, Span: v.Span})
 		}

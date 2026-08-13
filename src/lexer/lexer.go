@@ -74,32 +74,6 @@ func (l *Lexer) skipSpaceAndComments() error {
 			}
 			continue
 		}
-		if r == '/' && l.peekN(n) == '*' {
-			start := l.pos()
-			l.advance()
-			l.advance()
-			depth := 1
-			for depth > 0 {
-				r, n = l.peek()
-				if n == 0 {
-					return &source.Error{Span: l.span(start), Message: "unterminated block comment"}
-				}
-				if r == '/' && l.peekN(n) == '*' {
-					l.advance()
-					l.advance()
-					depth++
-					continue
-				}
-				if r == '*' && l.peekN(n) == '/' {
-					l.advance()
-					l.advance()
-					depth--
-					continue
-				}
-				l.advance()
-			}
-			continue
-		}
 		return nil
 	}
 }
@@ -207,6 +181,25 @@ func (l *Lexer) Next() (Token, error) {
 		}
 		return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 	}
+	if r == '"' {
+		l.advance()
+		for {
+			r, _ = l.peek()
+			if r == 0 || r == '\n' {
+				return Token{}, &source.Error{Span: l.span(start), Message: "unterminated string"}
+			}
+			l.advance()
+			if r == '"' {
+				return Token{Kind: String, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
+			}
+			if r == '\\' {
+				if next, _ := l.peek(); next == 0 || next == '\n' {
+					return Token{}, &source.Error{Span: l.span(start), Message: "unterminated string"}
+				}
+				l.advance()
+			}
+		}
+	}
 	one := func(k Kind) (Token, error) {
 		l.advance()
 		return Token{Kind: k, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
@@ -257,95 +250,49 @@ func (l *Lexer) Next() (Token, error) {
 			return Token{Kind: NotEq, Text: "!=", Span: l.span(start)}, nil
 		}
 		return Token{Kind: Bang, Text: "!", Span: l.span(start)}, nil
-	case '<':
+	case '<', '>':
+		plain, equal, shift, shiftEqual := Less, LessEq, ShiftLeft, ShiftLeftEq
+		if r == '>' {
+			plain, equal, shift, shiftEqual = Greater, GreaterEq, ShiftRight, ShiftRightEq
+		}
 		l.advance()
-		if r2, _ := l.peek(); r2 == '<' {
+		if r2, _ := l.peek(); r2 == r {
 			l.advance()
 			if r3, _ := l.peek(); r3 == '=' {
 				l.advance()
-				return Token{Kind: ShiftLeftEq, Text: "<<=", Span: l.span(start)}, nil
+				return Token{Kind: shiftEqual, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 			}
-			return Token{Kind: ShiftLeft, Text: "<<", Span: l.span(start)}, nil
+			return Token{Kind: shift, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 		} else if r2 == '=' {
 			l.advance()
-			return Token{Kind: LessEq, Text: "<=", Span: l.span(start)}, nil
+			return Token{Kind: equal, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 		}
-		return Token{Kind: Less, Text: "<", Span: l.span(start)}, nil
-	case '>':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '>' {
-			l.advance()
-			if r3, _ := l.peek(); r3 == '=' {
-				l.advance()
-				return Token{Kind: ShiftRightEq, Text: ">>=", Span: l.span(start)}, nil
-			}
-			return Token{Kind: ShiftRight, Text: ">>", Span: l.span(start)}, nil
-		} else if r2 == '=' {
-			l.advance()
-			return Token{Kind: GreaterEq, Text: ">=", Span: l.span(start)}, nil
+		return Token{Kind: plain, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
+	case '+', '-', '*', '/', '&', '|', '^':
+		plain, equal, doubled := Star, StarEq, EOF
+		switch r {
+		case '+':
+			plain, equal, doubled = Plus, PlusEq, PlusPlus
+		case '-':
+			plain, equal, doubled = Minus, MinusEq, MinusMinus
+		case '/':
+			plain, equal = Slash, SlashEq
+		case '&':
+			plain, equal, doubled = Amp, AmpEq, AndAnd
+		case '|':
+			plain, equal, doubled = Pipe, PipeEq, OrOr
+		case '^':
+			plain, equal = Caret, CaretEq
 		}
-		return Token{Kind: Greater, Text: ">", Span: l.span(start)}, nil
-	case '+':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '=' {
-			l.advance()
-			return Token{Kind: PlusEq, Text: "+=", Span: l.span(start)}, nil
-		} else if r2 == '+' {
-			l.advance()
-			return Token{Kind: PlusPlus, Text: "++", Span: l.span(start)}, nil
-		}
-		return Token{Kind: Plus, Text: "+", Span: l.span(start)}, nil
-	case '-':
 		l.advance()
 		if r2, _ := l.peek(); r2 == '=' {
 			l.advance()
-			return Token{Kind: MinusEq, Text: "-=", Span: l.span(start)}, nil
-		} else if r2 == '-' {
+			return Token{Kind: equal, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
+		} else if r2 == r && doubled != EOF {
 			l.advance()
-			return Token{Kind: MinusMinus, Text: "--", Span: l.span(start)}, nil
+			return Token{Kind: doubled, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 		}
-		return Token{Kind: Minus, Text: "-", Span: l.span(start)}, nil
-	case '*':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '=' {
-			l.advance()
-			return Token{Kind: StarEq, Text: "*=", Span: l.span(start)}, nil
-		}
-		return Token{Kind: Star, Text: "*", Span: l.span(start)}, nil
-	case '/':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '=' {
-			l.advance()
-			return Token{Kind: SlashEq, Text: "/=", Span: l.span(start)}, nil
-		}
-		return Token{Kind: Slash, Text: "/", Span: l.span(start)}, nil
-	case '&':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '&' {
-			l.advance()
-			return Token{Kind: AndAnd, Text: "&&", Span: l.span(start)}, nil
-		} else if r2 == '=' {
-			l.advance()
-			return Token{Kind: AmpEq, Text: "&=", Span: l.span(start)}, nil
-		}
-		return Token{Kind: Amp, Text: "&", Span: l.span(start)}, nil
-	case '|':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '|' {
-			l.advance()
-			return Token{Kind: OrOr, Text: "||", Span: l.span(start)}, nil
-		} else if r2 == '=' {
-			l.advance()
-			return Token{Kind: PipeEq, Text: "|=", Span: l.span(start)}, nil
-		}
-		return Token{Kind: Pipe, Text: "|", Span: l.span(start)}, nil
-	case '^':
-		l.advance()
-		if r2, _ := l.peek(); r2 == '=' {
-			l.advance()
-			return Token{Kind: CaretEq, Text: "^=", Span: l.span(start)}, nil
-		}
-		return Token{Kind: Caret, Text: "^", Span: l.span(start)}, nil
+		return Token{Kind: plain, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 	case '~':
 		return one(Tilde)
 	}

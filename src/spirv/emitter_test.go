@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
 	"tach/src/spirv"
@@ -21,7 +22,12 @@ func emitSource(t *testing.T, name, source string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin, err := spirv.Emit(m)
+	opt.OptimizeLogical(m)
+	executable, err := spirv.Lower(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := spirv.Emit(executable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +47,12 @@ func TestParticlesSPIRV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin, err := spirv.Emit(m)
+	opt.OptimizeLogical(m)
+	executable, err := spirv.Lower(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := spirv.Emit(executable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +63,7 @@ func TestParticlesSPIRV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(s, "entries [integrate]") {
+	if !strings.Contains(s, "entries [_tach_k0]") {
 		t.Fatalf("unexpected summary: %s", s)
 	}
 }

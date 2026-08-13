@@ -13,11 +13,6 @@ const maxParameterBytes = 16 * 1024
 // ParameterPlan is the one cross-target physical plan for immutable kernel
 // values. Core IR keeps those values as ordinary parameters; backends and host
 // bindings share this plan when materializing one parameter block per kernel.
-type ParameterPlan struct {
-	Blocks     []*ParameterBlock
-	byFunction map[*ir.Function]*ParameterBlock
-}
-
 type ParameterBlock struct {
 	Function *ir.Function
 	Binding  uint32
@@ -35,44 +30,31 @@ type ParameterField struct {
 	Offset    uint32
 }
 
-func (p *ParameterPlan) For(function *ir.Function) *ParameterBlock {
-	if p == nil {
-		return nil
+func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, error) {
+	if function == nil || function.Kind != ir.Stage {
+		return nil, fmt.Errorf("parameter planning requires a stage")
 	}
-	return p.byFunction[function]
-}
-
-func PlanParameters(module *ir.Module) (*ParameterPlan, error) {
-	plan := &ParameterPlan{Blocks: []*ParameterBlock{}, byFunction: map[*ir.Function]*ParameterBlock{}}
-	for _, function := range module.Functions {
-		if !function.Compute || len(function.Params) == 0 {
-			continue
-		}
-		block := &ParameterBlock{
-			Function: function,
-			Binding:  uint32(len(module.Resources) + len(plan.Blocks)),
-			Type:     &types.Type{Kind: types.Struct, Name: "__tach_parameters_" + Mangle(function.Name)},
-		}
-		for parameter, value := range function.Params {
-			if err := flattenParameter(block, parameter, nil, value.Type); err != nil {
-				return nil, fmt.Errorf("kernel %s parameter %s: %w", function.Name, value.Name, err)
-			}
-		}
-		physical, err := layout.Of(block.Type)
-		if err != nil {
-			return nil, fmt.Errorf("kernel %s parameter block: %w", function.Name, err)
-		}
-		if physical.Size > maxParameterBytes {
-			return nil, fmt.Errorf("kernel %s parameter block is %d bytes; portable limit is %d", function.Name, physical.Size, maxParameterBytes)
-		}
-		block.Layout = physical
-		for index := range block.Fields {
-			block.Fields[index].Offset = physical.Fields[index].Offset
-		}
-		plan.Blocks = append(plan.Blocks, block)
-		plan.byFunction[function] = block
+	if len(function.Params) == 0 {
+		return nil, nil
 	}
-	return plan, nil
+	block := &ParameterBlock{Function: function, Binding: binding, Type: &types.Type{Kind: types.Struct, Name: "__tach_parameters_" + Mangle(function.Name)}}
+	for parameter, value := range function.Params {
+		if err := flattenParameter(block, parameter, nil, value.Type); err != nil {
+			return nil, fmt.Errorf("kernel %s parameter %s: %w", function.Name, value.Name, err)
+		}
+	}
+	physical, err := layout.Of(block.Type)
+	if err != nil {
+		return nil, fmt.Errorf("kernel %s parameter block: %w", function.Name, err)
+	}
+	if physical.Size > maxParameterBytes {
+		return nil, fmt.Errorf("kernel %s parameter block is %d bytes; portable limit is %d", function.Name, physical.Size, maxParameterBytes)
+	}
+	block.Layout = physical
+	for index := range block.Fields {
+		block.Fields[index].Offset = physical.Fields[index].Offset
+	}
+	return block, nil
 }
 
 func flattenParameter(block *ParameterBlock, parameter int, path []string, logical *types.Type) error {

@@ -1,46 +1,43 @@
 # Tach compiler and runtime architecture
 
-Tach is one portable compute language with one semantic IR, one host ABI, two
-shader backends, and one WebGPU runtime. The architecture keeps those concerns
-separate so source remains small while correctness and target detail stay in
-the compiler.
+Tach has two target-independent IRs, two target executable plans, two shader
+emitters, one canonical host layout, and one managed WebGPU runtime. The split
+keeps baseline syntax small while giving explicit multi-dispatch programs a
+real representation instead of hiding orchestration in generated glue.
 
-This document explains the complete system and the ownership boundary of each
-stage. For exact source rules, read [the language reference](language.md). For
-the internal representation, read [the Core IR reference](ir.md). For byte and
-host contracts, read [the ABI reference](abi.md).
+For exact source rules, read [the language guide](language.md). For internal
+data models, read [the IR guide](ir.md). For bytes and host execution, read
+[the ABI guide](abi.md).
 
-You do not need this document to write a kernel. Its shortest useful model is:
+The shortest accurate model is:
 
 ```text
-front end owns meaning -> Core IR owns portable semantics
-                       -> each backend owns target representation
-                       -> layout and bindings own the host boundary
-                       -> the runtime owns WebGPU lifetime and submission
+Kernel IR owns per-invocation portable meaning
+Flow IR owns public programs and dispatch dependencies
+target plans own physical kernels, bindings, scratch, and barriers
+emitters own WGSL/SPIR-V representation
+bindings and runtimes own the host boundary
 ```
 
-When a behavior appears in two targets or two host paths, move upward to the
-first shared owner rather than patching both consumers.
+## 1. Design invariants
 
-## 1. Design goals
+Tach is organized around these rules:
 
-Tach is organized around eight invariants:
+1. Source describes portable algorithms and programs, never provider objects.
+2. Logical coordinates are explicit values with source-chosen names.
+3. Immutable values and addressable GPU places are different IR concepts.
+4. Structured control remains structured until a backend needs a CFG.
+5. Public resources and their versions are explicit across dispatches.
+6. General Kernel IR optimization is separate from target planning.
+7. Physical kernels are target-owned clones, not public API identities.
+8. Layout, parameter packing, metadata, and runtimes share one ABI plan.
+9. Every emitted artifact is validated at its owning boundary.
+10. Dispatch boundaries are preserved unless a separately proved
+    optimization changes them; inter-stage fusion is not currently present.
 
-1. Source syntax describes an algorithm, not a shader provider.
-2. Logical kernel coordinates are explicit ordinary values.
-3. Semantic values and addressable memory are different concepts.
-4. Structured control stays structured until a backend needs lower-level CFG.
-5. Portable behavior is fixed before target emission.
-6. General optimization and backend representation optimization are distinct.
-7. Buffer identity, parameter packing, host layout, and generated bindings are
-   compiler-owned.
-8. Compilation succeeds only when every emitted artifact passes its owning
-   validator.
-
-These invariants are practical. They let a simple `for` loop remain simple
-source while the compiler carries its state in SSA, promotes repeated buffer
-traffic when safe, and emits either structured WGSL or explicit SPIR-V phi
-nodes.
+These rules let `export function scale[i]` stay a one-screen beginner feature
+while the compiler internally represents its public command, logical stage,
+private shader entry, launch source, and host resources separately.
 
 ## 2. End-to-end pipeline
 
@@ -48,425 +45,446 @@ nodes.
 .tach source
     |
     v
-lexer -> parser -> AST
+lexer -> parser -> source-shaped AST
                     |
                     v
-           semantic checking
-           + Core IR lowering
-                    |
-                    v
-              Core IR verify
-                    |
-                    v
-       target-independent optimization
-       + post-optimization verification
-                    |
-                    v
-       shared parameter-block planning
-             /                    \
-            v                      v
-       WGSL lowering          SPIR-V lowering
-       + target pass          + target pass
-       + emission             + binary emission
-       + validation           + binary validation
-                                   |
-                                   v
-                              disassembly
-             \                    /
-              v                  v
-          JS + TypeScript + metadata generation
+              semantic checking
+               /            \
+              v              v
+       Kernel IR          Flow IR
+  helpers + stages    programs + resources
+       verify          + versions + shapes
+              \              /
+               v            v
+          target-neutral Kernel IR optimization
+                         |
+              +----------+----------+
+              |                     |
+              v                     v
+       Web target planning    SPIR-V target planning
+       + physical kernels     + physical kernels
+       + transients           + transients/barriers
+       + coordinate pass      + coordinate pass
+              |                     |
+              v                     v
+         WGSL emission         SPIR-V emission
+         + validation          + binary validation
+                                    |
+                                    v
+                               disassembly
+              \                     /
+               v                   v
+          JS + TypeScript + metadata
           + generated-contract validation
 ```
 
-`src/compiler.CompileTarget` is the orchestration point. It always runs the
-shared front end and optimizer, then enters only the requested backend:
-`web`, `spirv`, or both for `all`. `Compile` is the complete `all` entry point
-used by internal cross-target tests. `WriteDirectory` writes exactly the
-selected validated set and removes stale Tach siblings for that module.
+`src/compiler.CompileTarget` orchestrates the pipeline. The front end and
+target-neutral optimizer always run. `web` builds only the Web executable and
+bindings, `spirv` builds only SPIR-V plus metadata, and `all` builds both plans
+and the diagnostic dump/disassembly.
 
-No generated stage reads another artifact to rediscover semantics. In
-particular, bindings do not parse WGSL, and the SPIR-V disassembler decodes the
-emitted binary rather than printing emitter-side state.
+No consumer reparses another artifact to recover meaning. Bindings consume IR
+and executable plans, not WGSL. SPIR-V disassembly decodes emitted bytes, not
+emitter state.
 
 ## 3. Front end
 
-### Lexer and parser
+### Source, lexer, parser, and AST
 
-`src/lexer` turns source into tokens with spans. It owns comments, numeric
-spelling, identifiers, punctuation, keywords, and operators.
+`src/source` owns positions, spans, and source errors. `src/lexer` owns Unicode
+identifiers, strings used by `@docs`, suffix-free numbers, line comments,
+punctuation, and operators.
 
-`src/parser` builds `src/ast` declarations, types, statements, expressions,
-attributes, and source spans. It establishes grammatical structure but does
-not decide overloads, buffer access, host layout, or target representation.
+`src/parser` builds `src/ast`. The AST retains source roles:
 
-The AST is intentionally source-shaped. Constructs such as `for`, ternary
-expressions, compound assignment, and object-shaped struct literals still
-exist there because diagnostics should refer to what the author wrote.
+- module and declaration attributes;
+- types and fields;
+- helpers, indexed stages, and exported functions;
+- ordinary statements and structured control;
+- `run` domains and `transient<T>(length)` expressions; and
+- exact source spans.
 
-### Semantic analysis and lowering
+The parser decides grammar only. It does not resolve types, decide whether an
+export is baseline sugar or explicit orchestration, infer resource access, or
+assign target representation.
 
-`src/sema` is the language authority. It performs declaration collection,
-type resolution, cycle detection, literal inference, expression checking,
-overload selection, lexical-flow analysis, call-cycle rejection, kernel
-parameter validation, buffer-access inference, and Core IR construction.
+### Semantic analysis
 
-Semantic analysis lowers while it checks because the decisions are coupled:
+`src/sema` is the language authority. Its order matters:
 
-- a literal enters IR only after it has one concrete type;
-- a buffer projection becomes a typed place;
-- a local rebinding becomes a new value;
-- branch rebindings become `If` results;
-- loop rebindings become loop parameters and results;
-- short-circuit operators become structured regions; and
-- buffer access is inferred from actual memory effects.
+1. normalize and validate structured documentation;
+2. collect type names, resolve fields, and reject layout-invalid cycles/tails;
+3. collect function signatures and roles;
+4. lower helpers and indexed stages to Kernel IR;
+5. infer buffer mutability from effects;
+6. reject helper recursion and verify Kernel IR;
+7. lower each exported function to a Flow IR public program; and
+8. verify the complete Flow IR module.
 
-The result is fully typed. Backends never repeat source overload resolution or
-guess what an unadorned `0` meant.
+Lowering happens during checking because concrete choices are coupled to
+meaning. A literal needs a resolved type before it becomes a constant; a
+buffer projection becomes a typed place; local rebinding becomes structured
+SSA results; a `run` buffer becomes a resource/version edge; and a program
+shape becomes a checked host-evaluable expression.
 
-## 4. The semantic center: Core IR
+## 4. Two target-independent IRs
 
-Core IR in `src/ir` separates:
+### Kernel IR: per-invocation semantics
 
-```text
-Value<T>                 immutable computed data
-Place<T>                 typed path to GPU memory
-Block + terminator       structured execution region
-Buffer resource          external kernel memory contract
-```
-
-Ordinary locals and plain kernel parameters lower to values. Buffers and shared
-variables lower to places. Loads, stores, atomics, and barriers remain explicit
-effects.
-
-`If` and `Loop` own their child regions and their merged/carried values. This
-is high enough for source-level reasoning and low enough to map directly to
-both targets:
-
-- WGSL receives structured statements and generated private locals;
-- SPIR-V receives blocks, merge instructions, branches, and `OpPhi`.
-
-The IR has logical Tach types only. Physical padding and target pointer types
-belong to later layers.
-
-## 5. Verification and uniformity
-
-`src/ir/verify.go` is not an optional debug checker. It is the executable
-boundary between semantic analysis, optimization, and code generation. It
-checks definition uniqueness, structured availability, exact types, place
-paths, access, calls, returns, region yields, loop carriers, intrinsics,
-atomics, barriers, runtime arrays, and shared-memory declarations.
-
-`src/ir/uniformity.go` derives whether each value is uniform or varying within
-a workgroup. It follows value dependencies, nested control, helper calls, and
-loop-carried fixed points. Barrier verification then rejects collective
-operations under varying control.
-
-Uniformity is deliberately a property of proven IR, not a source annotation
-and not a backend-specific qualifier.
-
-## 6. Two optimization levels
-
-Tach makes the optimization boundary explicit:
+`src/ir` represents helpers and indexed stages. Its core distinction is:
 
 ```text
-source semantics
-    |
-    v
-Core IR passes                 shared by every target
-    |
-    v
-backend-lowered program        private target representation
-    |
-    v
-backend passes                 target input/encoding choices
+Value<T>       immutable computed data
+Place<T>       typed path to buffer or workgroup memory
+Block          structured instruction region with a terminator
 ```
 
-### Core IR optimization
+Kernel IR contains resolved logical Tach types, helper calls, intrinsics,
+loads/stores, atomics, barriers, workgroup declarations, and structured
+`If`/`Loop`/`Scope` regions. Logical index parameters are ordinary `uint32`
+values. Bindings, descriptor sets, padding, target pointer types, and builtin
+variable names do not appear.
 
-`src/opt` currently applies:
+### Flow IR: public program semantics
+
+`src/flow` represents host-callable work around indexed stages:
+
+```text
+Program
+  public parameters
+  external and transient resources
+  resource versions
+  shape expression DAG
+  ordered dispatches
+```
+
+An exported indexed function synthesizes one Flow program with one launch-axis
+shape and one dispatch. An exported unindexed function lowers its source
+`const`, `transient`, and `run` declarations directly.
+
+Resource versions state dataflow explicitly. A mutable dispatch consumes one
+version and produces another. The verifier knows whether an initial or
+transient version is defined and rejects a read before a complete definition.
+Shapes refer to public uint values, runtime lengths, launch axes, constants,
+or checked arithmetic.
+
+This layer is why bindings can expose one command for a multi-stage operation
+without encoding a dispatch graph by hand in TypeScript.
+
+## 5. Verification and analysis
+
+`ir.Verify` checks the complete Kernel IR contract: unique IDs, structured
+availability, exact types, function roles, buffer/place paths, access rights,
+control results, loop carriers, runtime arrays, intrinsics, atomics, barriers,
+workgroup memory, and returns.
+
+`src/ir/uniformity.go` derives whether values and control are uniform within a
+workgroup. Constants and plain stage values are uniform; coordinates, mutable
+loads, and atomic results are varying. The verifier rejects barriers nested
+under varying control.
+
+`flow.Verify` first verifies its Kernel IR, then checks public program names,
+parameters, resources, dense IDs, version chains, shape DAGs, stage references,
+argument types, resource non-aliasing, definition-before-read, and final
+versions.
+
+Verification is a production boundary. Semantic analysis, optimization,
+backend lowering, emission, and binding generation do not accept malformed IR
+as a recoverable variant.
+
+## 6. Target-neutral optimization
+
+`src/opt.OptimizeLogical` currently optimizes the module's Kernel IR and then
+re-verifies the Flow module. `OptimizeKernel` applies, per function:
 
 1. common value/place elimination;
 2. loop-invariant code motion;
-3. another commoning pass;
+3. commoning again;
 4. conservative loop buffer-value promotion;
 5. final commoning; and
 6. dead pure definition removal to a fixed point.
 
-The pass manager verifies before and after the sequence. Its rules are based
-on Tach types, effects, structured dominance, buffer access, and the
-non-aliasing buffer contract. It has no WGSL or SPIR-V cases.
+The passes know Tach types, structured dominance, helper purity, access
+inference, and effects. They have no WGSL or SPIR-V cases.
 
-Loop promotion illustrates the intended standard. It may keep a repeated
-buffer update in a loop-carried SSA value, but only when there is one clear
-load/store path and no synchronization, early exit, atomic, or competing
-touch of that buffer. It preserves zero-trip behavior by loading lazily and
-writing back only if the loop ran.
+Loop buffer promotion can replace a repeated load/update/store with a lazy
+loop-carried value and one final write. It stops at ambiguous access,
+synchronization, atomics, early exits, competing touches, or internally
+defined places. Zero-trip behavior remains unchanged.
 
-### Backend optimization
+Flow IR currently has no rewrite pipeline beyond construction-time shape
+interning and verification. Dispatch planning occurs per target. In
+particular, no pass fuses distinct Flow dispatches.
 
-Each backend first creates a private lowered program. The shared analysis in
-`src/backend` recognizes exact local-coordinate arithmetic derived from the
-kernel's named logical indices and workgroup dimensions. It can replace:
+## 7. Target executable planning
 
-- `coordinate % workgroupDimension` with a target local coordinate; and
-- the matching row-major combination with a target local linear coordinate.
+`src/backend.Lower` clones the optimized logical module for one target profile
+and creates an `Executable` containing:
 
-It also removes target inputs made unused by those replacements. The source
-and Core IR remain provider-neutral; only the backend representation knows
-which target builtin implements the result.
+- a target-private Kernel IR module;
+- one `PhysicalKernel` per program dispatch;
+- one `ProgramPlan` per public program; and
+- target identity and limits.
 
-This is the current backend pass, not a ceiling. Future target-specific
-instruction selection or legalization belongs at the same layer rather than
-in source syntax.
+For every dispatch, planning:
 
-## 7. One ABI and layout engine
+1. clones its logical stage;
+2. optionally internalizes safe command repetition;
+3. removes unused value parameters;
+4. assigns a private `_tach_kN` entry;
+5. chooses or verifies a portable workgroup;
+6. assigns dense storage bindings;
+7. builds the shared ABI parameter block;
+8. lowers logical coordinate requirements; and
+9. applies coordinate optimization.
 
-`src/layout` computes Tach's canonical buffer layout and the physical layouts
-used by ABI fields. It owns scalar and vector size/alignment, struct field
-offsets, nested-struct extent, fixed-array stride, runtime-tail offset and
-stride, and overflow checking.
+The target module also contains cloned helpers. Physical stage clones can
+differ because program arguments, repeat mode, parameter pruning, or later
+target passes can differ even when their source stage is shared.
 
-That one calculation drives:
+The current one-kernel-per-dispatch policy is deliberately simple and
+deterministic. The implementation carries a `DECISION` comment: deduplication
+requires a verified Kernel IR identity and must earn itself through real
+shader-size or pipeline evidence.
 
-- WGSL buffer wrappers;
-- SPIR-V member offsets and array strides;
-- reflection metadata;
-- WebGPU minimum binding sizes; and
-- generated runtime codecs.
+### Repeat internalization
 
-`src/abi` owns external names and the shared immutable-parameter plan. Exported
-kernel names preserve their source spelling in WGSL, SPIR-V, metadata,
-JavaScript, and TypeScript. Only private compiler symbols are mangled.
+A one-dispatch plan may move `repeat` inside each invocation when the stage has
+no loop or synchronization and every buffer access is exactly the current 1D
+coordinate. Planning adds a repeat value parameter and wraps the stage body in
+a Kernel IR loop. The public result remains equivalent because invocations do
+not communicate across repetitions.
 
-Every `buffer<T>` parameter becomes one deterministic module buffer. Plain
-parameters remain ordinary Core IR values. After Core optimization, the ABI
-planner recursively flattens those values into one fixed-size block per kernel,
-turning logical `bool` leaves into physical `uint32` fields. Both shader
-backends and host binding generation consume that exact plan. Buffer bindings
-come first; parameter blocks receive subsequent group/set `0` bindings. Source
-has no binding annotation and host code never allocates bindings itself.
+Other plans retain program repetition. This optimization removes dispatch
+overhead without claiming general kernel fusion.
 
-## 8. WGSL backend
+### Transients and barriers
 
-`src/wgsl` performs four jobs:
+Transient planning computes first/last dispatch use and greedily assigns an
+allocation color not overlapping an earlier live range. The runtime allocates
+one capacity per color.
 
-1. verify Core IR;
-2. lower logical coordinates and run the backend coordinate pass;
-3. emit WGSL declarations and structured code; and
-4. validate the exact emitted WGSL subset.
+SPIR-V plans insert barrier steps between adjacent dispatches when the first
+writes a resource touched by the second, plus an optional barrier between
+repeated program iterations. WebGPU records ordered dispatches in one compute
+pass and relies on WebGPU's pass execution model.
 
-The emitter maps values to expressions or compiler locals, places to access
-expressions, structured regions to WGSL control, buffers to group/binding
-globals, and Tach intrinsics/effects to their WGSL operations.
+## 8. Coordinate lowering
 
-Fixed-size buffers use compiler-generated wrappers so their binding size
-follows the Tach ABI. Runtime arrays retain their natural element stride. Each
-kernel with plain values gets one private uniform-address-space block, and the
-entry reconstructs logical values before executing Core instructions.
-Generated private names are isolated from the public entry point.
-
-The WGSL validator reparses what Tach emits. It protects serialization shape
-and syntax; semantic guarantees already come from typed, verified Core IR.
-Browser integration tests provide the independent WebGPU implementation check.
-
-## 9. SPIR-V backend
-
-`src/spirv` emits SPIR-V 1.3 for the Logical addressing model with the Shader
-capability and GLSL.std.450 where required. It owns:
-
-- word encoding and result-ID allocation;
-- logical and physical type lowering;
-- entry-point interface variables and decorations;
-- structured selection and loop CFG;
-- dominance-correct phi construction;
-- buffer and parameter-block variables, access chains, loads, and stores;
-- atomics, scopes, memory semantics, and barriers; and
-- extended math instructions.
-
-Host-visible parameter and StorageBuffer aggregates use decorated physical ABI
-types. SSA values and Workgroup memory use undecorated logical types. Buffer
-aggregate loads/stores and parameter reconstruction cross this boundary field
-by field, so padding and physical bool words never become logical values.
-
-Tach promises zeroed workgroup memory. Because native SPIR-V cannot assume the
-same initialization behavior as WGSL, the backend emits a prologue in which
-the first local invocation stores zero values, then the workgroup synchronizes
-before source code.
-
-The in-tree validator independently decodes emitted bytes and checks header,
-section order, IDs, types, capabilities, layouts, decorations, function CFG,
-predecessors, dominance, phi edges, structured merges, memory operations,
-atomics, barriers, intrinsics, and the exact used input interface. The native
-harness additionally runs Khronos `spirv-val` before Vulkan execution.
-
-## 10. Binding generation
-
-`src/bindings` consumes the optimized module, emitted WGSL, and canonical
-layout. It emits three synchronized artifacts:
-
-- an ES module embedding WGSL and private module descriptors;
-- TypeScript type aliases and positional kernel signatures; and
-- plain JSON reflection metadata.
-
-Named Tach structs become readonly TypeScript object aliases. Each exported
-kernel becomes a same-named function returning an opaque `ComputeCommand`.
-Buffer parameters use `ComputeBuffer<T>`; plain parameters stay ordinary typed
-values.
-
-The generated JavaScript contains no adapter, device, buffer, cache, or queue
-lifecycle. It imports the private executor from `@depths/tach/internal` and
-describes the compiled module. `ValidateGenerated` checks the correspondence
-among JavaScript exports, declarations, metadata, parameter mappings, and
-package imports before compilation succeeds.
-
-## 11. WebGPU runtime
-
-The runtime in `tach-ts/src` has one session implementation and two ownership
-forms:
+`src/backend/coordinates.go` begins with each named logical index mapped to a
+global coordinate. It then recognizes exact workgroup-local expressions:
 
 ```text
-tach(callback)       scoped ownership; wait and close on callback exit
-tach(options?)       caller ownership; explicit idle and close
+coordinate % matchingWorkgroupDimension
+localX + localY * width + localZ * width * height
 ```
 
-Both return or expose the same `Tach` session contract:
+These can become target local-coordinate or local-linear inputs. Unused target
+inputs and now-dead arithmetic disappear. If an expression is not an exact
+match, it remains ordinary arithmetic over the global logical coordinate.
 
-- acquire one adapter and device;
-- create session-owned `ComputeBuffer` handles;
-- construct opaque generated commands;
-- submit one or more commands in order;
-- synchronize through `idle()` or buffer readback; and
-- destroy resources at the ownership boundary.
+Provider builtin names exist only in target lowering and emission, never in
+source, Flow IR, or logical Kernel IR.
 
-### Command construction and submission
+## 9. Layout and parameter ABI
 
-A generated kernel call validates argument shape, buffer ownership, and
-buffer non-aliasing, snapshots its plain arguments into at most one parameter
-block, and returns a command. A thenable trap reports accidental
-`await kernel(...)`; commands must go through `gpu.submit(...)`.
+`src/layout` computes the canonical host-visible representation: scalar/vector
+size and alignment, 16-byte struct alignment, field offsets, nested extents,
+array strides, runtime tails, and checked 32-bit sizes.
 
-`submit(first, ...rest)` prepares all commands, records them in order into one
-compute pass and command buffer, and performs one queue submission. Its promise
-resolves after recording/submission, not after the GPU becomes idle. Submission
-calls are serialized through a session tail so JavaScript concurrency cannot
-reorder them.
+`src/abi` owns private entry names and immutable value blocks. It flattens each
+remaining physical-stage value parameter into numeric leaves, replacing bool
+leaves with physical `uint32`, then applies the same layout engine. Storage
+bindings precede the optional parameter block in group/set `0`.
 
-The optional `repeat` count repeats a command in the same pass. One-
-dimensional launch size can be inferred from the first runtime-sized storage
-buffer; otherwise the default is exactly one workgroup. Explicit sizes must
-match the kernel rank and contain positive safe integers.
+The plan drives:
 
-Batching commands into one pass removes host submission boundaries but does not
-fuse shader bodies. The runtime preserves every dispatch boundary because it
-cannot prove cross-invocation memory independence. True fusion belongs in the
-compiler after Core IR dependence analysis, never in a host option that guesses.
+- WGSL storage wrappers and uniform blocks;
+- SPIR-V offsets, strides, descriptors, and physical aggregate types;
+- generated target metadata;
+- TypeScript buffer codecs and parameter packing; and
+- the native Vulkan harness.
 
-### Residency and caching
+No target independently recalculates ABI offsets.
 
-`gpu.buffer(value)` initially keeps a structured clone on the host. The first
-submitted command supplies its compiler codec and layout, packs it, and creates
-the physical GPU buffer. From then on, `write` must keep the same byte length.
+## 10. WGSL backend
 
-Generated modules cache one shader module and each compute pipeline per device.
-Sessions cache bind groups by layout and resident buffer ranges. Parameter
-blocks use a session-owned aligned upload buffer that grows geometrically and
-is reused under WebGPU queue ordering. Dynamic offsets let different parameter
-snapshots reuse one bind group for the same resident buffers. Persistent
-sessions therefore retain the device, buffers, pipelines, layouts, and stable
-binding sets across frames.
+`src/wgsl` receives a verified Web `Executable` and:
 
-### Synchronization and errors
+1. indexes physical and helper function coordinate requirements;
+2. emits structs, resources, parameter blocks, helpers, and private entries;
+3. maps structured Kernel IR directly to structured WGSL; and
+4. reparses the exact generated WGSL subset with its in-tree validator.
 
-`submit()` intentionally does not stall for completion. `idle()`, a materialized
-buffer's `read()`, and the end of `tach(...)` are synchronization boundaries.
+Fixed resources use aligned wrappers; runtime tails retain natural stride.
+Plain values are reconstructed from one uniform block at entry. Values become
+expressions or compiler locals; places become access expressions; `If` and
+`Loop` stay structured.
 
-WebGPU error scopes, uncaptured errors, device loss, packing failures,
-lifecycle errors, and application exceptions are normalized to `TachError`.
-Both `tach(...)` overloads and live-session methods return values on success and
-throw or reject with `TachError` on failure.
+The in-tree validator checks Tach's serialization contract. The Chromium
+harness provides the independent implementation check.
 
-`close()` is idempotent. It destroys every live session buffer, the parameter
-arena, caches, and the WebGPU device. Buffer `destroy()` is also idempotent and
-invalidates cached bind groups that referred to it.
+## 11. SPIR-V backend
 
-## 12. Validation boundaries
+`src/spirv` emits SPIR-V 1.3 with Logical addressing, Shader capability, and
+GLSL.std.450 where required. It owns result IDs, logical/physical types,
+interface variables, decorations, structured CFG construction, phi nodes,
+access chains, atomics, barriers, and extended instructions.
 
-Each validator answers a different question:
+Host-visible StorageBuffer/uniform aggregates use decorated physical types.
+SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
+conversion prevents padding and physical bool words from entering value
+semantics.
+
+WGSL guarantees zeroed workgroup variables; native SPIR-V does not. The
+SPIR-V emitter therefore generates a first-local-invocation zeroing prologue
+and synchronization before source instructions.
+
+The validator independently decodes the binary and checks header/sections,
+IDs, capabilities, types, layouts, decorations, CFG, predecessors, dominance,
+phi edges, structured merges, memory operations, atomics, barriers,
+intrinsics, and used interfaces. `spirv-val` and Vulkan provide external
+checks.
+
+## 12. Bindings and documentation
+
+`src/bindings.Generate` consumes the optimized `flow.Module`, requested target
+executables, and WGSL text. It creates:
+
+- schema-1 metadata with public programs and target plans;
+- an ES module embedding WGSL and the Web plan; and
+- declarations for source types and exported programs.
+
+Generated JavaScript imports only `defineModule` from
+`@depths/tach/internal`. Public applications import `tach` and `TachError` from
+`@depths/tach`. `ValidateGenerated` checks exports, declarations, metadata,
+layouts, references, and imports before compilation succeeds.
+
+Documentation follows a deliberately acyclic path:
+
+```text
+@docs source
+  -> semantic Documentation model
+  -> target-neutral JSON description from Go
+  -> Markdown rendering and TypeScript syntax in tach-ts
+```
+
+The Go compiler describes Tach types, functions, coordinates, buffers,
+access, and returns without importing or spelling TypeScript. `tach-ts` owns
+JSDoc/Markdown presentation and the generated usage sample.
+
+## 13. WebGPU runtime
+
+The runtime in `tach-ts/src` has one `Session` and two ownership forms:
+
+```text
+tach(callback)       scoped: wait and close on exit
+tach(options?)       persistent: caller invokes idle/close
+```
+
+Generated `defineModule` consumes the embedded shader, public-program table,
+and Web plan. A generated function validates public buffers and options, then
+creates an opaque `ComputeCommand`. Preparation materializes buffers,
+evaluates shapes, sizes transients, compiles referenced pipelines, and packs
+parameter blocks.
+
+`submit(first, ...rest)` serializes submission calls, prepares commands,
+records every program step in argument order into one compute pass and command
+buffer, and queues once. It does not wait for device completion.
+
+The session owns:
+
+- resident `ComputeBuffer` state and codecs;
+- per-device generated shader modules and pipelines;
+- cached bind groups by layout and resource range;
+- a geometrically growing aligned uniform arena;
+- geometrically growing scratch buffers by transient color;
+- retired buffers awaiting a safe `idle()` boundary; and
+- error scopes, uncaptured errors, and device-loss state.
+
+`idle()`, materialized readback, and scoped-session exit wait for completion.
+`close()` and buffer `destroy()` are idempotent.
+
+## 14. Validation boundaries
 
 | Boundary | Question |
 |---|---|
-| parser | Is the source grammatical? |
-| semantic analysis | Is it a valid, typed Tach program? |
-| Core IR verifier | Is lowered meaning internally sound? |
-| optimizer post-verify | Did optimization preserve that contract? |
-| WGSL validator | Did Tach serialize its WGSL subset correctly? |
+| lexer/parser | Is source spelling and grammar valid? |
+| semantic analysis | Do declarations and expressions have valid Tach meaning? |
+| Kernel IR verifier | Are per-invocation values, places, control, and effects sound? |
+| Flow verifier | Are programs, shapes, resources, versions, and dispatches sound? |
+| optimizer post-verify | Did rewrites preserve both IR contracts? |
+| backend verifier | Are physical kernels and target plans internally consistent? |
+| WGSL validator | Did Tach serialize its supported WGSL shape correctly? |
 | SPIR-V validator | Is the binary structurally, semantically, and ABI valid? |
-| generated validator | Do JS, declarations, metadata, buffers, and values agree? |
-| browser harness | Does real WebGPU compile and execute the artifacts? |
-| native harness | Does `spirv-val` and Vulkan execute the SPIR-V correctly? |
+| generated validator | Do metadata, JS, declarations, and plans agree? |
+| browser harness | Does Chromium WebGPU compile and execute generated modules? |
+| native harness | Do `spirv-val` and Vulkan execute target plans correctly? |
 
-Internal validation catches compiler faults close to their owner. External
-harnesses catch incorrect assumptions about real implementations.
+Each catches faults at the earliest owner; external harnesses challenge the
+compiler's assumptions against real implementations.
 
-## 13. Package responsibilities
+## 15. Package responsibilities and dependencies
 
 ```text
-main.go          CLI parsing and artifact writing
-src/source       source positions and spans
+src/source       spans and source errors
 src/lexer        tokens
-src/ast          source-shaped syntax tree
+src/ast          source-shaped nodes
 src/parser       grammar
-src/types        logical type model and domain predicates
-src/sema         language semantics and Core IR lowering
-src/ir           IR model, dump, verification, uniformity, use counts
-src/opt          target-independent optimization
-src/backend      shared backend-lowered coordinate analysis
-src/layout       canonical buffer and physical field layout
-src/abi          external names, private mangling, parameter-block planning
-src/wgsl         WGSL lowering, target pass, emission, validation
-src/spirv        SPIR-V lowering, emission, decoding, validation, disassembly
-src/bindings     metadata and JavaScript/TypeScript generation
-src/compiler     end-to-end orchestration
-tach-ts/src      compiler delivery, WebGPU execution, errors, public exports
+src/types        logical types and domain predicates
+src/ir           Kernel IR, verification, access, uniformity, use counts
+src/flow         Flow IR, resource versions, shapes, verification
+src/sema         language checking and both IR lowerings
+src/opt          target-neutral Kernel IR optimization
+src/layout       canonical host-visible layout
+src/abi          private names and parameter blocks
+src/backend      target executable planning and coordinate lowering
+src/wgsl         WGSL emission and validation
+src/spirv        SPIR-V emission, decoding, validation, disassembly
+src/bindings     metadata, generated modules/declarations, descriptions
+src/compiler     end-to-end compiler API and artifact writing
+main.go          native CLI
+tach-ts/src      compiler delivery, docs renderer, WebGPU runtime
 ```
 
-The dependency direction should follow that list toward orchestration. A
-front-end package does not import a backend to learn semantics; the runtime
-does not reverse-engineer generated shaders.
+The dependency graph points from primitive semantics toward orchestration.
+The front end never imports a backend; Go never imports the TypeScript renderer;
+the runtime never reverse-engineers a shader. `go list -deps ./...` is part of
+the repository's cycle check.
 
-## 14. Test architecture
+## 16. Test architecture
 
-Tests are layered to match ownership:
+Tests mirror ownership:
 
-- lexer, parser, semantic, IR, optimizer, layout, binding, and backend unit
-  tests cover local contracts and rejection cases;
-- mutation tests corrupt emitted SPIR-V and require the validator to reject it;
-- compiler tests assert cross-artifact results;
-- compiler tests compile every `tach` fence in these six maintained guides;
-- `browser-test` compiles and runs the example corpus through generated
-  TypeScript/WebGPU bindings;
-- `spirv-test` compiles the same corpus, validates it externally, creates a
-  native Vulkan pipeline, and compares readback; and
-- `showcase-ts` sustains diverse workloads long enough to measure the runtime
-  and compiler rather than one-off adapter or dispatch overhead.
+- lexer, parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
+  binding, and emitter tests cover local contracts and rejection cases;
+- compiler tests check target artifact sets, deterministic cross-target
+  output, documentation descriptions, baseline desugaring, and all maintained
+  examples;
+- SPIR-V mutation tests corrupt valid modules and require rejection;
+- `browser-test` compiles all examples and checks generated WebGPU execution;
+- `spirv-test` runs the same corpus through external validation and Vulkan;
+- `showcase-ts` runs five large two-stage GPU workloads and a separate
+  medium GPU-versus-single-threaded-TypeScript profile; and
+- `dupl` and `deadcode` provide structural duplication and reachability audits
+  beyond behavioral tests.
 
-Any change to a shared semantic path should be tested at the lowest owning
-layer and then through both executable backends when it affects emission or
-runtime behavior.
+A shared semantic change belongs first in the lowest owning test and then in
+both executable harnesses when it affects target behavior.
 
-## 15. How a feature should enter Tach
+## 17. Extension rule
 
-Before adding syntax, locate the first layer that actually needs to change:
+Before adding a feature, find its first real owner:
 
-1. If an existing expression or library pattern already expresses the
-   operation, no language feature is needed.
-2. If it is only source convenience, lower it into existing Core IR.
-3. If it adds portable semantics, add the smallest logical type/instruction,
-   verifier rule, effect rule, and tests, then implement both backends.
-4. If it is merely a target representation improvement, keep it in backend
-   lowering/optimization and do not expose it to source or Core IR.
-5. If it changes bytes, bindings, launch, names, or lifetime, update the one
-   ABI owner and every consumer together.
+1. Existing syntax or a helper expresses it: add nothing.
+2. Source convenience has existing semantics: lower to existing IR.
+3. New per-invocation portable meaning: extend Kernel IR, verification,
+   effects, optimization, and both emitters.
+4. New public dispatch/resource meaning: extend Flow IR, verification, target
+   plans, metadata, and both runtimes.
+5. Target representation improvement: keep it in backend planning/emission.
+6. Byte, binding, launch, name, or lifetime change: update the single ABI
+   owner and every generated/native consumer together.
 
-This keeps the user-facing language coherent while leaving optimization and
-hardware adaptation where they belong: inside the compiler.
+This keeps beginner syntax ergonomic without pretending orchestration,
+parallel memory, or provider representation is simpler than it is.

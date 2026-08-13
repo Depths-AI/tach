@@ -7,12 +7,13 @@ import (
 )
 
 type exampleCase struct {
-	name        string
-	kernel      string
-	buffers     map[string][]byte
-	parameters  []byte
-	invocations [3]uint32
-	check       func(map[string][]byte) error
+	name    string
+	program string
+	buffers map[string][]byte
+	values  map[string]any
+	launch  [3]uint32
+	repeat  uint32
+	check   func(map[string][]byte) error
 }
 
 func exampleCases() []exampleCase {
@@ -25,7 +26,7 @@ func exampleCases() []exampleCase {
 
 	return []exampleCase{
 		{
-			name: "atomics", kernel: "accumulate", invocations: invocations(64),
+			name: "atomics", program: "accumulate", launch: invocations(64),
 			buffers: map[string][]byte{"counters": make([]byte, 16)},
 			check: func(output map[string][]byte) error {
 				actual, err := readU32(output, "counters")
@@ -39,7 +40,7 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "bitwise", kernel: "bitwise", invocations: invocations(8),
+			name: "bitwise", program: "bitwise", launch: invocations(8),
 			buffers: map[string][]byte{"out": u32Bytes(make([]uint32, 8))},
 			check: func(output map[string][]byte) error {
 				actual, err := readU32(output, "out")
@@ -56,9 +57,9 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "control", kernel: "transform", invocations: invocations(64),
-			buffers:    map[string][]byte{"data": f32Bytes(controlInput)},
-			parameters: structBytes(16, f32Field(0, 2), u32Field(4, 64), u32Field(8, 1)),
+			name: "control", program: "transform", launch: invocations(64),
+			buffers: map[string][]byte{"data": f32Bytes(controlInput)},
+			values:  map[string]any{"params": map[string]any{"scale": float32(2), "count": uint32(64), "enabled": true}},
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "data")
 				if err != nil {
@@ -77,7 +78,7 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "for", kernel: "reduceLanes", invocations: invocations(256),
+			name: "for", program: "reduceLanes", launch: invocations(256),
 			buffers: map[string][]byte{"data": u32Bytes(forInput)},
 			check: func(output map[string][]byte) error {
 				actual, err := readU32(output, "data")
@@ -97,7 +98,7 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "math", kernel: "math", invocations: invocations(4),
+			name: "math", program: "math", launch: invocations(4),
 			buffers: map[string][]byte{"out": f32Bytes(make([]float32, 16))},
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "out")
@@ -117,14 +118,14 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "particles", kernel: "integrate", invocations: invocations(2),
+			name: "particles", program: "integrate", launch: invocations(2),
 			buffers: map[string][]byte{
 				"particles": f32Bytes([]float32{
 					1, 2, 3, 4, 2, 4, 6, 8,
 					-1, -2, -3, -4, 1, 2, 3, 4,
 				}),
 			},
-			parameters: structBytes(16, f32Field(0, 0.5), u32Field(4, 2)),
+			values: map[string]any{"params": map[string]any{"dt": float32(0.5), "count": uint32(2)}},
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "particles")
 				if err != nil {
@@ -143,9 +144,9 @@ func exampleCases() []exampleCase {
 			},
 		},
 		{
-			name: "scalars", kernel: "scale", invocations: invocations(4),
-			buffers:    map[string][]byte{"data": f32Bytes([]float32{1, 2, 3, 4})},
-			parameters: structBytes(16, f32Field(0, 2.5)),
+			name: "scalars", program: "scale", launch: invocations(4),
+			buffers: map[string][]byte{"data": f32Bytes([]float32{1, 2, 3, 4})},
+			values:  map[string]any{"factor": float32(2.5)},
 			check: func(output map[string][]byte) error {
 				actual, err := readF32(output, "data")
 				if err != nil {
@@ -218,27 +219,6 @@ func f32Bytes(values []float32) []byte {
 	data := make([]byte, len(values)*4)
 	for i, value := range values {
 		binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(value))
-	}
-	return data
-}
-
-type fieldValue struct {
-	offset uint32
-	value  uint32
-}
-
-func f32Field(offset uint32, value float32) fieldValue {
-	return fieldValue{offset: offset, value: math.Float32bits(value)}
-}
-
-func u32Field(offset, value uint32) fieldValue {
-	return fieldValue{offset: offset, value: value}
-}
-
-func structBytes(size int, fields ...fieldValue) []byte {
-	data := make([]byte, size)
-	for _, field := range fields {
-		binary.LittleEndian.PutUint32(data[field.offset:], field.value)
 	}
 	return data
 }
