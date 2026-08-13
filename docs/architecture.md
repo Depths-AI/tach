@@ -464,8 +464,9 @@ Tests mirror ownership:
 - SPIR-V mutation tests corrupt valid modules and require rejection;
 - `browser-test` compiles all examples and checks generated WebGPU execution;
 - `spirv-test` runs the same corpus through external validation and Vulkan;
-- `showcase-ts` runs five large two-stage GPU workloads and a separate
-  medium GPU-versus-single-threaded-TypeScript profile; and
+- `showcase-ts` compiles six independent workload modules and measures two
+  renderers, two mathematical workloads, and two physics simulations on GPU;
+  and
 - `dupl` and `deadcode` provide structural duplication and reachability audits
   beyond behavioral tests.
 

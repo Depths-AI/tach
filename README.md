@@ -336,7 +336,7 @@ npm run check:duplicates
 ```
 
 `npm run check` builds the compiler and TypeScript surfaces, regenerates the
-showcase kernel, type-checks it, and fails on structural Go clones at the
+six showcase kernels, type-checks them together, and fails on structural Go clones at the
 repository threshold. The committed Go tool directive pins `dupl`; no separate
 global installation is required.
 
@@ -383,7 +383,7 @@ tach-ts          compiler delivery and WebGPU runtime
 examples         maintained language and execution corpus
 browser-test     Chromium WebGPU correctness harness
 spirv-test       native Vulkan correctness harness
-showcase-ts      large GPU and GPU-versus-CPU benchmark harness
+showcase-ts      six-workload large GPU benchmark harness
 ```
 
 ## Releases and license

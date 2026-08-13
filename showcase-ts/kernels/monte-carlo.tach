@@ -1,0 +1,53 @@
+@docs(
+  title("Monte Carlo stochastic integration"),
+  summary("Evolves independent geometric Brownian paths and evaluates discounted option payoffs.")
+);
+
+@docs(
+  summary("Stochastic path and payoff parameters."),
+  field(steps, "Time steps per simulated path."),
+  field(drift, "Per-step risk-neutral drift."),
+  field(diffusion, "Per-step volatility scale."),
+  field(discount, "Discount applied to terminal payoff."),
+  field(strike, "Option strike price.")
+)
+type MonteCarloParams = { steps: uint32, drift: float32, diffusion: float32, discount: float32, strike: float32 };
+
+@docs(
+  summary("Scrambles one integer into a deterministic nonzero random state."),
+  param(value, "Path-derived seed."),
+  returns("Scrambled random state.")
+)
+function scramble(value: uint32): uint32 {
+  let state = value + 0x9e37_79b9;
+  state = (state ^ (state >> 16)) * 0x7feb_352d;
+  state = (state ^ (state >> 15)) * 0x846c_a68b;
+  return state ^ (state >> 16);
+}
+
+@docs(
+  summary("Simulates one stochastic path with Box-Muller Gaussian shocks."),
+  coordinate(path, "Independent path index."),
+  param(payoffs, "Discounted terminal call payoffs."),
+  param(params, "Path evolution and payoff parameters.")
+)
+export function monteCarloPaths[path](payoffs: buffer<float32[]>, params: MonteCarloParams) {
+  if (path < payoffs.length) {
+    let state = scramble(path + 1);
+    let asset = 100.0;
+    for (let step = 0; step < params.steps; step++) {
+      state ^= state << 13;
+      state ^= state >> 17;
+      state ^= state << 5;
+      const first = (float32(state & 0x00ff_ffff) + 1.0) / 16777217.0;
+      state ^= state << 13;
+      state ^= state >> 17;
+      state ^= state << 5;
+      const second = (float32(state & 0x00ff_ffff) + 1.0) / 16777217.0;
+      const gaussian = sqrt(-2.0 * log(first)) * cos(6.283185307 * second);
+      asset *= exp(params.drift + params.diffusion * gaussian);
+    }
+    const payoff = asset - params.strike;
+    payoffs[path] = (payoff > 0.0 ? payoff : 0.0) * params.discount;
+  }
+}

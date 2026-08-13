@@ -1,0 +1,47 @@
+@docs(
+  title("Wave-field physics"),
+  summary("Propagates a large damped two-dimensional wave field through repeated stencil updates.")
+);
+
+@docs(
+  summary("Wave-grid dimensions and integration coefficients."),
+  field(width, "Grid width in cells."),
+  field(height, "Grid height in cells."),
+  field(dt, "Integration time step."),
+  field(stiffness, "Laplacian force coefficient."),
+  field(damping, "Velocity retained per step.")
+)
+type WaveParams = { width: uint32, height: uint32, dt: float32, stiffness: float32, damping: float32 };
+
+@docs(
+  summary("Advances one height-and-velocity cell from its four direct neighbors."),
+  coordinate(i, "Linear grid-cell index."),
+  param(source, "Current height and velocity field."),
+  param(destination, "Next height and velocity field."),
+  param(params, "Grid and integration parameters.")
+)
+function step[i](source: buffer<float32x2[]>, destination: buffer<float32x2[]>, params: WaveParams) {
+  if (i < source.length && i < destination.length) {
+    const x = i % params.width;
+    const y = i / params.width;
+    if (x == 0 || y == 0 || x + 1 == params.width || y + 1 == params.height) {
+      destination[i] = float32x2(0.0, 0.0);
+    } else {
+      const current = source[i];
+      const laplacian = source[i - 1].x + source[i + 1].x + source[i - params.width].x + source[i + params.width].x - current.x * 4.0;
+      const velocity = (current.y + laplacian * params.stiffness * params.dt) * params.damping;
+      destination[i] = float32x2(current.x + velocity * params.dt, velocity);
+    }
+  }
+}
+
+@docs(
+  summary("Advances the wave field by two ping-pong stencil steps."),
+  param(first, "Primary height and velocity field, updated after every pair."),
+  param(second, "Secondary ping-pong field."),
+  param(params, "Grid and integration parameters.")
+)
+export function waveSimulation(first: buffer<float32x2[]>, second: buffer<float32x2[]>, params: WaveParams) {
+  run step(first, second, params) over first.length;
+  run step(second, first, params) over first.length;
+}

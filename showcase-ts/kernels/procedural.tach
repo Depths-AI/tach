@@ -1,0 +1,189 @@
+@docs(
+  title("Procedural world rendering"),
+  summary("Traces, lights, and post-processes a complete 1080p analytic scene entirely on the GPU.")
+);
+
+@docs(
+  summary("Frame dimensions and animation time."),
+  field(width, "Output width in pixels."),
+  field(height, "Output height in pixels."),
+  field(time, "Continuous scene time.")
+)
+type ProceduralParams = { width: uint32, height: uint32, time: float32 };
+
+@docs(
+  summary("Clamps a scalar to zero through one."),
+  param(value, "Value to clamp."),
+  returns("The clamped value.")
+)
+function saturate(value: float32): float32 {
+  return value < 0.0 ? 0.0 : value > 1.0 ? 1.0 : value;
+}
+
+@docs(
+  summary("Computes signed distance to an axis-aligned box."),
+  param(point, "Position relative to the box center."),
+  param(halfSize, "Box half extents."),
+  returns("Signed distance to the box.")
+)
+function boxDistance(point: float32x3, halfSize: float32x3): float32 {
+  const q = abs(point) - halfSize;
+  const outside = length(float32x3(q.x > 0.0 ? q.x : 0.0, q.y > 0.0 ? q.y : 0.0, q.z > 0.0 ? q.z : 0.0));
+  let inside = q.x;
+  if (q.y > inside) { inside = q.y; }
+  if (q.z > inside) { inside = q.z; }
+  return outside + (inside < 0.0 ? inside : 0.0);
+}
+
+@docs(
+  summary("Evaluates the analytic world's nearest signed distance."),
+  param(point, "World-space sample position."),
+  param(time, "Scene animation time."),
+  returns("Distance to the closest surface.")
+)
+function sceneDistance(point: float32x3, time: float32): float32 {
+  const terrain = point.y + 1.05 - sin(point.x * 0.72 + time * 0.18) * 0.16 - cos(point.z * 0.55) * 0.12;
+  const sphere = length(point - float32x3(-1.15 + sin(time * 0.3) * 0.25, -0.05, 3.8)) - 0.82;
+  const tower = boxDistance(point - float32x3(1.2, -0.05, 4.8), float32x3(0.62, 1.0, 0.62));
+  const ringPoint = point - float32x3(0.15, -0.15, 6.2);
+  const ring = length(float32x2(length(ringPoint.xz) - 1.05, ringPoint.y)) - 0.22;
+  let nearest = terrain;
+  if (sphere < nearest) { nearest = sphere; }
+  if (tower < nearest) { nearest = tower; }
+  if (ring < nearest) { nearest = ring; }
+  return nearest;
+}
+
+@docs(
+  summary("Packs linear RGB into opaque RGBA8."),
+  param(color, "Linear RGB value."),
+  returns("Packed RGBA8 pixel.")
+)
+function packColor(color: float32x3): uint32 {
+  const red = uint32(saturate(color.x) * 255.0);
+  const green = uint32(saturate(color.y) * 255.0);
+  const blue = uint32(saturate(color.z) * 255.0);
+  return red | (green << 8) | (blue << 16) | (255 << 24);
+}
+
+@docs(
+  summary("Sphere-traces one camera ray into a compact surface buffer."),
+  coordinate(i, "Linear pixel index."),
+  param(surface, "World position and hit distance per pixel."),
+  param(params, "Frame dimensions and scene time.")
+)
+function trace[i](surface: buffer<float32x4[]>, params: ProceduralParams) {
+    const x = i % params.width;
+    const y = i / params.width;
+    const aspect = float32(params.width) / float32(params.height);
+    const u = (2.0 * (float32(x) + 0.5) / float32(params.width) - 1.0) * aspect;
+    const v = 1.0 - 2.0 * (float32(y) + 0.5) / float32(params.height);
+    const origin = float32x3(0.0, 0.35, -4.2);
+    const direction = normalize(float32x3(u, v, 1.72));
+    let travel = 0.0;
+    let distance = 1.0;
+    let point = origin;
+    let step = 0;
+    while (step < 72 && travel < 18.0 && distance > 0.0018) {
+      point = origin + direction * travel;
+      distance = sceneDistance(point, params.time);
+      travel += distance > 0.0018 ? distance : 0.0018;
+      step++;
+    }
+    const hit = distance <= 0.006 && travel < 18.0;
+    surface[i] = float32x4(point, hit ? travel : -1.0);
+}
+
+@docs(
+  summary("Evaluates normals, soft sunlight, ambient occlusion, material response, and fog."),
+  coordinate(i, "Linear pixel index."),
+  param(surface, "Traced surface samples."),
+  param(hdr, "Linear high-dynamic-range output."),
+  param(params, "Frame dimensions and scene time.")
+)
+function light[i](surface: buffer<float32x4[]>, hdr: buffer<float32x4[]>, params: ProceduralParams) {
+    const sample = surface[i];
+    const y = i / params.width;
+    const skyAmount = float32(y) / float32(params.height);
+    let color = float32x3(0.10 + skyAmount * 0.12, 0.18 + skyAmount * 0.18, 0.32 + skyAmount * 0.24);
+    if (sample.w > 0.0) {
+      const point = sample.xyz;
+      const epsilon = 0.004;
+      const center = sceneDistance(point, params.time);
+      const normal = normalize(float32x3(
+        sceneDistance(point + float32x3(epsilon, 0.0, 0.0), params.time) - center,
+        sceneDistance(point + float32x3(0.0, epsilon, 0.0), params.time) - center,
+        sceneDistance(point + float32x3(0.0, 0.0, epsilon), params.time) - center
+      ));
+      const sun = normalize(float32x3(-0.55, 0.78, -0.32));
+      let shadow = 1.0;
+      let shadowTravel = 0.035;
+      for (let shadowStep = 0; shadowStep < 8; shadowStep++) {
+        const shadowDistance = sceneDistance(point + normal * 0.012 + sun * shadowTravel, params.time);
+        const candidate = 10.0 * shadowDistance / shadowTravel;
+        if (candidate < shadow) { shadow = candidate; }
+        shadowTravel += shadowDistance < 0.025 ? 0.025 : shadowDistance > 0.45 ? 0.45 : shadowDistance;
+      }
+      shadow = saturate(shadow);
+      let occlusion = 0.0;
+      for (let aoStep = 1; aoStep <= 3; aoStep++) {
+        const radius = float32(aoStep) * 0.075;
+        const gap = radius - sceneDistance(point + normal * radius, params.time);
+        occlusion += (gap > 0.0 ? gap : 0.0) / float32(aoStep);
+      }
+      const ambient = saturate(1.0 - occlusion * 2.1);
+      const diffuseRaw = dot(normal, sun);
+      const diffuse = (diffuseRaw > 0.0 ? diffuseRaw : 0.0) * shadow;
+      const view = normalize(float32x3(0.0, 0.35, -4.2) - point);
+      const specularRaw = dot(normal, normalize(sun + view));
+      const specular = pow(specularRaw > 0.0 ? specularRaw : 0.0, 28.0) * shadow;
+      const terrainBands = 0.5 + 0.5 * sin(point.x * 3.7 + point.z * 2.3);
+      const objectBands = 0.5 + 0.5 * sin(point.x * 7.0 + point.y * 4.0 + point.z * 5.0);
+      const base = point.y < -0.72
+        ? float32x3(0.12 + terrainBands * 0.16, 0.23 + terrainBands * 0.22, 0.08)
+        : float32x3(0.18 + objectBands * 0.42, 0.12 + (1.0 - objectBands) * 0.24, 0.22 + objectBands * 0.36);
+      const lit = base * (0.12 + ambient * 0.22 + diffuse * 1.15) + float32x3(1.0, 0.82, 0.58) * specular * 0.65;
+      const fog = saturate(sample.w / 18.0);
+      color = lit * (1.0 - fog * 0.62) + float32x3(0.16, 0.23, 0.34) * fog * 0.62;
+    }
+    hdr[i] = float32x4(color, 1.0);
+}
+
+@docs(
+  summary("Applies a spatial reconstruction filter, tone mapping, and vignette."),
+  coordinate(i, "Linear pixel index."),
+  param(hdr, "Linear frame produced by lighting."),
+  param(pixels, "Packed display frame."),
+  param(params, "Frame dimensions.")
+)
+function post[i](hdr: buffer<float32x4[]>, pixels: buffer<uint32[]>, params: ProceduralParams) {
+  if (i < pixels.length) {
+    const x = i % params.width;
+    const y = i / params.width;
+    const left = hdr[x > 0 ? i - 1 : i].xyz;
+    const right = hdr[x + 1 < params.width ? i + 1 : i].xyz;
+    const up = hdr[y > 0 ? i - params.width : i].xyz;
+    const down = hdr[y + 1 < params.height ? i + params.width : i].xyz;
+    const center = hdr[i].xyz;
+    const blur = (left + right + up + down) * 0.125 + center * 0.5;
+    let color = center * 1.12 - blur * 0.12;
+    color = color / (color + 1.0);
+    const nx = float32(x) / float32(params.width) * 2.0 - 1.0;
+    const ny = float32(y) / float32(params.height) * 2.0 - 1.0;
+    const vignette = saturate(1.08 - (nx * nx + ny * ny) * 0.24);
+    pixels[i] = packColor(sqrt(color) * vignette);
+  }
+}
+
+@docs(
+  summary("Renders one complete procedural world frame."),
+  param(pixels, "Packed 1080p output frame."),
+  param(params, "Frame dimensions and animation time.")
+)
+export function proceduralWorld(pixels: buffer<uint32[]>, params: ProceduralParams) {
+  const surface = transient<float32x4>(pixels.length);
+  const hdr = transient<float32x4>(pixels.length);
+  run trace(surface, params) over pixels.length;
+  run light(surface, hdr, params) over pixels.length;
+  run post(hdr, pixels, params) over pixels.length;
+}

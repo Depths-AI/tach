@@ -3,22 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "license": "AGPL-3.0-only",
-  "description": "Pure TypeScript showcase for Tach-generated WebGPU kernels",
+  "description": "Large GPU workload showcase for Tach and WebGPU",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "kernel": "node scripts/build-kernel.mjs",
+    "kernel": "node scripts/build-kernels.mjs",
     "check": "npm run kernel && tsc --noEmit",
     "build": "npm run check && vite build",
-    "dev": "npm run kernel && vite",
     "install:browser": "playwright install chromium",
-    "preview": "vite preview",
-    "test": "npm run benchmark:cpu",
-    "benchmark": "npm run benchmark:gpu && npm run benchmark:cpu",
-    "benchmark:gpu": "npm run build && playwright test --config=playwright.gpu.config.mjs",
-    "benchmark:cpu": "npm run build && playwright test --config=playwright.cpu.config.mjs"
+    "benchmark": "npm run build && playwright test",
+    "test": "npm run benchmark"
   },
   "dependencies": {
     "@depths/tach": "0.0.0"
