@@ -70,6 +70,59 @@ Declaration order does not matter. A function may call a helper written later,
 and a type may refer to another type written later. Recursive value types and
 recursive function calls are rejected.
 
+### Documentation and comments
+
+Use structured `@docs(...)` attributes for public-facing documentation. A
+standalone attribute before every declaration documents the whole file:
+
+```tach
+@docs(
+  title("Particle simulation"),
+  summary("Types and kernels for advancing particles on the GPU.")
+);
+
+@docs(
+  summary("Particle state."),
+  field(position, "World-space position."),
+  field(velocity, "World-space velocity.")
+)
+type Particle = {
+  position: float32x4,
+  velocity: float32x4,
+};
+
+@docs(
+  summary("Advances every particle."),
+  coordinate(i, "Zero-based particle index."),
+  param(particles, "Particle state updated in place.")
+)
+export function step[i](particles: buffer<Particle[]>) {
+  // Rounded-up launches may pass the logical end.
+  if (i < particles.length) {
+    particles[i].position += particles[i].velocity;
+  }
+}
+```
+
+Every `@docs` requires one `summary`. File documentation also accepts one
+optional `title`; types accept `field(name, "...")`; functions accept
+`param(name, "...")`, `coordinate(name, "...")`, and `returns("...")` for a
+non-void result. Names are identifiers rather than strings, so unknown and
+duplicate references are compile errors. Descriptions are optional per member;
+Tach infers types and GPU-buffer read/write context instead of asking authors
+to repeat them.
+
+Generated `.d.ts` files carry the documentation into JavaScript and TypeScript
+editors. `tach docs FILE.tach` writes Markdown to standard output, including a
+TypeScript usage example generated from the compiler-validated API:
+
+```sh
+npx tach docs kernels/particles.tach > particles.md
+```
+
+Use `//` for disposable implementation notes. It is the only inline comment
+form; block comments are intentionally not part of Tach.
+
 ### Helpers
 
 Helpers operate only on values:
@@ -633,15 +686,11 @@ digits, or `_`. Public type, kernel, and parameter names emitted to
 JavaScript/TypeScript must also be portable ASCII identifiers and avoid
 reserved host-language names.
 
-Whitespace is insignificant. Line comments and nested block comments are
-supported:
+Whitespace is insignificant. Only single-line comments are supported:
 
 ```text
 // one line
 
-/* outer
-   /* nested */
-*/
 ```
 
 Statements end with `;`. Parameter and object-literal lists accept a trailing
@@ -664,17 +713,19 @@ claiming a representation that one target cannot honor.
 This EBNF summarizes syntax. The type and semantic rules above still apply:
 
 ```text
-module        := { declaration }
-declaration   := type-decl | helper-decl | kernel-decl
+module        := [docs-attribute ";"] { declaration }
+declaration   := {attribute} (type-decl | function-decl)
 
 type-decl     := "type" IDENT "=" "{" fields "}" [";"]
 fields        := field {field-separator field} [field-separator]
 field         := IDENT ":" type
 field-separator := "," | ";"
 
-helper-decl   := "function" IDENT parameters [":" type] block
-kernel-decl   := {attribute} "export" "function" IDENT indices parameters block
+function-decl := ["export"] "function" IDENT [indices] parameters [":" type] block
 attribute     := "@" "workgroup" "(" NUMBER {"," NUMBER} ")"
+               | docs-attribute
+docs-attribute := "@" "docs" "(" docs-clause {"," docs-clause} ")"
+docs-clause  := IDENT "(" [IDENT ","] STRING ")"
 indices       := "[" IDENT {"," IDENT} "]"
 parameters    := "(" [parameter {"," parameter} [","]] ")"
 parameter     := IDENT ":" type
@@ -709,7 +760,7 @@ return-statement := "return" [expression]
 
 expression    := primary {postfix} {binary-op expression}
                  ["?" expression ":" expression]
-primary       := NUMBER | "true" | "false" | IDENT
+primary       := NUMBER | STRING | "true" | "false" | IDENT
                | ("!" | "-" | "~") expression
                | "(" expression ")"
                | struct-literal

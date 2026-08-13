@@ -16,8 +16,70 @@ type ShapeID uint32
 type DispatchID uint32
 
 type Module struct {
-	Kernel   *ir.Module
-	Programs []*Program
+	Kernel        *ir.Module
+	Programs      []*Program
+	Documentation Documentation
+}
+
+type Documentation struct {
+	Title     string
+	Summary   string
+	Types     map[string]TypeDocumentation
+	Functions map[string]FunctionDocumentation
+}
+type TypeDocumentation struct {
+	Summary string
+	Fields  map[string]string
+}
+type FunctionDocumentation struct {
+	Summary     string
+	Parameters  map[string]string
+	Coordinates map[string]string
+	Returns     string
+}
+
+type ResourceAccess uint8
+
+const (
+	ReadAccess ResourceAccess = iota + 1
+	WriteAccess
+	ReadWriteAccess
+	AtomicAccess
+)
+
+func (a ResourceAccess) String() string {
+	return [...]string{"", "read", "write", "readWrite", "atomic"}[a]
+}
+
+func (m *Module) ProgramAccess(program *Program) map[ResourceID]ResourceAccess {
+	type mode struct{ read, write, atomic bool }
+	modes := map[ResourceID]mode{}
+	for _, dispatch := range program.Dispatches {
+		stage := m.Kernel.Function(dispatch.Stage)
+		if stage == nil {
+			continue
+		}
+		summary := ir.AnalyzeAccess(stage)
+		for _, argument := range dispatch.Buffers {
+			current, buffer := modes[argument.Resource], summary.Buffers[argument.Formal]
+			current.read, current.write, current.atomic = current.read || buffer.Read, current.write || buffer.Write, current.atomic || buffer.Atomic
+			modes[argument.Resource] = current
+		}
+	}
+	out := map[ResourceID]ResourceAccess{}
+	for resource, mode := range modes {
+		switch {
+		case mode.atomic:
+			out[resource] = AtomicAccess
+		case mode.read && mode.write:
+			out[resource] = ReadWriteAccess
+		case mode.write:
+			out[resource] = WriteAccess
+		default:
+			out[resource] = ReadAccess
+		}
+	}
+	return out
 }
 
 type ParameterKind uint8

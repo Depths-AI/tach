@@ -355,6 +355,7 @@ The package exposes the native compiler as `tach`:
 ```text
 tach build [--target web|spirv|all] FILE.tach
 tach check [--target web|spirv|all] FILE.tach
+tach docs FILE.tach
 tach ir FILE.tach
 tach wgsl FILE.tach
 tach spirv-dis FILE.tach
@@ -365,6 +366,10 @@ Both commands default to `web`. A web build writes `.wgsl`, `.js`, and `.d.ts`;
 `--target spirv` writes only `.spv`; `--target all` writes those artifacts plus
 `.tir` and `.spvasm` diagnostics. Rebuilding the same module
 removes stale Tach artifacts outside the newly selected target.
+
+`docs` writes Markdown to standard output. Structured source documentation is
+also emitted as JSDoc in `.d.ts`; the Markdown includes a TypeScript usage
+example generated from the same compiler-validated signatures.
 
 Published packages support Linux, macOS, and Windows on x64 and arm64. The
 installer selects the release asset for the package version and verifies its

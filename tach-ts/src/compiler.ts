@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 import { normalizeError, TachError } from "./error.js";
+import { renderDocumentation, type Documentation } from "./docs.js";
 
 export interface CompilerRunOptions {
   readonly cwd?: string;
@@ -193,11 +194,19 @@ export async function runCompiler(
   args: readonly string[],
   options: CompilerRunOptions = {},
 ): Promise<CompilerRun> {
+  const documentation = args[0] === "docs";
+  if (documentation && args.length !== 2) {
+    throw new TachError(
+      "compiler-execution",
+      "tach docs expects exactly one .tach file",
+      { operation: "compiler" },
+    );
+  }
   const path = await compilerPath();
 
   let child;
   try {
-    child = spawn(path, [...args], {
+    child = spawn(path, documentation ? ["describe", args[1]!] : [...args], {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       stdio: ["ignore", "pipe", "pipe"],
@@ -206,18 +215,27 @@ export async function runCompiler(
     throw normalizeError(cause, "compiler-execution", "compiler");
   }
   return new Promise((resolveRun, rejectRun) => {
-    const stdout: Uint8Array[] = [];
-    const stderr: Uint8Array[] = [];
-    child.stdout.on("data", (chunk: Uint8Array) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Uint8Array) => stderr.push(chunk));
+    const stdoutChunks: Uint8Array[] = [];
+    const stderrChunks: Uint8Array[] = [];
+    child.stdout.on("data", (chunk: Uint8Array) => stdoutChunks.push(chunk));
+    child.stderr.on("data", (chunk: Uint8Array) => stderrChunks.push(chunk));
     child.once("error", (cause) => {
       rejectRun(normalizeError(cause, "compiler-execution", "compiler"));
     });
     child.once("close", (code, signal) => {
+      let stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      if (code === 0 && documentation) {
+        try {
+          stdout = renderDocumentation(JSON.parse(stdout) as Documentation);
+        } catch (cause) {
+          rejectRun(normalizeError(cause, "compiler-execution", "docs"));
+          return;
+        }
+      }
       const output = {
         path,
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
+        stdout,
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
       };
       if (code === 0) {
         resolveRun(output);

@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"tach/src/ast"
@@ -57,12 +58,20 @@ func (p *Parser) module() (*ast.Module, error) {
 		if err != nil {
 			return nil, err
 		}
+		if p.at(lexer.Semicolon) {
+			if len(attrs) == 0 {
+				return nil, p.err(p.cur(), "unexpected ';'")
+			}
+			if len(m.Decls) > 0 {
+				return nil, p.err(p.cur(), "module documentation must precede declarations")
+			}
+			m.Attrs = append(m.Attrs, attrs...)
+			p.take()
+			continue
+		}
 		switch {
 		case p.text("type"):
-			if len(attrs) > 0 {
-				return nil, p.err(p.cur(), "attributes are not supported on type declarations")
-			}
-			d, err := p.typeDecl()
+			d, err := p.typeDecl(attrs)
 			if err != nil {
 				return nil, err
 			}
@@ -113,7 +122,7 @@ func (p *Parser) attrs() ([]ast.Attribute, error) {
 	}
 	return out, nil
 }
-func (p *Parser) typeDecl() (*ast.TypeDecl, error) {
+func (p *Parser) typeDecl(attrs []ast.Attribute) (*ast.TypeDecl, error) {
 	start := p.take().Span
 	name, err := p.expect(lexer.Ident)
 	if err != nil {
@@ -125,7 +134,7 @@ func (p *Parser) typeDecl() (*ast.TypeDecl, error) {
 	if _, err = p.expect(lexer.LBrace); err != nil {
 		return nil, err
 	}
-	d := &ast.TypeDecl{Name: name.Text}
+	d := &ast.TypeDecl{Name: name.Text, Attrs: attrs}
 	for !p.at(lexer.RBrace) {
 		fn, err := p.expect(lexer.Ident)
 		if err != nil {
@@ -663,6 +672,14 @@ func (p *Parser) prefix() (ast.Expr, error) {
 	case lexer.Number:
 		p.take()
 		x = &ast.NumberExpr{Raw: t.Text, Span: t.Span}
+	case lexer.String:
+		p.take()
+		var value string
+		err := json.Unmarshal([]byte(t.Text), &value)
+		if err != nil {
+			return nil, p.err(t, "invalid string: %v", err)
+		}
+		x = &ast.StringExpr{Value: value, Span: t.Span}
 	case lexer.Ident:
 		p.take()
 		if t.Text == "true" || t.Text == "false" {

@@ -61,11 +61,7 @@ func CompileTarget(sourceName, source string, target BuildTarget) (*Result, erro
 	if _, err := ParseBuildTarget(string(target)); err != nil {
 		return nil, err
 	}
-	astModule, err := parser.Parse(sourceName, source)
-	if err != nil {
-		return nil, err
-	}
-	module, err := sema.CheckAndLower(astModule)
+	module, err := lower(sourceName, source)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +104,34 @@ func CompileTarget(sourceName, source string, target BuildTarget) (*Result, erro
 	}
 	result.JavaScript, result.TypeScript, result.Metadata = generated.JavaScript, generated.Declarations, generated.MetadataJSON
 	return result, nil
+}
+
+func Describe(sourceName, source string) ([]byte, error) {
+	module, err := lower(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	return bindings.Describe(module, sourceName)
+}
+
+func lower(sourceName, source string) (*flow.Module, error) {
+	astModule, err := parser.Parse(sourceName, source)
+	if err != nil {
+		return nil, err
+	}
+	module, err := sema.CheckAndLower(astModule)
+	if err != nil {
+		return nil, err
+	}
+	return module, nil
+}
+
+func DescribeFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return Describe(path, string(data))
 }
 
 func CompileFile(path string) (*Result, error) {

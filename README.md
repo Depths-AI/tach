@@ -239,6 +239,7 @@ tach build FILE.tach
 tach build --target spirv FILE.tach
 tach build --target all FILE.tach
 tach check [--target web|spirv|all] FILE.tach
+tach docs FILE.tach
 tach ir FILE.tach
 tach wgsl FILE.tach
 tach spirv-dis FILE.tach

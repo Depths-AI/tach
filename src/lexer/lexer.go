@@ -74,32 +74,6 @@ func (l *Lexer) skipSpaceAndComments() error {
 			}
 			continue
 		}
-		if r == '/' && l.peekN(n) == '*' {
-			start := l.pos()
-			l.advance()
-			l.advance()
-			depth := 1
-			for depth > 0 {
-				r, n = l.peek()
-				if n == 0 {
-					return &source.Error{Span: l.span(start), Message: "unterminated block comment"}
-				}
-				if r == '/' && l.peekN(n) == '*' {
-					l.advance()
-					l.advance()
-					depth++
-					continue
-				}
-				if r == '*' && l.peekN(n) == '/' {
-					l.advance()
-					l.advance()
-					depth--
-					continue
-				}
-				l.advance()
-			}
-			continue
-		}
 		return nil
 	}
 }
@@ -206,6 +180,25 @@ func (l *Lexer) Next() (Token, error) {
 			return Token{}, &source.Error{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 		}
 		return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
+	}
+	if r == '"' {
+		l.advance()
+		for {
+			r, _ = l.peek()
+			if r == 0 || r == '\n' {
+				return Token{}, &source.Error{Span: l.span(start), Message: "unterminated string"}
+			}
+			l.advance()
+			if r == '"' {
+				return Token{Kind: String, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
+			}
+			if r == '\\' {
+				if next, _ := l.peek(); next == 0 || next == '\n' {
+					return Token{}, &source.Error{Span: l.span(start), Message: "unterminated string"}
+				}
+				l.advance()
+			}
+		}
 	}
 	one := func(k Kind) (Token, error) {
 		l.advance()

@@ -1,6 +1,17 @@
+@docs(
+  title("Bitwise operations"),
+  summary("Exercises portable unsigned, signed, compound, and masked-shift behavior.")
+);
+
+@docs(
+  summary("Combines logical and arithmetic shifts with bitwise operators."),
+  coordinate(i, "Output element index."),
+  param(out, "Results written for every in-range invocation.")
+)
 export function bitwise[i](out: buffer<uint32[]>) {
   let u: uint32 = 0xff00;
   let s: int32 = -64;
+  // Tach masks 32-bit shift counts, so these exercise wrapped counts 8, 4, and 3.
   const left = u << 40;
   const logical = u >> 36;
   const arithmetic = s >> 35;

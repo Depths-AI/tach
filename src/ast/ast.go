@@ -6,6 +6,7 @@ type Node interface{ GetSpan() source.Span }
 
 type Module struct {
 	File  string
+	Attrs []Attribute
 	Decls []Decl
 }
 type Decl interface {
@@ -23,6 +24,7 @@ func (a Attribute) GetSpan() source.Span { return a.Span }
 
 type TypeDecl struct {
 	Name   string
+	Attrs  []Attribute
 	Fields []Field
 	Span   source.Span
 }
@@ -232,6 +234,14 @@ type NumberExpr struct {
 
 func (*NumberExpr) exprNode()              {}
 func (e *NumberExpr) GetSpan() source.Span { return e.Span }
+
+type StringExpr struct {
+	Value string
+	Span  source.Span
+}
+
+func (*StringExpr) exprNode()              {}
+func (e *StringExpr) GetSpan() source.Span { return e.Span }
 
 type BoolExpr struct {
 	Value bool

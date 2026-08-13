@@ -473,8 +473,13 @@ func emitDeclarations(logical *flow.Module) (string, error) {
 		if err := validateExportName(t.Name); err != nil {
 			return "", err
 		}
+		doc := logical.Documentation.Types[t.Name]
+		writeJSDoc(&b, "", doc.Summary, nil)
 		fmt.Fprintf(&b, "export type %s = {\n", t.Name)
 		for _, field := range t.Fields {
+			if description := doc.Fields[field.Name]; description != "" {
+				writeJSDoc(&b, "  ", description, nil)
+			}
 			fmt.Fprintf(&b, "  readonly %s: %s;\n", tsProperty(field.Name), tsType(field.Type))
 		}
 		b.WriteString("};\n\n")
@@ -483,6 +488,27 @@ func emitDeclarations(logical *flow.Module) (string, error) {
 		if err := validateExportName(program.Name); err != nil {
 			return "", err
 		}
+		doc := logical.Documentation.Functions[program.Name]
+		tags := make([]string, 0, len(program.Parameters)+program.Rank)
+		access := logical.ProgramAccess(program)
+		if stage := logical.Kernel.Function(program.Name); stage != nil {
+			for _, coordinate := range stage.Indices {
+				text := doc.Coordinates[coordinate.Name]
+				if text != "" {
+					tags = append(tags, "@remarks Coordinate `"+coordinate.Name+"`: "+text)
+				}
+			}
+		}
+		for _, parameter := range program.Parameters {
+			description := doc.Parameters[parameter.Name]
+			if parameter.Kind == flow.BufferParameter {
+				description = strings.TrimSpace(bufferContext(access[parameter.Resource]) + " " + description)
+			}
+			if description != "" {
+				tags = append(tags, "@param "+parameter.Name+" "+description)
+			}
+		}
+		writeJSDoc(&b, "", doc.Summary, tags)
 		fmt.Fprintf(&b, "export function %s(\n", program.Name)
 		for _, parameter := range program.Parameters {
 			t := tsType(parameter.Type)
@@ -500,6 +526,32 @@ func emitDeclarations(logical *flow.Module) (string, error) {
 		b.WriteString("): ComputeCommand;\n\n")
 	}
 	return b.String(), nil
+}
+
+func writeJSDoc(b *strings.Builder, indent, summary string, tags []string) {
+	if summary == "" && len(tags) == 0 {
+		return
+	}
+	b.WriteString(indent + "/**\n")
+	for _, entry := range append([]string{summary}, tags...) {
+		for _, line := range strings.Split(entry, "\n") {
+			fmt.Fprintf(b, "%s * %s\n", indent, strings.ReplaceAll(line, "*/", "*\\/"))
+		}
+	}
+	b.WriteString(indent + " */\n")
+}
+
+func bufferContext(access flow.ResourceAccess) string {
+	switch access {
+	case flow.AtomicAccess:
+		return "Atomic GPU buffer."
+	case flow.ReadWriteAccess:
+		return "Read/write GPU buffer."
+	case flow.WriteAccess:
+		return "Output GPU buffer."
+	default:
+		return "Read-only GPU buffer."
+	}
 }
 
 func ValidateGenerated(js, declarations string, metadataJSON []byte) error {

@@ -1,10 +1,22 @@
+@docs(
+  title("Vector lane reduction"),
+  summary("Demonstrates fixed-count loops and dynamic vector-lane indexing.")
+);
+
+@docs(
+  summary("Reduces each consecutive group of four integers into one output element."),
+  coordinate(i, "Four-value group and destination index."),
+  param(data, "Input values whose leading quarter is replaced by group sums.")
+)
 export function reduceLanes[i](data: buffer<uint32[]>) {
   const base = i * 4;
+  // Rounded-up launches can name an incomplete final group.
   if (base + 3 >= data.length) {
     return;
   }
   const values = uint32x4(data[base], data[base + 1], data[base + 2], data[base + 3]);
   let sum = 0;
+  // Dynamic indexing keeps the reduction independent of literal lane names.
   for (let lane = 0; lane < 4; lane++) {
     sum += values[lane];
   }

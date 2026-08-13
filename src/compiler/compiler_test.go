@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,30 @@ func TestBuildTargetsWriteExactArtifacts(t *testing.T) {
 		if got := strings.Join(names, ","); got != test.files {
 			t.Fatalf("%s files = %s, want %s", test.target, got, test.files)
 		}
+	}
+}
+
+func TestDescribeEmitsTargetNeutralDocumentation(t *testing.T) {
+	description, err := Describe("scale.tach", `
+@docs(title("Scale"), summary("Scaling example."));
+@docs(summary("Scales values."), coordinate(i, "Value index."), param(values, "Values."), param(factor, "Multiplier."))
+export function scale[i](values: buffer<float32[]>, factor: float32) { if (i < values.length) { values[i] *= factor; } }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(description, &value); err != nil {
+		t.Fatal(err)
+	}
+	text := string(description)
+	for _, want := range []string{`"schema": 1`, `"title": "Scale"`, `"access": "readWrite"`, `"kind": "runtimeArray"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("description missing %s:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "TypeScript") || strings.Contains(text, "ComputeBuffer") {
+		t.Fatalf("target syntax leaked into description:\n%s", text)
 	}
 }
 

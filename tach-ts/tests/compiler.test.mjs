@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { build, compilerPath, runCompiler } from "../dist/compiler.js";
+
+const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "cli.mjs");
 
 test("the package resolves and runs the repository compiler", async () => {
   const path = await compilerPath();
@@ -12,6 +16,9 @@ test("the package resolves and runs the repository compiler", async () => {
 
   const version = await runCompiler(["version"]);
   assert.match(version.stdout, /^tach /u);
+  const help = spawnSync(process.execPath, [cli, "help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /tach docs FILE\.tach/u);
 });
 
 test("build defaults to web artifacts and can select SPIR-V", async () => {
@@ -77,5 +84,40 @@ test("TACH_BIN must name an executable file", async () => {
     if (previous === undefined) delete process.env.TACH_BIN;
     else process.env.TACH_BIN = previous;
     await rm(directory, { recursive: true });
+  }
+});
+
+test("docs renders and type-checks usage from validated Tach semantics", async () => {
+  const directory = await mkdtemp(join(dirname(fileURLToPath(import.meta.url)), "docs-"));
+  try {
+    const source = join(directory, "scale.tach");
+    await writeFile(source, `
+@docs(title("Scaling kernels"), summary("Typed GPU scaling."));
+@docs(summary("A scale configuration."), field(factor, "Multiplier."))
+type Options = { factor: float32 };
+@docs(summary("Gets the multiplier."), param(options, "Scale configuration."), returns("The configured multiplier."))
+function multiplier(options: Options): float32 { return options.factor; }
+@docs(summary("Scales every value."), coordinate(i, "Value index."), param(values, "Values to update."), param(options, "Scaling options."))
+export function scale[i](values: buffer<float32[]>, options: Options) {
+  if (i < values.length) { values[i] *= multiplier(options); }
+}
+`);
+    await build(source, { cwd: directory });
+    const generated = spawnSync(process.execPath, [cli, "docs", source], { cwd: directory, encoding: "utf8" });
+    assert.equal(generated.status, 0, generated.stderr);
+    assert.match(generated.stdout, /^# Scaling kernels/mu);
+    assert.match(generated.stdout, /GPU buffer · read\/write/u);
+    assert.match(generated.stdout, /## Internal functions[\s\S]*The configured multiplier\./u);
+    assert.match(generated.stdout, /## TypeScript usage/u);
+    assert.match(generated.stdout, /\$size: number[\s\S]*\{ size: \$size \}/u);
+    const snippet = generated.stdout.match(/```ts\n([\s\S]*?)```/u)?.[1];
+    assert.ok(snippet);
+    const example = join(directory, "usage.ts");
+    await writeFile(example, snippet);
+    const tsc = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "node_modules", "typescript", "lib", "tsc.js");
+    const checked = spawnSync(process.execPath, [tsc, "--ignoreConfig", "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext", example], { cwd: directory, encoding: "utf8" });
+    assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

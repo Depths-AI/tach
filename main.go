@@ -23,7 +23,7 @@ Usage:
 Commands:
   build      compile for WebGPU by default; use --target for SPIR-V or diagnostics
   check      validate the WebGPU pipeline by default; use --target for SPIR-V or all
-	 ir         print Flow IR, Kernel IR, and both target executable plans
+  ir         print Flow IR, Kernel IR, and both target executable plans
   wgsl       print generated WGSL
   spirv-dis  print Tach's disassembly of generated SPIR-V
   version    print the Tach CLI version
@@ -42,6 +42,8 @@ func main() {
 		err = build(os.Args[2:])
 	case "check":
 		err = check(os.Args[2:])
+	case "describe":
+		err = describe(os.Args[2:])
 	case "ir":
 		err = oneFile("ir", os.Args[2:], func(r *compiler.Result) error { fmt.Print(r.IR); return nil })
 	case "wgsl":
@@ -62,6 +64,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "tach:", err)
 		os.Exit(1)
 	}
+}
+
+func describe(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("describe expects exactly one .tach file")
+	}
+	description, err := compiler.DescribeFile(args[0])
+	if err == nil {
+		_, err = os.Stdout.Write(description)
+	}
+	return err
 }
 
 func build(args []string) error {

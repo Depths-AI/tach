@@ -89,6 +89,9 @@ func CheckAndLower(m *ast.Module) (*flow.Module, error) {
 	for _, n := range []string{"void", "bool", "int32", "uint32", "float32", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
+	if err := c.checkDocumentation(); err != nil {
+		return nil, err
+	}
 	if err := c.collectTypes(); err != nil {
 		return nil, err
 	}

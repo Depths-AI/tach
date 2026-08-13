@@ -39,3 +39,29 @@ func TestEmptyIndexListIsRejected(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestDocumentationAttributesAttachToTheirContexts(t *testing.T) {
+	module, err := parser.Parse("docs.tach", `
+@docs(title("Particles"), summary("Simulation kernels."));
+@docs(summary("Position and velocity."), field(position, "World position."))
+type Particle = { position: float32x4 };
+@docs(summary("Advance particles."), coordinate(i, "Particle index."), param(particles, "State."))
+export function step[i](particles: buffer<Particle[]>) { }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(module.Attrs) != 1 || len(module.Decls[0].(*ast.TypeDecl).Attrs) != 1 || len(module.Decls[1].(*ast.FunctionDecl).Attrs) != 1 {
+		t.Fatalf("documentation did not attach: %#v", module)
+	}
+}
+
+func TestModuleDocumentationMustComeFirst(t *testing.T) {
+	_, err := parser.Parse("docs.tach", `type X = { value: uint32 }; @docs(summary("Too late."));`)
+	if err == nil || !strings.Contains(err.Error(), "must precede declarations") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := parser.Parse("comments.tach", `/* removed */ export function k[i](out: buffer<uint32[]>) {}`); err == nil {
+		t.Fatal("accepted a block comment")
+	}
+}

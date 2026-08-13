@@ -96,3 +96,17 @@ func TestValidateMetadataRejectsDanglingPlan(t *testing.T) {
 		t.Fatal("accepted dangling physical kernel")
 	}
 }
+
+func TestDocumentationReachesTypeScriptDeclarations(t *testing.T) {
+	artifacts, _ := generateSource(t, `
+@docs(summary("A host-visible value."), field(value, "The stored value."))
+type Item = { value: float32 };
+@docs(summary("Scales items."), coordinate(i, "Item index."), param(items, "Items to update."))
+export function scale[i](items: buffer<Item[]>) { if (i < items.length) { items[i].value *= 2.0; } }
+`, false)
+	for _, want := range []string{"A host-visible value.", "The stored value.", "Scales items.", "@remarks Coordinate `i`: Item index.", "@param items Read/write GPU buffer. Items to update."} {
+		if !strings.Contains(artifacts.Declarations, want) {
+			t.Fatalf("declarations missing %q:\n%s", want, artifacts.Declarations)
+		}
+	}
+}
