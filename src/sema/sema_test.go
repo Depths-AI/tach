@@ -3,22 +3,29 @@ package sema_test
 import (
 	"os"
 	"strings"
+	"testing"
+
+	"tach/src/ast"
 	"tach/src/ir"
 	"tach/src/parser"
 	"tach/src/sema"
-	"testing"
 )
 
 func TestParticlesEndToIR(t *testing.T) {
-	src, err := os.ReadFile("../../examples/particles.tach")
-	if err != nil {
-		t.Fatal(err)
+	var modules []*ast.Module
+	for _, name := range []string{"types", "particles"} {
+		src, err := os.ReadFile("../../examples/simulation/" + name + ".tach")
+		if err != nil {
+			t.Fatal(err)
+		}
+		module, err := parser.Parse("simulation/"+name+".tach", string(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		module.File = "simulation/" + name
+		modules = append(modules, module)
 	}
-	a, err := parser.Parse("particles.tach", string(src))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
+	m, _, err := sema.CheckAndLowerProject(modules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,4 +125,28 @@ export function invalid[i](out: buffer<uint32[]>, value: uint32) {
 	if err == nil || !strings.Contains(err.Error(), "cannot assign to immutable value value") {
 		t.Fatalf("CheckAndLower error = %v, want immutable-parameter diagnostic", err)
 	}
+}
+
+func FuzzSemanticCheckingReturnsSourceDiagnostics(f *testing.F) {
+	for _, seed := range []string{
+		`function twice(x: float32): float32 { return x * 2.0; } export function scale[i](out: buffer<float32[]>) { if (i < out.length) { out[i] = twice(out[i]); } }`,
+		`function copy[i](source: buffer<float32[]>, target: buffer<float32[]>) { target[i] = source[i]; } export function run(source: buffer<float32[]>, target: buffer<float32[]>) { const count = min(source.length, target.length); const scratch = transient<float32>(count); run copy(source, scratch) over count; run copy(scratch, target) over count; }`,
+		`export function invalid[i](out: buffer<uint32[]>) { out[true] = missing; }`,
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		// DECISION: bound one fuzz case at 64 KiB; project tests own larger-file pressure, and this cap can rise with semantic limits.
+		if len(input) > 64<<10 {
+			t.Skip()
+		}
+		module, err := parser.Parse("fuzz.tach", input)
+		if err != nil {
+			return
+		}
+		_, err = sema.CheckAndLower(module)
+		if err != nil && strings.Contains(err.Error(), "internal ") {
+			t.Fatalf("user source reached an internal verifier diagnostic: %v", err)
+		}
+	})
 }

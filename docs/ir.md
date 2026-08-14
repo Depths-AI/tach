@@ -7,10 +7,12 @@ Tach has two target-independent intermediate representations:
 - **Kernel IR** describes the portable work performed by one invocation of an
   indexed stage or helper.
 
-Target lowering combines them into a Web or SPIR-V executable plan containing
-private physical kernels. The `.tir` artifact and `tach ir` print all four
-views: optimized Flow IR, optimized Kernel IR templates, the Web plan, and the
-SPIR-V plan. The text is diagnostic output, not an accepted input language.
+The project frontend resolves imports and merges every kernel into one
+`flow.Module` containing one `ir.Module`. Target lowering combines those
+representations into a Web or SPIR-V executable plan containing private
+physical kernels. IR dump methods remain contributor diagnostics and test
+oracles rather than a public command, emitted artifact, or accepted input
+language.
 
 Kernel authors do not need this notation. Contributors should understand the
 identity boundary:
@@ -18,6 +20,13 @@ identity boundary:
 ```text
 public program -> Flow dispatch -> logical stage -> physical target kernel
 ```
+
+Source-file identity is deliberately absent from symbol names after checking.
+Project-global uniqueness makes an unqualified type or function name a true
+project identity. Imports control which declarations may be resolved while
+lowering a source file; they do not create aliases, qualified symbols, linker
+records, or per-file IR modules. Canonical merge order is module identity,
+kernel identity, then source declaration order.
 
 ## 1. One baseline through every representation
 
@@ -487,6 +496,6 @@ verification, effects, optimization rules, and both backend mappings. New
 multi-dispatch semantics must earn a Flow node, verifier rule, target-plan
 representation, metadata, and both runtime implementations.
 
-Target-only instruction selection, physical layout, dispatch deduplication, or
-future fusion belongs after logical IR. Provider syntax and opcodes never
-become portable meaning merely to enable an optimization.
+Target-only instruction selection, physical layout, and dispatch planning
+belong after logical IR. Provider syntax and opcodes never become portable
+meaning merely to enable an optimization.

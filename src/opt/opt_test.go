@@ -156,7 +156,7 @@ export function integrate[i](
 		t.Fatalf("got %d lazy first-iteration loads, want position and velocity; dt is a kernel value:\n%s", lazyLoads, dump)
 	}
 	loopOffset := strings.Index(dump, "loop params=")
-	if strings.Count(dump, "store &") != 1 || strings.Index(dump[loopOffset:], "store &") < 0 {
+	if strings.Count(dump, "store &") != 1 || !strings.Contains(dump[loopOffset:], "store &") {
 		t.Fatalf("promoted value was not stored exactly once after the loop:\n%s", dump)
 	}
 	tail := dump[loopOffset:]

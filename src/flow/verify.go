@@ -12,7 +12,7 @@ func Verify(m *Module) error {
 		return fmt.Errorf("flow module is missing Kernel IR")
 	}
 	if err := ir.Verify(m.Kernel); err != nil {
-		return fmt.Errorf("Kernel IR: %w", err)
+		return fmt.Errorf("kernel IR: %w", err)
 	}
 	names := map[string]bool{}
 	for i, p := range m.Programs {

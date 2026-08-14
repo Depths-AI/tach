@@ -1,12 +1,12 @@
 @docs(
   title("Math intrinsics"),
-  summary("Exercises Tach's portable scalar and vector mathematics in one kernel.")
+  summary("Exercises Tach's portable scalar and vector mathematics in one kernel."),
 );
 
 @docs(
   summary("Evaluates vector geometry, trigonometry, exponentials, rounding, powers, and clamps."),
   coordinate(i, "Output vector index and numeric input seed."),
-  param(out, "Four-component results for every in-range invocation.")
+  param(out, "Four-component results for every in-range invocation."),
 )
 export function math[i](out: buffer<float32x4[]>) {
   if (i < out.length) {

@@ -49,3 +49,36 @@ func TestDocumentationStringsAndLineComments(t *testing.T) {
 		t.Fatalf("block comment was ignored: tokens=%#v error=%v", block, err)
 	}
 }
+
+func FuzzLexerRecoverySpansStayBounded(f *testing.F) {
+	for _, seed := range []string{"", "// comment\n@docs(summary(\"x\"))", "0xff 1e+ broken", string([]byte{0xff, '\n', 0xfe})} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		// DECISION: bound one fuzz case at 64 KiB; project tests own larger-file pressure, and this cap can rise with lexer limits.
+		if len(input) > 64<<10 {
+			t.Skip()
+		}
+		tokens, diagnostics := LexRecover("fuzz.tach", input)
+		if len(tokens) == 0 || tokens[len(tokens)-1].Kind != EOF {
+			t.Fatal("lexer did not terminate with EOF")
+		}
+		last := 0
+		for _, token := range tokens {
+			if token.Span.Start.Offset < last || token.Span.End.Offset < token.Span.Start.Offset || token.Span.End.Offset > len(input) {
+				t.Fatalf("invalid token span after byte %d: %#v", last, token)
+			}
+			last = token.Span.End.Offset
+			for _, trivia := range token.Leading {
+				if trivia.Span.Start.Offset < 0 || trivia.Span.End.Offset < trivia.Span.Start.Offset || trivia.Span.End.Offset > len(input) {
+					t.Fatalf("invalid trivia span: %#v", trivia)
+				}
+			}
+		}
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Span.Start.Offset < 0 || diagnostic.Span.End.Offset < diagnostic.Span.Start.Offset || diagnostic.Span.End.Offset > len(input) {
+				t.Fatalf("invalid diagnostic span: %#v", diagnostic)
+			}
+		}
+	})
+}

@@ -1,9 +1,10 @@
 # Tach compiler and runtime architecture
 
-Tach has two target-independent IRs, two target executable plans, two shader
-emitters, one canonical host layout, and one managed WebGPU runtime. The split
-keeps baseline syntax small while giving explicit multi-dispatch programs a
-real representation instead of hiding orchestration in generated glue.
+Tach has one project compiler, two target-independent IRs, two target
+executable plans, two shader emitters, one canonical host layout, and one
+managed WebGPU runtime. The split keeps baseline syntax small while giving
+imports and explicit multi-dispatch programs real representations instead of
+hiding orchestration in generated glue.
 
 For exact source rules, read [the language guide](language.md). For internal
 data models, read [the IR guide](ir.md). For bytes and host execution, read
@@ -12,6 +13,7 @@ data models, read [the IR guide](ir.md). For bytes and host execution, read
 The shortest accurate model is:
 
 ```text
+project loading owns filesystem identity, imports, DAGs, and canonical order
 Kernel IR owns per-invocation portable meaning
 Flow IR owns public programs and dispatch dependencies
 target plans own physical kernels, bindings, scratch, and barriers
@@ -32,8 +34,10 @@ Tach is organized around these rules:
 7. Physical kernels are target-owned clones, not public API identities.
 8. Layout, parameter packing, metadata, and runtimes share one ABI plan.
 9. Every emitted artifact is validated at its owning boundary.
-10. Dispatch boundaries are preserved unless a separately proved
-    optimization changes them; inter-stage fusion is not currently present.
+10. Flow dispatch order and boundaries are explicit inputs to target planning.
+11. One project-global declaration namespace feeds one merged IR and one
+    cohesive target artifact set.
+12. Parallel scheduling may change elapsed time, never diagnostics or bytes.
 
 These rules let `export function scale[i]` stay a one-screen beginner feature
 while the compiler internally represents its public command, logical stage,
@@ -42,75 +46,102 @@ private shader entry, launch source, and host resources separately.
 ## 2. End-to-end pipeline
 
 ```text
-.tach source
+nearest tach.json
     |
     v
-lexer -> parser -> source-shaped AST
-                    |
-                    v
-              semantic checking
-               /            \
-              v              v
-       Kernel IR          Flow IR
-  helpers + stages    programs + resources
-       verify          + versions + shapes
-              \              /
-               v            v
-          target-neutral Kernel IR optimization
-                         |
-              +----------+----------+
-              |                     |
-              v                     v
-       Web target planning    SPIR-V target planning
-       + physical kernels     + physical kernels
-       + transients           + transients/barriers
-       + coordinate pass      + coordinate pass
-              |                     |
-              v                     v
-         WGSL emission         SPIR-V emission
-         + validation          + binary validation
-                                    |
-                                    v
-                               disassembly
-              \                     /
-               v                   v
-          JS + TypeScript + metadata
-          + generated-contract validation
+strict manifest + canonical one-tier source discovery
+    |
+    v
+concurrent lexer/recovering parser -> one AST per kernel
+    |
+    v
+imports + global names + kernel DAG + collapsed module DAG
+    |
+    v
+global headers -> direct-import semantic environments
+    |
+    +-------------------------+
+    |                         |
+    v                         v
+Kernel IR                  Flow IR
+helpers + stages      programs + resources
+    verify            + versions + shapes
+    |                         |
+    +------------+------------+
+                 v
+     canonical project merge and optimization
+                 |
+       +---------+---------+
+       |                   |
+       v                   v
+ Web target planning   SPIR-V target planning
+ + physical kernels    + physical kernels
+ + transients          + transients/barriers
+ + coordinate pass     + coordinate pass
+       |                   |
+       v                   v
+ one WGSL module        one SPIR-V module
+ + validation           + binary validation
+       |
+       v
+ one JS module + one declaration module
+ + embedded Web metadata + contract validation
+                 |
+                 v
+ target-neutral project-description JSON
+                 |
+                 v
+ TypeScript Markdown/package rendering and atomic build replacement
 ```
 
-`src/compiler.CompileTarget` orchestrates the pipeline. The front end and
-target-neutral optimizer always run. `web` builds only the Web executable and
-bindings, `spirv` builds only SPIR-V plus metadata, and `all` builds both plans
-and the diagnostic dump/disassembly.
+`src/compiler.Build`, `Check`, and `Describe` are the three internal Go entry
+points used by the private native engine. They share project discovery and the
+same semantic pipeline. `Build` lowers one requested target; `Check` lowers
+and validates both targets in memory; `Describe` stops before optimization and
+backend/binding emission after producing a trustworthy documentation model.
 
 No consumer reparses another artifact to recover meaning. Bindings consume IR
-and executable plans, not WGSL. SPIR-V disassembly decodes emitted bytes, not
-emitter state.
+and executable plans, not WGSL. The SPIR-V validator and diagnostic decoder
+consume emitted bytes, never private emitter state. Contributor diagnostics
+are not part of the public command or build surface.
 
 ## 3. Front end
 
 ### Source, lexer, parser, and AST
 
-`src/source` owns positions, spans, and source errors. `src/lexer` owns Unicode
-identifiers, strings used by `@docs`, suffix-free numbers, line comments,
-punctuation, and operators.
+`src/compiler/project.go` first canonicalizes the nearest project root, parses
+the strict manifest, discovers exactly `<module>/<kernel>.tach`, rejects
+misplaced/case-colliding/physically duplicated sources, and assigns canonical
+forward-slash identities. It resolves imports without concatenating or
+rewriting source, checks project-global declaration uniqueness, and validates
+both dependency DAGs.
+
+`src/source` owns positions, primary and related spans, ordered diagnostic
+sets, and rendering inputs. `src/lexer` owns Unicode identifiers, strings used
+by imports and `@docs`, suffix-free numbers, preserved line-comment trivia,
+punctuation, and operators. Lexing advances after invalid UTF-8 input and
+returns all independently recoverable lexical diagnostics.
 
 `src/parser` builds `src/ast`. The AST retains source roles:
 
-- module and declaration attributes;
+- file and declaration attributes;
+- explicit whole-file imports;
 - types and fields;
 - helpers, indexed stages, and exported functions;
 - ordinary statements and structured control;
 - `run` domains and `transient<T>(length)` expressions; and
-- exact source spans.
+- exact source spans and comment trivia needed by formatting.
 
-The parser decides grammar only. It does not resolve types, decide whether an
+The parser recovers at declaration and statement boundaries so one broken
+kernel does not suppress diagnostics from siblings. It decides grammar only. It does not resolve types, decide whether an
 export is baseline sugar or explicit orchestration, infer resource access, or
 assign target representation.
 
 ### Semantic analysis
 
-`src/sema` is the language authority. Its order matters:
+`src/sema` is the language authority. Project-global names are collected
+before local interfaces or bodies, while each source file receives only its
+own and directly imported declarations. Its order matters:
 
 1. normalize and validate structured documentation;
 2. collect type names, resolve fields, and reject layout-invalid cycles/tails;
@@ -120,6 +151,13 @@ assign target representation.
 6. reject helper recursion and verify Kernel IR;
 7. lower each exported function to a Flow IR public program; and
 8. verify the complete Flow IR module.
+
+Parsing, type-field resolution, signature checking, function lowering, and
+program lowering use bounded goroutines. Results occupy canonical input slots
+and merge only after workers finish, so map iteration and completion order
+cannot affect diagnostics or artifacts. One worker and `GOMAXPROCS` workers
+are byte-for-byte regression-tested; the entire suite also runs under the Go
+race detector.
 
 Lowering happens during checking because concrete choices are coupled to
 meaning. A literal needs a resolved type before it becomes a constant; a
@@ -255,8 +293,8 @@ coordinate. Planning adds a repeat value parameter and wraps the stage body in
 a Kernel IR loop. The public result remains equivalent because invocations do
 not communicate across repetitions.
 
-Other plans retain program repetition. This optimization removes dispatch
-overhead without claiming general kernel fusion.
+Other plans retain program repetition. The internalized case removes repeat
+dispatch overhead while preserving the proved Flow semantics.
 
 ### Transients and barriers
 
@@ -348,7 +386,7 @@ checks.
 
 ## 12. Bindings and documentation
 
-`src/bindings.Generate` consumes the optimized `flow.Module`, requested target
+`src/bindings.Generate` consumes the optimized project-wide `flow.Module`, requested target
 executables, and WGSL text. It creates:
 
 - schema-1 metadata with public programs and target plans;
@@ -369,9 +407,26 @@ Documentation follows a deliberately acyclic path:
   -> Markdown rendering and TypeScript syntax in tach-ts
 ```
 
-The Go compiler describes Tach types, functions, coordinates, buffers,
-access, and returns without importing or spelling TypeScript. `tach-ts` owns
-JSDoc/Markdown presentation and the generated usage sample.
+The Go compiler's schema-2 project description groups canonical kernels by
+module and describes Tach types, function roles, coordinates, buffers, access,
+returns, documentation, project identity, and web-package identity without
+importing or spelling TypeScript. `tach-ts` owns JSDoc/Markdown presentation,
+the generated usage sample, module-document filenames, and npm metadata.
+
+### Artifact transaction
+
+The public TypeScript CLI owns a uniquely named staging directory beside the
+project's fixed `build/` child. The native engine writes only target artifacts
+into the already-created empty stage. TypeScript adds documentation and, for a
+web target, `package.json`; it then checks the exact inventory before any final
+path changes.
+
+Replacement renames the prior build to a sibling backup, renames the complete
+stage into place, and removes the backup only after success. A failed compiler,
+renderer, package validation, inventory check, or pre-commit filesystem action
+leaves the previous complete build untouched. The docs-only route copies the
+current build into a stage, replaces only README/module documentation, and
+commits through the same boundary.
 
 ## 13. WebGPU runtime
 
@@ -409,6 +464,8 @@ The session owns:
 
 | Boundary | Question |
 |---|---|
+| project discovery | Is the nearest manifest strict and every source at one canonical module/kernel identity? |
+| import graphs | Do targets exist, remain directly scoped, and form kernel and module DAGs? |
 | lexer/parser | Is source spelling and grammar valid? |
 | semantic analysis | Do declarations and expressions have valid Tach meaning? |
 | Kernel IR verifier | Are per-invocation values, places, control, and effects sound? |
@@ -418,6 +475,7 @@ The session owns:
 | WGSL validator | Did Tach serialize its supported WGSL shape correctly? |
 | SPIR-V validator | Is the binary structurally, semantically, and ABI valid? |
 | generated validator | Do metadata, JS, declarations, and plans agree? |
+| output transaction | Is the staged inventory complete, confined to this project's `build`, and replaceable as one unit? |
 | browser harness | Does Chromium WebGPU compile and execute generated modules? |
 | native harness | Do `spirv-val` and Vulkan execute target plans correctly? |
 
@@ -427,10 +485,10 @@ compiler's assumptions against real implementations.
 ## 15. Package responsibilities and dependencies
 
 ```text
-src/source       spans and source errors
-src/lexer        tokens
-src/ast          source-shaped nodes
-src/parser       grammar
+src/source       spans and ordered diagnostics
+src/lexer        tokens and preserved line-comment trivia
+src/ast          source-shaped declarations and imports
+src/parser       recovering grammar
 src/types        logical types and domain predicates
 src/ir           Kernel IR, verification, access, uniformity, use counts
 src/flow         Flow IR, resource versions, shapes, verification
@@ -440,11 +498,11 @@ src/layout       canonical host-visible layout
 src/abi          private names and parameter blocks
 src/backend      target executable planning and coordinate lowering
 src/wgsl         WGSL emission and validation
-src/spirv        SPIR-V emission, decoding, validation, disassembly
+src/spirv        SPIR-V emission, decoding, validation, and summaries
 src/bindings     metadata, generated modules/declarations, descriptions
-src/compiler     end-to-end compiler API and artifact writing
-main.go          native CLI
-tach-ts/src      compiler delivery, docs renderer, WebGPU runtime
+src/compiler     project discovery, DAGs, formatting, pipeline, native staging
+main.go          private native machine-operation dispatcher
+tach-ts/src      public CLI orchestration, output transaction, docs, WebGPU runtime
 ```
 
 The dependency graph points from primitive semantics toward orchestration.
@@ -458,17 +516,26 @@ Tests mirror ownership:
 
 - lexer, parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
   binding, and emitter tests cover local contracts and rejection cases;
-- compiler tests check target artifact sets, deterministic cross-target
-  output, documentation descriptions, baseline desugaring, and all maintained
-  examples;
+- compiler tests check strict manifests, one-tier discovery, import visibility,
+  both DAGs, global names, error recovery, formatter transactions, exact target
+  artifact sets, wide one/many-worker determinism, complete multi-file error
+  aggregation, all four function forms, documentation descriptions, and all
+  maintained projects in canonical format;
+- bounded fuzz properties challenge lexer progress and spans, parser recovery
+  determinism, source-facing semantic failures, and formatter token
+  preservation, reparsing, and idempotence;
+- binding tests corrupt each runtime-plan seam, while TypeScript compiler tests
+  challenge exact package shape and build/docs transaction rollback;
 - SPIR-V mutation tests corrupt valid modules and require rejection;
-- `browser-test` compiles all examples and checks generated WebGPU execution;
-- `spirv-test` runs the same corpus through external validation and Vulkan;
-- `showcase-ts` compiles six independent workload modules and measures two
+- `browser-test` builds the example project once and checks every generated
+  endpoint plus the standalone WGSL through WebGPU;
+- `spirv-test` builds one SPIR-V project module and runs every exported program
+  through external validation and Vulkan;
+- `showcase-ts` builds one six-kernel project and measures two
   renderers, two mathematical workloads, and two physics simulations on GPU;
   and
-- `dupl` and `deadcode` provide structural duplication and reachability audits
-  beyond behavioral tests.
+- `dupl`, `deadcode`, and `staticcheck` provide structural duplication,
+  whole-program reachability, and correctness audits beyond behavioral tests.
 
 A shared semantic change belongs first in the lowest owning test and then in
 both executable harnesses when it affects target behavior.

@@ -1,0 +1,32 @@
+@docs(
+  title("Particle integration"),
+  summary("Defines particle data and advances active particles with a reusable value helper."),
+);
+
+import "simulation/types";
+@docs(
+  summary("Advances one particle without mutating the input value."),
+  param(p, "Particle state at the beginning of the step."),
+  param(dt, "Elapsed simulation time."),
+  returns("Particle state at the end of the step."),
+)
+function integrateParticle(p: Particle, dt: float32): Particle {
+  return {
+    position: p.position + p.velocity * dt,
+    velocity: p.velocity,
+  };
+}
+
+@docs(
+  summary("Advances every active particle in place."),
+  coordinate(i, "Particle index."),
+  param(particles, "Particle storage updated by the integration step."),
+  param(params, "Step duration and active-particle count."),
+)
+export function integrate[i](particles: buffer<Particle[]>, params: ParticleParams) {
+  // Dispatches may be rounded beyond the active particle count.
+  if (i >= params.count) {
+    return;
+  }
+  particles[i] = integrateParticle(particles[i], params.dt);
+}

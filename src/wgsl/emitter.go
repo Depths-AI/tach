@@ -95,7 +95,7 @@ func Emit(executable *backend.Executable) (string, error) {
 	}
 	out := e.b.String()
 	if err := Validate(out); err != nil {
-		return "", fmt.Errorf("Tach WGSL self-validation failed: %w", err)
+		return "", fmt.Errorf("tach WGSL self-validation failed: %w", err)
 	}
 	return out, nil
 }

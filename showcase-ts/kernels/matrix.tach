@@ -1,6 +1,6 @@
 @docs(
   title("Dense matrix algebra"),
-  summary("Multiplies large dense square matrices with cooperative workgroup tiling.")
+  summary("Multiplies large dense square matrices with cooperative workgroup tiling."),
 );
 
 @docs(
@@ -10,10 +10,15 @@
   param(left, "Left row-major matrix."),
   param(right, "Right row-major matrix."),
   param(output, "Row-major matrix product."),
-  param(size, "Shared width and height of the square matrices.")
+  param(size, "Shared width and height of the square matrices."),
 )
 @workgroup(16, 16)
-function multiply[column, row](left: buffer<float32[]>, right: buffer<float32[]>, output: buffer<float32[]>, size: uint32) {
+function multiply[column, row](
+  left: buffer<float32[]>,
+  right: buffer<float32[]>,
+  output: buffer<float32[]>,
+  size: uint32,
+) {
   let leftTile: shared<float32[256]>;
   let rightTile: shared<float32[256]>;
   const localColumn = column % 16;
@@ -21,15 +26,21 @@ function multiply[column, row](left: buffer<float32[]>, right: buffer<float32[]>
   const lane = localRow * 16 + localColumn;
   let sum = 0.0;
   for (let tile = 0; tile < size; tile += 16) {
-    leftTile[lane] = row < size && tile + localColumn < size ? left[row * size + tile + localColumn] : 0.0;
-    rightTile[lane] = column < size && tile + localRow < size ? right[(tile + localRow) * size + column] : 0.0;
+    // Both barriers are required before the tile is read and then overwritten.
+    leftTile[lane] = row < size && tile + localColumn < size
+      ? left[row * size + tile + localColumn] : 0.0;
+    rightTile[lane] = column < size && tile + localRow < size
+      ? right[(tile + localRow) * size + column] : 0.0;
     workgroupBarrier();
     for (let offset = 0; offset < 16; offset++) {
-      sum += leftTile[localRow * 16 + uint32(offset)] * rightTile[uint32(offset) * 16 + localColumn];
+      sum += leftTile[localRow * 16 + uint32(offset)]
+        * rightTile[uint32(offset) * 16 + localColumn];
     }
     workgroupBarrier();
   }
-  if (column < size && row < size) { output[row * size + column] = sum; }
+  if (column < size && row < size) {
+    output[row * size + column] = sum;
+  }
 }
 
 @docs(
@@ -37,8 +48,13 @@ function multiply[column, row](left: buffer<float32[]>, right: buffer<float32[]>
   param(left, "Left row-major matrix."),
   param(right, "Right row-major matrix."),
   param(output, "Row-major product matrix."),
-  param(size, "Shared matrix width and height.")
+  param(size, "Shared matrix width and height."),
 )
-export function denseMatrixProduct(left: buffer<float32[]>, right: buffer<float32[]>, output: buffer<float32[]>, size: uint32) {
-  run multiply(left, right, output, size) over [size, size];
+export function denseMatrixProduct(
+  left: buffer<float32[]>,
+  right: buffer<float32[]>,
+  output: buffer<float32[]>,
+  size: uint32,
+) {
+  run multiply(left, right, output, size) over[size, size];
 }

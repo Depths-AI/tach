@@ -490,7 +490,7 @@ func validationError(messages []validationMessage) error {
 		}
 		lines[i] = fmt.Sprintf("[%s] %s", severity, message.message)
 	}
-	return fmt.Errorf("Vulkan validation: %s", strings.Join(lines, "\n"))
+	return fmt.Errorf("vulkan validation: %s", strings.Join(lines, "\n"))
 }
 
 func (h *vulkanHarness) createBuffer(kind string, data []byte) (vk.Buffer, vk.DeviceMemory, vk.DeviceSize, bool, error) {

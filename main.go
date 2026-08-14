@@ -4,148 +4,110 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"tach/src/compiler"
-	"tach/src/spirv"
 )
-
-const usageText = `Tach — lean typed GPGPU compiler
-
-Usage:
-  tach build [--target web|spirv|all] FILE.tach
-  tach check [--target web|spirv|all] FILE.tach
-  tach ir FILE.tach
-  tach wgsl FILE.tach
-  tach spirv-dis FILE.tach
-  tach version
-
-Commands:
-  build      compile for WebGPU by default; use --target for SPIR-V or diagnostics
-  check      validate the WebGPU pipeline by default; use --target for SPIR-V or all
-  ir         print Flow IR, Kernel IR, and both target executable plans
-  wgsl       print generated WGSL
-  spirv-dis  print Tach's disassembly of generated SPIR-V
-  version    print the Tach CLI version
-`
 
 var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usageText)
-		os.Exit(2)
+		fail(fmt.Errorf("private Tach compiler operation is required"))
 	}
 	var err error
 	switch os.Args[1] {
-	case "build":
+	case "_build":
 		err = build(os.Args[2:])
-	case "check":
+	case "_check":
 		err = check(os.Args[2:])
-	case "describe":
-		err = describe(os.Args[2:])
-	case "ir":
-		err = oneFile("ir", os.Args[2:], func(r *compiler.Result) error { fmt.Print(r.IR); return nil })
-	case "wgsl":
-		err = oneFile("wgsl", os.Args[2:], func(r *compiler.Result) error { fmt.Print(r.WGSL); return nil })
-	case "spirv-dis":
-		err = oneFile("spirv-dis", os.Args[2:], func(r *compiler.Result) error { fmt.Print(r.SPIRVAsm); return nil })
-	case "version", "-v", "--version":
-		fmt.Printf("tach %s\n", version)
-		return
-	case "help", "-h", "--help":
-		fmt.Print(usageText)
-		return
+	case "_docs":
+		err = docs(os.Args[2:])
+	case "_fmt":
+		err = format(os.Args[2:])
+	case "_version":
+		if len(os.Args) != 2 {
+			err = fmt.Errorf("_version accepts no arguments")
+		} else {
+			fmt.Println(version)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usageText)
-		os.Exit(2)
+		err = fmt.Errorf("unknown private compiler operation %q", os.Args[1])
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tach:", err)
-		os.Exit(1)
+		fail(err)
 	}
 }
 
-func describe(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("describe expects exactly one .tach file")
+func build(args []string) error {
+	flags := flag.NewFlagSet("_build", flag.ContinueOnError)
+	targetName := flags.String("target", "web", "")
+	output := flags.String("output", "", "")
+	workers := flags.Int("workers", 0, "")
+	if err := flags.Parse(args); err != nil {
+		return err
 	}
-	description, err := compiler.DescribeFile(args[0])
+	if flags.NArg() != 0 || *output == "" {
+		return fmt.Errorf("_build requires --output and no positional arguments")
+	}
+	target, err := compiler.ParseBuildTarget(*targetName)
+	if err != nil {
+		return err
+	}
+	result, err := compiler.Build(".", target, *workers)
 	if err == nil {
-		_, err = os.Stdout.Write(description)
+		err = compiler.WriteNativeArtifacts(result, target, *output)
+	}
+	if err == nil {
+		_, err = os.Stdout.Write(result.Description)
 	}
 	return err
 }
 
-func build(args []string) error {
-	target, path, err := targetFile("build", args)
-	if err != nil {
-		return err
-	}
-	r, err := compiler.CompileFileTarget(path, target)
-	if err != nil {
-		return err
-	}
-	base := filepath.Base(path)
-	base = base[:len(base)-len(filepath.Ext(base))]
-	paths, err := compiler.WriteDirectory(r, "build", base)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("built %s\n", path)
-	for _, p := range paths {
-		fmt.Printf("  %s\n", p)
-	}
-	return nil
-}
-
 func check(args []string) error {
-	target, path, err := targetFile("check", args)
+	workers, err := workerArgs("_check", args)
 	if err != nil {
 		return err
 	}
-	r, err := compiler.CompileFileTarget(path, target)
-	if err != nil {
-		return err
+	result, err := compiler.Check(".", workers)
+	if err == nil {
+		_, err = os.Stdout.Write(result.Description)
 	}
-	fmt.Printf("ok: %s\n", r.SourceName)
-	if target == compiler.TargetWeb || target == compiler.TargetAll {
-		fmt.Printf("  WGSL: %d bytes, validated\n", len(r.WGSL))
-		fmt.Printf("  programs: %d metadata bytes; WGSL executable and bindings validated\n", len(r.Metadata))
-	}
-	if target == compiler.TargetSPIRV || target == compiler.TargetAll {
-		summary, err := spirv.Summary(r.SPIRV)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("  SPIR-V: %d bytes, %s; executable metadata validated\n", len(r.SPIRV), summary)
-	}
-	if target == compiler.TargetAll {
-		fmt.Printf("  diagnostics: optimized Flow/Kernel IR, target plans, and SPIR-V disassembly generated\n")
-	}
-	return nil
+	return err
 }
 
-func targetFile(command string, args []string) (compiler.BuildTarget, string, error) {
-	flags := flag.NewFlagSet(command, flag.ContinueOnError)
-	targetName := flags.String("target", "web", "target: web, spirv, or all")
+func docs(args []string) error {
+	workers, err := workerArgs("_docs", args)
+	if err != nil {
+		return err
+	}
+	result, err := compiler.Describe(".", workers)
+	if err == nil {
+		_, err = os.Stdout.Write(result.Description)
+	}
+	return err
+}
+
+func format(args []string) error {
+	workers, err := workerArgs("_fmt", args)
+	if err != nil {
+		return err
+	}
+	return compiler.Format(".", workers)
+}
+
+func workerArgs(operation string, args []string) (int, error) {
+	flags := flag.NewFlagSet(operation, flag.ContinueOnError)
+	workers := flags.Int("workers", 0, "")
 	if err := flags.Parse(args); err != nil {
-		return "", "", err
+		return 0, err
 	}
-	if flags.NArg() != 1 {
-		return "", "", fmt.Errorf("%s expects exactly one .tach file", command)
+	if flags.NArg() != 0 {
+		return 0, fmt.Errorf("%s accepts no positional arguments", operation)
 	}
-	target, err := compiler.ParseBuildTarget(*targetName)
-	return target, flags.Arg(0), err
+	return *workers, nil
 }
 
-func oneFile(command string, args []string, fn func(*compiler.Result) error) error {
-	if len(args) != 1 {
-		return fmt.Errorf("%s expects exactly one .tach file", command)
-	}
-	r, err := compiler.CompileFile(args[0])
-	if err != nil {
-		return err
-	}
-	return fn(r)
+func fail(err error) {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
 }

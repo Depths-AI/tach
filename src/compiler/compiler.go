@@ -1,18 +1,13 @@
 package compiler
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
+	"tach/src/ast"
 	"tach/src/backend"
 	"tach/src/bindings"
 	"tach/src/flow"
-	"tach/src/ir"
 	"tach/src/opt"
-	"tach/src/parser"
 	"tach/src/sema"
 	"tach/src/spirv"
 	"tach/src/wgsl"
@@ -23,188 +18,92 @@ type BuildTarget string
 const (
 	TargetWeb   BuildTarget = "web"
 	TargetSPIRV BuildTarget = "spirv"
-	TargetAll   BuildTarget = "all"
 )
 
 func ParseBuildTarget(name string) (BuildTarget, error) {
 	target := BuildTarget(name)
-	switch target {
-	case TargetWeb, TargetSPIRV, TargetAll:
-		return target, nil
-	default:
-		return "", fmt.Errorf("unknown build target %q (want web, spirv, or all)", name)
+	if target != TargetWeb && target != TargetSPIRV {
+		return "", fmt.Errorf("unknown build target %q (want web or spirv)", name)
 	}
+	return target, nil
 }
 
-// Result contains the validated artifacts requested from one Tach compilation.
 type Result struct {
-	SourceName string
-	IR         string
-	WGSL       string
-	SPIRV      []byte
-	SPIRVAsm   string
-	JavaScript string
-	TypeScript string
-	Metadata   []byte
-	target     BuildTarget
+	Module      *flow.Module
+	WGSL        string
+	SPIRV       []byte
+	JavaScript  string
+	TypeScript  string
+	Metadata    []byte
+	Description []byte
 }
 
-// Compile runs the complete Tach pipeline: parsing, semantic analysis,
-// structured SSA-ish IR verification, WGSL generation+validation, SPIR-V
-// generation+binary validation, SPIR-V disassembly, and binding generation.
-func Compile(sourceName, source string) (*Result, error) {
-	return CompileTarget(sourceName, source, TargetAll)
-}
-
-// CompileTarget runs only the backends and generators required by target.
-func CompileTarget(sourceName, source string, target BuildTarget) (*Result, error) {
+func Build(cwd string, target BuildTarget, workers int) (*Result, error) {
 	if _, err := ParseBuildTarget(string(target)); err != nil {
 		return nil, err
 	}
-	module, err := lower(sourceName, source)
+	return compile(cwd, target == TargetWeb, target == TargetSPIRV, true, workers)
+}
+
+func Check(cwd string, workers int) (*Result, error) {
+	return compile(cwd, true, true, true, workers)
+}
+
+func Describe(cwd string, workers int) (*Result, error) {
+	return compile(cwd, false, false, false, workers)
+}
+
+func compile(cwd string, web, spv, optimize bool, workers int) (*Result, error) {
+	project, err := loadProject(cwd, workers)
 	if err != nil {
 		return nil, err
 	}
-	if err := opt.OptimizeLogical(module); err != nil {
-		return nil, fmt.Errorf("IR optimization: %w", err)
+	modules := make([]*ast.Module, len(project.Kernels))
+	for i := range project.Kernels {
+		modules[i] = project.Kernels[i].AST
 	}
-
-	result := &Result{SourceName: sourceName, target: target}
+	logical, documentation, err := sema.CheckAndLowerProject(modules, workers)
+	if err != nil {
+		return nil, project.semanticError(err)
+	}
+	for i := range project.Kernels {
+		project.Kernels[i].Documentation = documentation[i]
+	}
+	if optimize {
+		if err := opt.OptimizeLogical(logical); err != nil {
+			return nil, fmt.Errorf("IR optimization: %w", err)
+		}
+	}
+	result := &Result{Module: logical}
 	var webExecutable, spirvExecutable *backend.Executable
-	if target == TargetWeb || target == TargetAll {
-		webExecutable, err = wgsl.Lower(module)
-		if err != nil {
-			return nil, fmt.Errorf("Web executable planning: %w", err)
+	if web {
+		webExecutable, err = wgsl.Lower(logical)
+		if err == nil {
+			result.WGSL, err = wgsl.Emit(webExecutable)
 		}
-		result.WGSL, err = wgsl.Emit(webExecutable)
 		if err != nil {
-			return nil, fmt.Errorf("WGSL backend: %w", err)
+			return nil, fmt.Errorf("web backend: %w", err)
 		}
 	}
-	if target == TargetSPIRV || target == TargetAll {
-		spirvExecutable, err = spirv.Lower(module)
-		if err != nil {
-			return nil, fmt.Errorf("SPIR-V executable planning: %w", err)
+	if spv {
+		spirvExecutable, err = spirv.Lower(logical)
+		if err == nil {
+			result.SPIRV, err = spirv.Emit(spirvExecutable)
 		}
-		result.SPIRV, err = spirv.Emit(spirvExecutable)
 		if err != nil {
 			return nil, fmt.Errorf("SPIR-V backend: %w", err)
 		}
 	}
-	if target == TargetAll {
-		result.IR = "=== optimized logical program ===\n" + flow.Dump(module) + "=== kernel templates ===\n" + ir.Dump(module.Kernel) + "=== web executable ===\n" + backend.Dump(webExecutable) + "=== spirv executable ===\n" + backend.Dump(spirvExecutable)
-		result.SPIRVAsm, err = spirv.Disassemble(result.SPIRV)
+	if web || spv {
+		generated, err := bindings.Generate(logical, webExecutable, spirvExecutable, result.WGSL)
 		if err != nil {
-			return nil, fmt.Errorf("SPIR-V disassembly: %w", err)
+			return nil, fmt.Errorf("bindings: %w", err)
 		}
+		result.JavaScript, result.TypeScript, result.Metadata = generated.JavaScript, generated.Declarations, generated.MetadataJSON
 	}
-	generated, err := bindings.Generate(module, webExecutable, spirvExecutable, result.WGSL)
+	result.Description, err = bindings.DescribeProject(logical, project.description())
 	if err != nil {
-		return nil, fmt.Errorf("bindings: %w", err)
+		return nil, fmt.Errorf("description: %w", err)
 	}
-	result.JavaScript, result.TypeScript, result.Metadata = generated.JavaScript, generated.Declarations, generated.MetadataJSON
 	return result, nil
-}
-
-func Describe(sourceName, source string) ([]byte, error) {
-	module, err := lower(sourceName, source)
-	if err != nil {
-		return nil, err
-	}
-	return bindings.Describe(module, sourceName)
-}
-
-func lower(sourceName, source string) (*flow.Module, error) {
-	astModule, err := parser.Parse(sourceName, source)
-	if err != nil {
-		return nil, err
-	}
-	module, err := sema.CheckAndLower(astModule)
-	if err != nil {
-		return nil, err
-	}
-	return module, nil
-}
-
-func DescribeFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return Describe(path, string(data))
-}
-
-func CompileFile(path string) (*Result, error) {
-	return CompileFileTarget(path, TargetAll)
-}
-
-func CompileFileTarget(path string, target BuildTarget) (*Result, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return CompileTarget(path, string(data), target)
-}
-
-// WriteDirectory writes exactly the requested, already-validated artifact set.
-func WriteDirectory(result *Result, dir, base string) ([]string, error) {
-	if result == nil {
-		return nil, fmt.Errorf("nil compilation result")
-	}
-	if base == "" {
-		base = sourceBase(result.SourceName)
-	}
-	if dir == "" {
-		dir = "."
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	if _, err := ParseBuildTarget(string(result.target)); err != nil {
-		return nil, fmt.Errorf("compilation result has invalid build target %q", result.target)
-	}
-	artifacts := []struct {
-		name   string
-		data   []byte
-		target BuildTarget
-	}{
-		{base + ".tir", []byte(result.IR), TargetAll},
-		{base + ".wgsl", []byte(result.WGSL), TargetWeb},
-		{base + ".spv", result.SPIRV, TargetSPIRV},
-		{base + ".spvasm", []byte(result.SPIRVAsm), TargetAll},
-		{base + ".js", []byte(result.JavaScript), TargetWeb},
-		{base + ".d.ts", []byte(result.TypeScript), TargetWeb},
-	}
-	paths := make([]string, 0, len(artifacts))
-	for _, a := range artifacts {
-		if result.target != TargetAll && result.target != a.target {
-			continue
-		}
-		path := filepath.Join(dir, a.name)
-		if err := os.WriteFile(path, a.data, 0o644); err != nil {
-			return nil, fmt.Errorf("write %s: %w", path, err)
-		}
-		paths = append(paths, path)
-	}
-	for _, a := range artifacts {
-		if result.target == TargetAll || result.target == a.target {
-			continue
-		}
-		path := filepath.Join(dir, a.name)
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove stale %s: %w", path, err)
-		}
-	}
-	return paths, nil
-}
-
-func sourceBase(path string) string {
-	base := filepath.Base(path)
-	if ext := filepath.Ext(base); ext != "" {
-		base = strings.TrimSuffix(base, ext)
-	}
-	if base == "" || base == "." {
-		return "module"
-	}
-	return base
 }

@@ -1,53 +1,37 @@
 @docs(
   title("Arbitrary mesh rendering"),
-  summary("Renders heterogeneous smooth indexed geometry through a compute-only visibility and material pipeline.")
+  summary("Renders heterogeneous smooth indexed geometry through a compute-only visibility and material pipeline."),
 );
 
+import "shared/color";
 @docs(
   summary("Viewport, camera, and lighting parameters."),
   field(width, "Output width in pixels."),
   field(height, "Output height in pixels."),
-  field(time, "Continuous camera and lighting time.")
+  field(time, "Continuous camera and lighting time."),
 )
-type MeshParams = { width: uint32, height: uint32, time: float32 };
-
-@docs(
-  summary("Clamps a scalar to zero through one."),
-  param(value, "Value to clamp."),
-  returns("The clamped value.")
-)
-function saturate(value: float32): float32 {
-  return value < 0.0 ? 0.0 : value > 1.0 ? 1.0 : value;
-}
+type MeshParams = {
+  width: uint32,
+  height: uint32,
+  time: float32,
+};
 
 @docs(
   summary("Evaluates a signed screen-space edge function."),
   param(a, "First edge endpoint."),
   param(b, "Second edge endpoint."),
   param(point, "Pixel center under test."),
-  returns("Signed twice-area relative to the edge.")
+  returns("Signed twice-area relative to the edge."),
 )
 function edge(a: float32x2, b: float32x2, point: float32x2): float32 {
   return (point.x - a.x) * (b.y - a.y) - (point.y - a.y) * (b.x - a.x);
 }
 
 @docs(
-  summary("Packs display RGB into opaque RGBA8."),
-  param(color, "Display RGB value."),
-  returns("Packed RGBA8 pixel.")
-)
-function packColor(color: float32x3): uint32 {
-  const red = uint32(saturate(color.x) * 255.0);
-  const green = uint32(saturate(color.y) * 255.0);
-  const blue = uint32(saturate(color.z) * 255.0);
-  return red | (green << 8) | (blue << 16) | (255 << 24);
-}
-
-@docs(
   summary("Chooses a spatially detailed base color for one material family."),
   param(material, "Interpolated material identifier."),
   param(world, "Interpolated world position."),
-  returns("Linear base color.")
+  returns("Linear base color."),
 )
 function materialColor(material: float32, world: float32x3): float32x3 {
   const grain = 0.5 + 0.5 * sin(world.x * 7.1 + world.y * 4.3 + world.z * 5.7);
@@ -77,9 +61,15 @@ function materialColor(material: float32, world: float32x3): float32x3 {
   param(position, "Point-light position."),
   param(color, "Point-light color."),
   param(power, "Point-light intensity."),
-  returns("RGB irradiance contribution.")
+  returns("RGB irradiance contribution."),
 )
-function pointLight(world: float32x3, normal: float32x3, position: float32x3, color: float32x3, power: float32): float32x3 {
+function pointLight(
+  world: float32x3,
+  normal: float32x3,
+  position: float32x3,
+  color: float32x3,
+  power: float32,
+): float32x3 {
   const offset = position - world;
   const distanceSquared = dot(offset, offset) + 0.05;
   const direction = offset * rsqrt(distanceSquared);
@@ -93,9 +83,13 @@ function pointLight(world: float32x3, normal: float32x3, position: float32x3, co
   coordinate(i, "Vertex index."),
   param(vertices, "World XYZ and material identifier per vertex."),
   param(screen, "Projected XY, normalized depth, and reciprocal view depth."),
-  param(params, "Viewport and camera time.")
+  param(params, "Viewport and camera time."),
 )
-function transform[i](vertices: buffer<float32x4[]>, screen: buffer<float32x4[]>, params: MeshParams) {
+function transform[i](
+  vertices: buffer<float32x4[]>,
+  screen: buffer<float32x4[]>,
+  params: MeshParams,
+) {
   const vertex = vertices[i];
   const camera = float32x3(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
   const view = vertex.xyz - camera;
@@ -104,17 +98,19 @@ function transform[i](vertices: buffer<float32x4[]>, screen: buffer<float32x4[]>
     (view.x * inverseDepth * 0.90 + 0.5) * float32(params.width),
     (0.53 - view.y * inverseDepth * 1.48) * float32(params.height),
     saturate((view.z - 5.0) / 42.0),
-    inverseDepth
+    inverseDepth,
   );
 }
 
 @docs(
   summary("Clears packed depth and primitive ownership."),
   coordinate(i, "Pixel index."),
-  param(visibility, "Atomic depth and triangle ownership image.")
+  param(visibility, "Atomic depth and triangle ownership image."),
 )
 function clear[i](visibility: buffer<atomic<uint32>[]>) {
-  if (i < visibility.length) { atomicStore(visibility[i], 0xffff_ffff); }
+  if (i < visibility.length) {
+    atomicStore(visibility[i], 0xffff_ffff);
+  }
 }
 
 @docs(
@@ -124,9 +120,15 @@ function clear[i](visibility: buffer<atomic<uint32>[]>) {
   param(indices, "Three vertex indices per triangle."),
   param(visibility, "Atomic depth and triangle ownership image."),
   param(coverage, "Covered-fragment count per triangle."),
-  param(params, "Viewport dimensions.")
+  param(params, "Viewport dimensions."),
 )
-function rasterize[triangle](screen: buffer<float32x4[]>, indices: buffer<uint32[]>, visibility: buffer<atomic<uint32>[]>, coverage: buffer<uint32[]>, params: MeshParams) {
+function rasterize[triangle](
+  screen: buffer<float32x4[]>,
+  indices: buffer<uint32[]>,
+  visibility: buffer<atomic<uint32>[]>,
+  coverage: buffer<uint32[]>,
+  params: MeshParams,
+) {
   const first = triangle * 3;
   let covered = 0;
   if (first + 2 < indices.length && triangle < 0x000f_ffff) {
@@ -136,10 +138,14 @@ function rasterize[triangle](screen: buffer<float32x4[]>, indices: buffer<uint32
     const area = edge(a.xy, b.xy, c.xy);
     const areaMagnitude = abs(area);
     if (areaMagnitude > 0.0001) {
-      const minimumX = a.x < b.x ? (a.x < c.x ? a.x : c.x) : (b.x < c.x ? b.x : c.x);
-      const minimumY = a.y < b.y ? (a.y < c.y ? a.y : c.y) : (b.y < c.y ? b.y : c.y);
-      const maximumX = a.x > b.x ? (a.x > c.x ? a.x : c.x) : (b.x > c.x ? b.x : c.x);
-      const maximumY = a.y > b.y ? (a.y > c.y ? a.y : c.y) : (b.y > c.y ? b.y : c.y);
+      const minimumX = a.x < b.x
+        ? (a.x < c.x ? a.x : c.x) : (b.x < c.x ? b.x : c.x);
+      const minimumY = a.y < b.y
+        ? (a.y < c.y ? a.y : c.y) : (b.y < c.y ? b.y : c.y);
+      const maximumX = a.x > b.x
+        ? (a.x > c.x ? a.x : c.x) : (b.x > c.x ? b.x : c.x);
+      const maximumY = a.y > b.y
+        ? (a.y > c.y ? a.y : c.y) : (b.y > c.y ? b.y : c.y);
       const x0 = clamp(int32(floor(minimumX)), 0, int32(params.width) - 1);
       const y0 = clamp(int32(floor(minimumY)), 0, int32(params.height) - 1);
       const x1 = clamp(int32(ceil(maximumX)), 0, int32(params.width) - 1);
@@ -152,7 +158,10 @@ function rasterize[triangle](screen: buffer<float32x4[]>, indices: buffer<uint32
           const wc = 1.0 - wa - wb;
           if (wa >= 0.0 && wb >= 0.0 && wc >= 0.0) {
             const depth = saturate(wa * a.z + wb * b.z + wc * c.z);
-            atomicMin(visibility[uint32(y) * params.width + uint32(x)], (uint32(depth * 4094.0) << 20) | triangle);
+            atomicMin(
+              visibility[uint32(y) * params.width + uint32(x)],
+              (uint32(depth * 4094.0) << 20) | triangle,
+            );
             covered++;
           }
         }
@@ -171,9 +180,17 @@ function rasterize[triangle](screen: buffer<float32x4[]>, indices: buffer<uint32
   param(indices, "Triangle index data."),
   param(visibility, "Resolved depth and triangle ownership image."),
   param(hdr, "Linear high-dynamic-range output."),
-  param(params, "Viewport and lighting time.")
+  param(params, "Viewport and lighting time."),
 )
-function shade[i](vertices: buffer<float32x4[]>, normals: buffer<float32x4[]>, screen: buffer<float32x4[]>, indices: buffer<uint32[]>, visibility: buffer<atomic<uint32>[]>, hdr: buffer<float32x4[]>, params: MeshParams) {
+function shade[i](
+  vertices: buffer<float32x4[]>,
+  normals: buffer<float32x4[]>,
+  screen: buffer<float32x4[]>,
+  indices: buffer<uint32[]>,
+  visibility: buffer<atomic<uint32>[]>,
+  hdr: buffer<float32x4[]>,
+  params: MeshParams,
+) {
   const x = i % params.width;
   const y = i / params.width;
   const owner = atomicLoad(visibility[i]);
@@ -200,6 +217,7 @@ function shade[i](vertices: buffer<float32x4[]>, normals: buffer<float32x4[]>, s
     const screenB = edge(sc.xy, sa.xy, point) / area;
     const screenC = 1.0 - screenA - screenB;
     const reciprocalDepth = screenA * sa.w + screenB * sb.w + screenC * sc.w;
+    // Reciprocal-depth weights restore perspective-correct world attributes.
     const wa = screenA * sa.w / reciprocalDepth;
     const wb = screenB * sb.w / reciprocalDepth;
     const wc = 1.0 - wa - wb;
@@ -215,30 +233,58 @@ function shade[i](vertices: buffer<float32x4[]>, normals: buffer<float32x4[]>, s
     const depthCode = owner >> 20;
     if (x > 0) {
       const neighbor = atomicLoad(visibility[i - 1]);
-      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) { occlusion += 0.14; }
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
     }
     if (x + 1 < params.width) {
       const neighbor = atomicLoad(visibility[i + 1]);
-      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) { occlusion += 0.14; }
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
     }
     if (y > 0) {
       const neighbor = atomicLoad(visibility[i - params.width]);
-      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) { occlusion += 0.14; }
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
     }
     if (y + 1 < params.height) {
       const neighbor = atomicLoad(visibility[i + params.width]);
-      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) { occlusion += 0.14; }
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
     }
     const sun = normalize(float32x3(-0.48, 0.80, -0.35));
     const diffuseRaw = dot(normal, sun);
     const diffuse = diffuseRaw > 0.0 ? diffuseRaw : 0.0;
     const specularRaw = dot(normal, normalize(sun + view));
-    const specular = pow(specularRaw > 0.0 ? specularRaw : 0.0, 8.0 + (1.0 - roughness) * 72.0);
-    const local = pointLight(world, normal, float32x3(-6.0, 6.0, 8.0), float32x3(1.0, 0.22, 0.08), 13.0)
-      + pointLight(world, normal, float32x3(6.0, 4.0, 13.0), float32x3(0.08, 0.35, 1.0), 15.0)
-      + pointLight(world, normal, float32x3(0.0, 7.0, 22.0), float32x3(0.34, 1.0, 0.44), 17.0);
+    const specular = pow(specularRaw > 0.0
+      ? specularRaw : 0.0, 8.0 + (1.0 - roughness) * 72.0);
+    const local = pointLight(
+      world,
+      normal,
+      float32x3(-6.0, 6.0, 8.0),
+      float32x3(1.0, 0.22, 0.08),
+      13.0,
+    )
+      + pointLight(
+      world,
+      normal,
+      float32x3(6.0, 4.0, 13.0),
+      float32x3(0.08, 0.35, 1.0),
+      15.0,
+    )
+      + pointLight(
+      world,
+      normal,
+      float32x3(0.0, 7.0, 22.0),
+      float32x3(0.34, 1.0, 0.44),
+      17.0,
+    );
     const base = materialColor(material, world);
-    const lit = base * ((0.16 + diffuse * 1.08) * (1.0 - occlusion)) + local + float32x3(1.0, 0.86, 0.68) * specular * (0.25 + (1.0 - roughness) * 0.70);
+    const lit = base * ((0.16 + diffuse * 1.08) * (1.0 - occlusion)) + local
+      + float32x3(1.0, 0.86, 0.68) * specular * (0.25 + (1.0 - roughness) * 0.70);
     const fog = saturate((world.z - 16.0) / 28.0);
     color = lit * (1.0 - fog * 0.58) + float32x3(0.13, 0.20, 0.31) * fog * 0.58;
   }
@@ -250,9 +296,13 @@ function shade[i](vertices: buffer<float32x4[]>, normals: buffer<float32x4[]>, s
   coordinate(i, "Pixel index."),
   param(hdr, "Linear lit frame."),
   param(pixels, "Packed display frame."),
-  param(params, "Frame dimensions.")
+  param(params, "Frame dimensions."),
 )
-function post[i](hdr: buffer<float32x4[]>, pixels: buffer<uint32[]>, params: MeshParams) {
+function meshPost[i](
+  hdr: buffer<float32x4[]>,
+  pixels: buffer<uint32[]>,
+  params: MeshParams,
+) {
   if (i < pixels.length) {
     const x = i % params.width;
     const y = i / params.width;
@@ -279,14 +329,22 @@ function post[i](hdr: buffer<float32x4[]>, pixels: buffer<uint32[]>, params: Mes
   param(visibility, "Atomic depth and triangle ownership storage."),
   param(coverage, "Covered-fragment count per triangle."),
   param(pixels, "Packed 1080p output frame."),
-  param(params, "Viewport, camera, and lighting parameters.")
+  param(params, "Viewport, camera, and lighting parameters."),
 )
-export function meshWorld(vertices: buffer<float32x4[]>, normals: buffer<float32x4[]>, indices: buffer<uint32[]>, visibility: buffer<atomic<uint32>[]>, coverage: buffer<uint32[]>, pixels: buffer<uint32[]>, params: MeshParams) {
+export function meshWorld(
+  vertices: buffer<float32x4[]>,
+  normals: buffer<float32x4[]>,
+  indices: buffer<uint32[]>,
+  visibility: buffer<atomic<uint32>[]>,
+  coverage: buffer<uint32[]>,
+  pixels: buffer<uint32[]>,
+  params: MeshParams,
+) {
   const screen = transient<float32x4>(vertices.length);
   const hdr = transient<float32x4>(pixels.length);
   run transform(vertices, screen, params) over vertices.length;
   run clear(visibility) over visibility.length;
   run rasterize(screen, indices, visibility, coverage, params) over indices.length / 3;
   run shade(vertices, normals, screen, indices, visibility, hdr, params) over pixels.length;
-  run post(hdr, pixels, params) over pixels.length;
+  run meshPost(hdr, pixels, params) over pixels.length;
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/ast"
 	"tach/src/flow"
 	"tach/src/opt"
 	"tach/src/parser"
@@ -24,15 +25,20 @@ func emit(m *flow.Module) (string, error) {
 }
 
 func TestParticlesWGSL(t *testing.T) {
-	src, err := os.ReadFile("../../examples/particles.tach")
-	if err != nil {
-		t.Fatal(err)
+	var modules []*ast.Module
+	for _, name := range []string{"types", "particles"} {
+		src, err := os.ReadFile("../../examples/simulation/" + name + ".tach")
+		if err != nil {
+			t.Fatal(err)
+		}
+		module, err := parser.Parse("simulation/"+name+".tach", string(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		module.File = "simulation/" + name
+		modules = append(modules, module)
 	}
-	a, err := parser.Parse("particles.tach", string(src))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
+	m, _, err := sema.CheckAndLowerProject(modules)
 	if err != nil {
 		t.Fatal(err)
 	}

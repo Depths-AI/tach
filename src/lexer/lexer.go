@@ -8,36 +8,37 @@ import (
 	"tach/src/source"
 )
 
-type Lexer struct {
-	file string
-	src  string
-	off  int
-	line int
-	col  int
+type lexer struct {
+	file   string
+	src    string
+	off    int
+	line   int
+	col    int
+	trivia []Trivia
 }
 
-func New(file, src string) *Lexer { return &Lexer{file: file, src: src, line: 1, col: 1} }
+func newLexer(file, src string) *lexer { return &lexer{file: file, src: src, line: 1, col: 1} }
 
-func (l *Lexer) pos() source.Pos { return source.Pos{Offset: l.off, Line: l.line, Column: l.col} }
-func (l *Lexer) span(start source.Pos) source.Span {
+func (l *lexer) pos() source.Pos { return source.Pos{Offset: l.off, Line: l.line, Column: l.col} }
+func (l *lexer) span(start source.Pos) source.Span {
 	return source.Span{File: l.file, Start: start, End: l.pos()}
 }
 
-func (l *Lexer) peek() (rune, int) {
+func (l *lexer) peek() (rune, int) {
 	if l.off >= len(l.src) {
 		return 0, 0
 	}
 	r, n := utf8.DecodeRuneInString(l.src[l.off:])
 	return r, n
 }
-func (l *Lexer) peekN(bytes int) rune {
+func (l *lexer) peekN(bytes int) rune {
 	if l.off+bytes >= len(l.src) {
 		return 0
 	}
 	r, _ := utf8.DecodeRuneInString(l.src[l.off+bytes:])
 	return r
 }
-func (l *Lexer) advance() rune {
+func (l *lexer) advance() rune {
 	r, n := l.peek()
 	if n == 0 {
 		return 0
@@ -52,17 +53,18 @@ func (l *Lexer) advance() rune {
 	return r
 }
 
-func (l *Lexer) skipSpaceAndComments() error {
+func (l *lexer) skipSpaceAndComments() {
 	for {
 		r, n := l.peek()
 		if n == 0 {
-			return nil
+			return
 		}
 		if unicode.IsSpace(r) {
 			l.advance()
 			continue
 		}
 		if r == '/' && l.peekN(n) == '/' {
+			start := l.pos()
 			l.advance()
 			l.advance()
 			for {
@@ -72,20 +74,26 @@ func (l *Lexer) skipSpaceAndComments() error {
 				}
 				l.advance()
 			}
+			l.trivia = append(l.trivia, Trivia{Text: l.src[start.Offset:l.off], Span: l.span(start)})
 			continue
 		}
-		return nil
+		return
 	}
 }
 
-func (l *Lexer) Next() (Token, error) {
-	if err := l.skipSpaceAndComments(); err != nil {
-		return Token{}, err
-	}
+func (l *lexer) next() (token Token, err error) {
+	l.skipSpaceAndComments()
 	start := l.pos()
+	leading := l.trivia
+	l.trivia = nil
+	defer func() {
+		if err == nil {
+			token.Leading = leading
+		}
+	}()
 	r, n := l.peek()
 	if n == 0 {
-		return Token{Kind: EOF, Span: l.span(start)}, nil
+		return Token{Kind: EOF, Span: l.span(start), Leading: leading}, nil
 	}
 	if unicode.IsLetter(r) || r == '_' {
 		l.advance()
@@ -96,7 +104,7 @@ func (l *Lexer) Next() (Token, error) {
 			}
 			l.advance()
 		}
-		return Token{Kind: Ident, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
+		return Token{Kind: Ident, Text: l.src[start.Offset:l.off], Span: l.span(start), Leading: leading}, nil
 	}
 	if unicode.IsDigit(r) {
 		// Tach literals carry values, not target-language type suffixes. Semantic
@@ -128,10 +136,10 @@ func (l *Lexer) Next() (Token, error) {
 					break
 				}
 				if digits == 0 {
-					return Token{}, &source.Error{Span: l.span(start), Message: "base-prefixed integer literal requires digits"}
+					return Token{}, &source.Diagnostic{Span: l.span(start), Message: "base-prefixed integer literal requires digits"}
 				}
 				if c, _ := l.peek(); unicode.IsLetter(c) {
-					return Token{}, &source.Error{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
+					return Token{}, &source.Diagnostic{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 				}
 				return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 			}
@@ -173,11 +181,11 @@ func (l *Lexer) Next() (Token, error) {
 				break
 			}
 			if digits == 0 {
-				return Token{}, &source.Error{Span: l.span(start), Message: "floating-point exponent requires digits"}
+				return Token{}, &source.Diagnostic{Span: l.span(start), Message: "floating-point exponent requires digits"}
 			}
 		}
 		if c, _ = l.peek(); unicode.IsLetter(c) {
-			return Token{}, &source.Error{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
+			return Token{}, &source.Diagnostic{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 		}
 		return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 	}
@@ -186,7 +194,7 @@ func (l *Lexer) Next() (Token, error) {
 		for {
 			r, _ = l.peek()
 			if r == 0 || r == '\n' {
-				return Token{}, &source.Error{Span: l.span(start), Message: "unterminated string"}
+				return Token{}, &source.Diagnostic{Span: l.span(start), Message: "unterminated string"}
 			}
 			l.advance()
 			if r == '"' {
@@ -194,7 +202,7 @@ func (l *Lexer) Next() (Token, error) {
 			}
 			if r == '\\' {
 				if next, _ := l.peek(); next == 0 || next == '\n' {
-					return Token{}, &source.Error{Span: l.span(start), Message: "unterminated string"}
+					return Token{}, &source.Diagnostic{Span: l.span(start), Message: "unterminated string"}
 				}
 				l.advance()
 			}
@@ -297,20 +305,32 @@ func (l *Lexer) Next() (Token, error) {
 		return one(Tilde)
 	}
 	l.advance()
-	return Token{}, &source.Error{Span: l.span(start), Message: fmt.Sprintf("unexpected character %q", r)}
+	return Token{}, &source.Diagnostic{Span: l.span(start), Message: fmt.Sprintf("unexpected character %q", r)}
 }
 
 func Lex(file, src string) ([]Token, error) {
-	l := New(file, src)
+	tokens, diagnostics := LexRecover(file, src)
+	if len(diagnostics) > 0 {
+		return nil, diagnostics
+	}
+	return tokens, nil
+}
+
+func LexRecover(file, src string) ([]Token, source.Diagnostics) {
+	l := newLexer(file, src)
 	var out []Token
+	var diagnostics source.Diagnostics
 	for {
-		t, err := l.Next()
+		t, err := l.next()
 		if err != nil {
-			return nil, err
+			diagnostic := *err.(*source.Diagnostic)
+			diagnostic.Kind = "lexer"
+			diagnostics = append(diagnostics, diagnostic)
+			continue
 		}
 		out = append(out, t)
 		if t.Kind == EOF {
-			return out, nil
+			return out, diagnostics
 		}
 	}
 }

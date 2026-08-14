@@ -1,12 +1,16 @@
 # Tach large GPU showcase
 
-This workspace measures six fixed, sustained GPU workloads through generated
-Tach modules and Chromium WebGPU. It has one profile and no performance
+This workspace measures six fixed, sustained GPU workloads from one generated
+Tach project package through Chromium WebGPU. It has one profile and no performance
 verdicts. The harness records what the selected adapter did.
 
-Each workload lives in its own `.tach` file and compiles to an independent
-JavaScript/TypeScript/WGSL module. The TypeScript host imports all six modules
-and executes them in one persistent Tach session.
+Each workload lives in its own `.tach` kernel file. `kernels/mesh` and
+`kernels/procedural` directly import shared color helpers from
+`shared/color`, exercising project imports in addition to six independent
+public programs. One project build merges all seven files into one
+JavaScript/TypeScript facade and one WGSL module. The TypeScript host imports
+all six public programs from `build/index.js` and executes them in one
+persistent Tach session.
 
 ## Workloads
 
@@ -92,9 +96,10 @@ npm run install:browser --workspace=@tach/showcase-ts
 npm run benchmark --workspace=@tach/showcase-ts
 ```
 
-`npm run check --workspace=@tach/showcase-ts` compiles every `.tach` module
-independently and type-checks their combined TypeScript consumer without
-running hardware work.
+`npm run check --workspace=@tach/showcase-ts` builds the complete Tach project
+once and type-checks its TypeScript consumer against the one generated package
+without running hardware work. `tach build` also refreshes ignored generated
+README/module documentation for inspection alongside the compiled package.
 
 ## Reports
 

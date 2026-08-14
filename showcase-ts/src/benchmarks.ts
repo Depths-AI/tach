@@ -1,10 +1,17 @@
 import type { ComputeBuffer, ComputeCommand, Tach } from "@depths/tach";
-import { denseMatrixProduct } from "../build/matrix.js";
-import { meshWorld, type MeshParams } from "../build/mesh.js";
-import { monteCarloPaths, type MonteCarloParams } from "../build/monte-carlo.js";
-import { particleDynamics, type ParticleParams } from "../build/particles.js";
-import { proceduralWorld, type ProceduralParams } from "../build/procedural.js";
-import { waveSimulation, type WaveParams } from "../build/wave.js";
+import {
+  denseMatrixProduct,
+  meshWorld,
+  monteCarloPaths,
+  particleDynamics,
+  proceduralWorld,
+  type MeshParams,
+  type MonteCarloParams,
+  type ParticleParams,
+  type ProceduralParams,
+  type WaveParams,
+  waveSimulation,
+} from "../build/index.js";
 
 const samples = 5;
 const frameWidth = 1920;

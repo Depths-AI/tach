@@ -9,6 +9,7 @@ import (
 	"tach/src/ast"
 	"tach/src/flow"
 	"tach/src/ir"
+	"tach/src/source"
 	"tach/src/types"
 )
 
@@ -20,22 +21,34 @@ type programSymbol struct {
 }
 
 func (c *Checker) lowerPrograms() error {
+	var diagnostics source.Diagnostics
+	var declarations []*ast.FunctionDecl
 	for _, declaration := range c.ast.Decls {
 		function, ok := declaration.(*ast.FunctionDecl)
-		if !ok || !function.Exported {
-			continue
+		if ok && function.Exported {
+			declarations = append(declarations, function)
 		}
-		var program *flow.Program
+	}
+	programs := make([]*flow.Program, len(declarations))
+	errors := parallel(c.workers, len(declarations), func(index int) error {
+		function := declarations[index]
 		var err error
 		if len(function.Indices) > 0 {
-			program, err = c.lowerIndexedProgram(function)
+			programs[index], err = c.lowerIndexedProgram(function)
 		} else {
-			program, err = c.lowerProgram(function)
+			programs[index], err = c.lowerProgram(function)
 		}
+		return err
+	})
+	for index, err := range errors {
 		if err != nil {
-			return err
+			diagnostics = appendError(diagnostics, err)
+			continue
 		}
-		c.flow.Programs = append(c.flow.Programs, program)
+		c.flow.Programs = append(c.flow.Programs, programs[index])
+	}
+	if len(diagnostics) > 0 {
+		return diagnostics
 	}
 	return nil
 }
@@ -46,6 +59,9 @@ func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*flow.Prog
 	symbols, current, err := c.addProgramParameters(program, declaration)
 	if err != nil {
 		return nil, err
+	}
+	if len(current) == 0 {
+		return nil, diag(declaration.Span, "public program %s requires at least one buffer parameter", declaration.Name)
 	}
 	dispatch := flow.Dispatch{Stage: stage.Name, Span: declaration.Span}
 	for axis := range stage.Indices {
@@ -68,6 +84,9 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 	symbols, current, err := c.addProgramParameters(program, declaration)
 	if err != nil {
 		return nil, err
+	}
+	if len(current) == 0 {
+		return nil, diag(declaration.Span, "public program %s requires at least one buffer parameter", declaration.Name)
 	}
 	for _, statement := range declaration.Body.Stmts {
 		switch x := statement.(type) {
@@ -103,7 +122,17 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 				symbols[x.Name] = programSymbol{shape: shape, type_: types.TU32, parameter: -1}
 			}
 		case *ast.RunStmt:
+			sig := c.funcs[x.Stage]
+			if sig != nil && !c.visible(x.Stage, x.Span.File) {
+				sig = nil
+			}
+			if sig != nil && sig.exported && !sig.indexed {
+				return nil, diag(x.Span, "public program %q cannot be a run target", x.Stage)
+			}
 			stage := c.mod.Function(x.Stage)
+			if stage != nil && !c.visible(x.Stage, x.Span.File) {
+				stage = nil
+			}
 			if stage == nil || stage.Kind != ir.Stage {
 				return nil, diag(x.Span, "run target %q is not an indexed stage", x.Stage)
 			}

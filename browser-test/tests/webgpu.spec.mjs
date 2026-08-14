@@ -33,7 +33,7 @@ forInput.splice(0, 4, 1, 2, 3, 4);
 const cases = [
   {
     name: "atomics",
-		program: "accumulate",
+    program: "accumulate",
     parameters: [{ name: "counters", buffer: true }],
     resources: { counters: { total: 0 } },
     readParam: "counters",
@@ -41,7 +41,7 @@ const cases = [
   },
   {
     name: "bitwise",
-		program: "bitwise",
+    program: "bitwise",
     parameters: [{ name: "out", buffer: true }],
     resources: { out: Array(8).fill(0) },
     readParam: "out",
@@ -49,7 +49,7 @@ const cases = [
   },
   {
     name: "control",
-		program: "transform",
+    program: "transform",
     parameters: [{ name: "data", buffer: true }, { name: "params" }],
     resources: { data: controlInput, params: { scale: 2, count: 64, enabled: true } },
     readParam: "data",
@@ -60,7 +60,7 @@ const cases = [
   },
   {
     name: "for",
-		program: "reduceLanes",
+    program: "reduceLanes",
     parameters: [{ name: "data", buffer: true }],
     resources: { data: forInput },
     readParam: "data",
@@ -72,7 +72,7 @@ const cases = [
   },
   {
     name: "math",
-		program: "math",
+    program: "math",
     parameters: [{ name: "out", buffer: true }],
     resources: { out: Array.from({ length: 4 }, () => [0, 0, 0, 0]) },
     readParam: "out",
@@ -87,7 +87,7 @@ const cases = [
   },
   {
     name: "particles",
-		program: "integrate",
+    program: "integrate",
     parameters: [{ name: "particles", buffer: true }, { name: "params" }],
     resources: {
       particles: [
@@ -106,7 +106,7 @@ const cases = [
   },
   {
     name: "scalars",
-		program: "scale",
+    program: "scale",
     parameters: [{ name: "data", buffer: true }, { name: "factor" }],
     resources: { data: [1, 2, 3, 4], factor: 2.5 },
     readParam: "data",
@@ -123,8 +123,8 @@ async function executeCase(testCase) {
       const onUncaptured = (event) => uncapturedErrors.push(event.error.message);
       gpu.device.addEventListener("uncapturederror", onUncaptured);
       try {
-        const generated = await import(`/build/${testCase.name}.js`);
-        const wgsl = await (await fetch(`/build/${testCase.name}.wgsl`)).text();
+        const generated = await import("/build/index.js");
+        const wgsl = await (await fetch("/build/kernel.wgsl")).text();
         const diagnosticModule = gpu.device.createShaderModule({
           label: `Tach ${testCase.name} diagnostics`,
           code: wgsl,
@@ -136,7 +136,7 @@ async function executeCase(testCase) {
 
         const args = [];
         const computeBuffers = new Map();
-				for (const parameter of testCase.parameters) {
+        for (const parameter of testCase.parameters) {
           const value = testCase.resources[parameter.name];
           if (parameter.buffer) {
             const computeBuffer = gpu.buffer(value);
@@ -149,7 +149,7 @@ async function executeCase(testCase) {
 
         const output = computeBuffers.get(testCase.readParam);
         if (!output) throw new Error(`readback resource ${testCase.readParam} is missing`);
-				await gpu.submit(generated[testCase.program](...args));
+        await gpu.submit(generated[testCase.program](...args));
         const value = await output.read();
 
         const info = gpu.adapter.info ?? {};
@@ -187,8 +187,14 @@ async function executeCase(testCase) {
 }
 
 test.describe.configure({ mode: "serial" });
+test("every generated program has exactly one execution case", async ({ page }) => {
+  await page.goto("/");
+  const programs = await page.evaluate(async () => Object.keys(await import("/build/index.js")).sort());
+  expect(programs).toEqual(cases.map(({ program }) => program).sort());
+});
+
 for (const testCase of cases) {
-	test(`${testCase.name}/${testCase.program} executes and returns expected typed data`, async ({ page }, testInfo) => {
+  test(`${testCase.name}/${testCase.program} executes and returns expected typed data`, async ({ page }, testInfo) => {
     await page.goto("/");
     const payload = { ...testCase };
     delete payload.assert;
@@ -217,7 +223,7 @@ test("parameter commands remain distinct within a submission and across frames",
   await page.goto("/");
   const result = await page.evaluate(async () => {
     const { tach } = await import("@depths/tach");
-    const { scale } = await import("/build/scalars.js");
+    const { scale } = await import("/build/index.js");
     return tach(async (gpu) => {
       const data = gpu.buffer(new Float32Array([1, 2, 3, 4]));
       await gpu.submit(scale(data, 2), scale(data, 3));

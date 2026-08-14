@@ -1,0 +1,11 @@
+{
+  "name": "tach-examples",
+  "version": "0.1.0",
+  "web": {
+    "package": "@depths/tach-examples"
+  },
+  "docs": {
+    "title": "Tach examples",
+    "summary": "Compiler-validated examples spanning Tach's portable language surface."
+  }
+}

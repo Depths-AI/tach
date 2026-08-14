@@ -3,8 +3,11 @@ package sema
 import (
 	"fmt"
 	"math"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"tach/src/ast"
 	"tach/src/flow"
@@ -15,11 +18,14 @@ import (
 )
 
 type Checker struct {
-	ast   *ast.Module
-	mod   *ir.Module
-	flow  *flow.Module
-	types map[string]*types.Type
-	funcs map[string]*funcSig
+	ast     *ast.Module
+	mod     *ir.Module
+	flow    *flow.Module
+	types   map[string]*types.Type
+	funcs   map[string]*funcSig
+	owners  map[string]string
+	imports map[string]map[string]bool
+	workers int
 }
 
 type funcSig struct {
@@ -84,46 +90,119 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 }
 
 func CheckAndLower(m *ast.Module) (*flow.Module, error) {
+	module, _, err := CheckAndLowerProject([]*ast.Module{m})
+	return module, err
+}
+
+func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow.Module, []flow.Documentation, error) {
+	workers := runtime.GOMAXPROCS(0)
+	if len(requestedWorkers) > 0 && requestedWorkers[0] > 0 && requestedWorkers[0] < workers {
+		workers = requestedWorkers[0]
+	}
+	merged := &ast.Module{}
+	documentation := flow.Documentation{Types: map[string]flow.TypeDocumentation{}, Functions: map[string]flow.FunctionDocumentation{}}
+	files := make([]flow.Documentation, 0, len(modules))
+	var documentationDiagnostics source.Diagnostics
+	for _, module := range modules {
+		docs, err := checkDocumentation(module)
+		if err != nil {
+			documentationDiagnostics = appendError(documentationDiagnostics, err)
+		}
+		files = append(files, docs)
+		if len(modules) == 1 {
+			documentation.Title, documentation.Summary = docs.Title, docs.Summary
+		}
+		for name, item := range docs.Types {
+			documentation.Types[name] = item
+		}
+		for name, item := range docs.Functions {
+			documentation.Functions[name] = item
+		}
+		merged.Decls = append(merged.Decls, module.Decls...)
+	}
 	kernel := &ir.Module{}
-	c := &Checker{ast: m, mod: kernel, flow: &flow.Module{Kernel: kernel}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}}
+	c := &Checker{ast: merged, mod: kernel, flow: &flow.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
+	for _, module := range modules {
+		file := strings.TrimSuffix(module.File, ".tach")
+		visible := map[string]bool{file: true}
+		for _, item := range module.Imports {
+			visible[item.Target] = true
+		}
+		c.imports[file] = visible
+		for _, declaration := range module.Decls {
+			switch item := declaration.(type) {
+			case *ast.TypeDecl:
+				c.owners[item.Name] = file
+			case *ast.FunctionDecl:
+				c.owners[item.Name] = file
+			}
+		}
+	}
 	for _, n := range []string{"void", "bool", "int32", "uint32", "float32", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
-	if err := c.checkDocumentation(); err != nil {
-		return nil, err
+	var interfaceDiagnostics source.Diagnostics
+	for _, check := range []func() error{c.collectTypes, c.resolveTypeFields, c.checkRuntimeArrayPlacement, c.checkTypeCycles, c.collectFunctions} {
+		if err := check(); err != nil {
+			interfaceDiagnostics = appendError(interfaceDiagnostics, err)
+		}
 	}
-	if err := c.collectTypes(); err != nil {
-		return nil, err
-	}
-	if err := c.resolveTypeFields(); err != nil {
-		return nil, err
-	}
-	if err := c.checkRuntimeArrayPlacement(); err != nil {
-		return nil, err
-	}
-	if err := c.checkTypeCycles(); err != nil {
-		return nil, err
-	}
-	if err := c.collectFunctions(); err != nil {
-		return nil, err
+	if len(interfaceDiagnostics) > 0 {
+		return nil, nil, append(documentationDiagnostics, interfaceDiagnostics...).Sorted()
 	}
 	if err := c.lowerFunctions(); err != nil {
-		return nil, err
+		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
 	inferBufferAccess(c.mod)
 	if err := checkRecursion(c.mod); err != nil {
-		return nil, err
+		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
 	if err := ir.Verify(c.mod); err != nil {
-		return nil, fmt.Errorf("internal IR verification failed: %w", err)
+		return nil, nil, fmt.Errorf("internal IR verification failed: %w", err)
 	}
 	if err := c.lowerPrograms(); err != nil {
-		return nil, err
+		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
 	if err := flow.Verify(c.flow); err != nil {
-		return nil, fmt.Errorf("internal Flow IR verification failed: %w", err)
+		return nil, nil, fmt.Errorf("internal Flow IR verification failed: %w", err)
 	}
-	return c.flow, nil
+	if len(documentationDiagnostics) > 0 {
+		return nil, nil, documentationDiagnostics.Sorted()
+	}
+	return c.flow, files, nil
+}
+
+func appendError(diagnostics source.Diagnostics, err error) source.Diagnostics {
+	if list, ok := err.(source.Diagnostics); ok {
+		return append(diagnostics, list...)
+	}
+	if diagnostic, ok := err.(*source.Diagnostic); ok {
+		diagnostic.Kind = "semantic"
+		return append(diagnostics, *diagnostic)
+	}
+	return append(diagnostics, source.Diagnostic{Kind: "semantic", Message: err.Error()})
+}
+
+func parallel(workers, count int, work func(int) error) []error {
+	errors := make([]error, count)
+	jobs := make(chan int)
+	var wait sync.WaitGroup
+	workers = min(workers, count)
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := range jobs {
+				errors[index] = work(index)
+			}
+		}()
+	}
+	for index := range count {
+		jobs <- index
+	}
+	close(jobs)
+	wait.Wait()
+	return errors
 }
 
 func (c *Checker) collectTypes() error {
@@ -142,11 +221,16 @@ func (c *Checker) collectTypes() error {
 	return nil
 }
 func (c *Checker) resolveTypeFields() error {
+	var diagnostics source.Diagnostics
+	var declarations []*ast.TypeDecl
 	for _, d := range c.ast.Decls {
 		td, ok := d.(*ast.TypeDecl)
-		if !ok {
-			continue
+		if ok {
+			declarations = append(declarations, td)
 		}
+	}
+	errors := parallel(c.workers, len(declarations), func(index int) error {
+		td := declarations[index]
 		if len(td.Fields) == 0 {
 			return diag(td.Span, "type %s requires at least one field", td.Name)
 		}
@@ -169,6 +253,15 @@ func (c *Checker) resolveTypeFields() error {
 			}
 			t.Fields = append(t.Fields, types.Field{Name: f.Name, Type: ft})
 		}
+		return nil
+	})
+	for _, err := range errors {
+		if err != nil {
+			diagnostics = appendError(diagnostics, err)
+		}
+	}
+	if len(diagnostics) > 0 {
+		return diagnostics
 	}
 	return nil
 }
@@ -178,15 +271,15 @@ func (c *Checker) checkRuntimeArrayPlacement() error {
 		for i, f := range t.Fields {
 			if f.Type.Kind == types.RuntimeArray {
 				if i != len(t.Fields)-1 {
-					return fmt.Errorf("runtime array in %s must be the final member", t.Name)
+					return diag(c.fieldSpan(t.Name, f.Name), "runtime array in %s must be the final member", t.Name)
 				}
 				if types.ContainsRuntimeArray(f.Type.Elem) {
-					return fmt.Errorf("runtime array element %s in %s must have a fixed footprint", f.Type.Elem, t.Name)
+					return diag(c.fieldSpan(t.Name, f.Name), "runtime array element %s in %s must have a fixed footprint", f.Type.Elem, t.Name)
 				}
 				continue
 			}
 			if types.ContainsRuntimeArray(f.Type) {
-				return fmt.Errorf("%s.%s nests a runtime-sized structure; Tach permits one trailing runtime array", t.Name, f.Name)
+				return diag(c.fieldSpan(t.Name, f.Name), "%s.%s nests a runtime-sized structure; Tach permits one trailing runtime array", t.Name, f.Name)
 			}
 		}
 	}
@@ -203,7 +296,7 @@ func (c *Checker) checkTypeCycles() error {
 			return nil
 		}
 		if state[t.Name] == 1 {
-			return fmt.Errorf("recursive value type %s is not supported", t.Name)
+			return diag(c.declarationSpan(t.Name), "recursive value type %s is not supported", t.Name)
 		}
 		if state[t.Name] == 2 {
 			return nil
@@ -224,50 +317,93 @@ func (c *Checker) checkTypeCycles() error {
 	}
 	return nil
 }
-func (c *Checker) collectFunctions() error {
-	for _, d := range c.ast.Decls {
-		switch x := d.(type) {
-		case *ast.FunctionDecl:
-			if isReservedCallable(x.Name) {
-				return diag(x.Span, "function name %q is reserved by Tach", x.Name)
-			}
-			if _, ok := c.funcs[x.Name]; ok {
-				return diag(x.Span, "function %q is already defined", x.Name)
-			}
-			sig := &funcSig{name: x.Name, decl: x, ret: types.TVoid, indexed: len(x.Indices) > 0, exported: x.Exported}
-			seen := map[string]bool{}
-			for _, p := range x.Params {
-				if seen[p.Name] {
-					return diag(p.Span, "duplicate parameter %q", p.Name)
-				}
-				seen[p.Name] = true
-				t, buffer, err := c.parameterType(p.Type, sig.indexed || x.Exported)
-				if err != nil {
-					return err
-				}
-				if buffer && !sig.indexed && !x.Exported {
-					return diag(p.Span, "helper parameter %s cannot be a buffer", p.Name)
-				}
-				sig.params = append(sig.params, namedType{p.Name, t, buffer})
-			}
-			if sig.indexed && x.Return != nil {
-				return diag(x.Return.GetSpan(), "indexed stage %s cannot declare a return type", x.Name)
-			}
-			if !sig.indexed && x.Exported && x.Return != nil {
-				return diag(x.Return.GetSpan(), "public program %s cannot declare a return type", x.Name)
-			}
-			if x.Return != nil {
-				r, err := c.resolveType(x.Return)
-				if err != nil {
-					return err
-				}
-				if r.Kind != types.Void && !types.IsConstructible(r) {
-					return diag(x.Return.GetSpan(), "function cannot return non-constructible type %s", r)
-				}
-				sig.ret = r
-			}
-			c.funcs[x.Name] = sig
+
+func (c *Checker) declarationSpan(name string) source.Span {
+	for _, declaration := range c.ast.Decls {
+		if item, ok := declaration.(*ast.TypeDecl); ok && item.Name == name {
+			return item.Span
 		}
+	}
+	return source.Span{}
+}
+
+func (c *Checker) fieldSpan(typeName, fieldName string) source.Span {
+	for _, declaration := range c.ast.Decls {
+		if item, ok := declaration.(*ast.TypeDecl); ok && item.Name == typeName {
+			for _, field := range item.Fields {
+				if field.Name == fieldName {
+					return field.Span
+				}
+			}
+			return item.Span
+		}
+	}
+	return source.Span{}
+}
+
+func (c *Checker) collectFunctions() error {
+	var diagnostics source.Diagnostics
+	var declarations []*ast.FunctionDecl
+	for _, d := range c.ast.Decls {
+		if function, ok := d.(*ast.FunctionDecl); ok {
+			declarations = append(declarations, function)
+		}
+	}
+	signatures := make([]*funcSig, len(declarations))
+	errors := parallel(c.workers, len(declarations), func(index int) error {
+		x := declarations[index]
+		if ReservedName(x.Name) {
+			return diag(x.Span, "function name %q is reserved by Tach", x.Name)
+		}
+		sig := &funcSig{name: x.Name, decl: x, ret: types.TVoid, indexed: len(x.Indices) > 0, exported: x.Exported}
+		seen := map[string]bool{}
+		for _, p := range x.Params {
+			if seen[p.Name] {
+				return diag(p.Span, "duplicate parameter %q", p.Name)
+			}
+			seen[p.Name] = true
+			t, buffer, err := c.parameterType(p.Type, sig.indexed || x.Exported)
+			if err != nil {
+				return err
+			}
+			if buffer && !sig.indexed && !x.Exported {
+				return diag(p.Span, "helper parameter %s cannot be a buffer", p.Name)
+			}
+			sig.params = append(sig.params, namedType{p.Name, t, buffer})
+		}
+		if sig.indexed && x.Return != nil {
+			return diag(x.Return.GetSpan(), "indexed stage %s cannot declare a return type", x.Name)
+		}
+		if !sig.indexed && x.Exported && x.Return != nil {
+			return diag(x.Return.GetSpan(), "public program %s cannot declare a return type", x.Name)
+		}
+		if x.Return != nil {
+			r, err := c.resolveType(x.Return)
+			if err != nil {
+				return err
+			}
+			if r.Kind != types.Void && !types.IsConstructible(r) {
+				return diag(x.Return.GetSpan(), "function cannot return non-constructible type %s", r)
+			}
+			sig.ret = r
+		}
+		signatures[index] = sig
+		return nil
+	})
+	for index, err := range errors {
+		if err != nil {
+			diagnostics = appendError(diagnostics, err)
+			continue
+		}
+		sig := signatures[index]
+		if _, exists := c.funcs[sig.name]; exists {
+			diagnostics = appendError(diagnostics, diag(sig.decl.Span, "function %q is already defined", sig.name))
+			continue
+		}
+		c.funcs[sig.name] = sig
+	}
+	if len(diagnostics) > 0 {
+		return diagnostics
 	}
 	return nil
 }
@@ -275,6 +411,9 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 	switch t := te.(type) {
 	case *ast.NamedType:
 		x := c.types[t.Name]
+		if x != nil && !c.visible(t.Name, t.Span.File) {
+			x = nil
+		}
 		if x == nil {
 			return nil, diag(t.Span, "unknown type %q", t.Name)
 		}
@@ -328,20 +467,44 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 	}
 }
 
+func (c *Checker) visible(name, file string) bool {
+	owner := c.owners[name]
+	return owner == "" || c.imports[strings.TrimSuffix(file, ".tach")][owner]
+}
+
 func (c *Checker) lowerFunctions() error {
+	var diagnostics source.Diagnostics
+	var declarations []*ast.FunctionDecl
 	for _, d := range c.ast.Decls {
-		switch x := d.(type) {
-		case *ast.FunctionDecl:
-			if len(x.Indices) > 0 {
-				if err := c.lowerStage(x); err != nil {
-					return err
-				}
-			} else if !x.Exported {
-				if err := c.lowerHelper(x); err != nil {
-					return err
-				}
-			}
+		if function, ok := d.(*ast.FunctionDecl); ok && (len(function.Indices) > 0 || !function.Exported) {
+			declarations = append(declarations, function)
 		}
+	}
+	functions := make([]*ir.Function, len(declarations))
+	errors := parallel(c.workers, len(declarations), func(index int) error {
+		local := *c
+		local.mod = &ir.Module{}
+		declaration := declarations[index]
+		var err error
+		if len(declaration.Indices) > 0 {
+			err = local.lowerStage(declaration)
+		} else {
+			err = local.lowerHelper(declaration)
+		}
+		if err == nil {
+			functions[index] = local.mod.Functions[0]
+		}
+		return err
+	})
+	for index, err := range errors {
+		if err != nil {
+			diagnostics = appendError(diagnostics, err)
+		} else {
+			c.mod.Functions = append(c.mod.Functions, functions[index])
+		}
+	}
+	if len(diagnostics) > 0 {
+		return diagnostics
 	}
 	return nil
 }
@@ -1523,7 +1686,7 @@ func intrinsicBuiltin(name string) (ir.IntrinsicKind, bool) {
 	}
 }
 
-func isReservedCallable(name string) bool {
+func ReservedName(name string) bool {
 	if _, ok := intrinsicBuiltin(name); ok {
 		return true
 	}
@@ -1723,8 +1886,17 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 		return r, pt.Elem, nil
 	}
 	sig := c.funcs[id.Name]
-	if sig == nil || sig.indexed || sig.exported {
+	if sig != nil && !c.visible(id.Name, id.Span.File) {
+		sig = nil
+	}
+	if sig == nil {
 		return 0, nil, diag(id.Span, "unknown callable function %q", id.Name)
+	}
+	if sig.indexed {
+		return 0, nil, diag(id.Span, "indexed stage %q cannot be called; use run from a public program", id.Name)
+	}
+	if sig.exported {
+		return 0, nil, diag(id.Span, "public program %q cannot be called", id.Name)
 	}
 	if len(x.Args) != len(sig.params) {
 		return 0, nil, diag(x.Span, "%s expects %d arguments, got %d", id.Name, len(sig.params), len(x.Args))
@@ -1959,7 +2131,7 @@ func vectorComponents(name string, lanes int) ([]int, bool) {
 	return out, true
 }
 func diag(span source.Span, f string, a ...any) error {
-	return &source.Error{Span: span, Message: fmt.Sprintf(f, a...)}
+	return &source.Diagnostic{Span: span, Message: fmt.Sprintf(f, a...)}
 }
 
 func checkRecursion(m *ir.Module) error {
@@ -1987,7 +2159,7 @@ func checkRecursion(m *ir.Module) error {
 	var visit func(string) error
 	visit = func(n string) error {
 		if state[n] == 1 {
-			return fmt.Errorf("recursive function cycle is not allowed: %s -> %s", strings.Join(stack, " -> "), n)
+			return diag(m.Function(n).Span, "recursive function cycle is not allowed: %s -> %s", strings.Join(stack, " -> "), n)
 		}
 		if state[n] == 2 {
 			return nil
@@ -2003,7 +2175,13 @@ func checkRecursion(m *ir.Module) error {
 		state[n] = 2
 		return nil
 	}
+	nodes := make([]string, 0, len(graph))
 	for n := range graph {
+		nodes = append(nodes, n)
+		sort.Strings(graph[n])
+	}
+	sort.Strings(nodes)
+	for _, n := range nodes {
 		if err := visit(n); err != nil {
 			return err
 		}

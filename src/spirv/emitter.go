@@ -34,7 +34,7 @@ func Emit(executable *backend.Executable) ([]byte, error) {
 		binary.LittleEndian.PutUint32(out[i*4:], w)
 	}
 	if err := Validate(out); err != nil {
-		return nil, fmt.Errorf("Tach SPIR-V self-validation failed: %w", err)
+		return nil, fmt.Errorf("tach SPIR-V self-validation failed: %w", err)
 	}
 	return out, nil
 }

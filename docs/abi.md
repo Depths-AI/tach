@@ -1,6 +1,6 @@
 # Tach program, memory, and runtime ABI
 
-Tach owns one external contract across source programs, generated
+Tach owns one external contract across a complete source project, generated
 JavaScript/TypeScript, WebGPU/WGSL, Vulkan/SPIR-V, and reflection metadata.
 This document defines names, resource identity, bytes, physical dispatch
 plans, launch geometry, lifetime, and synchronization.
@@ -52,25 +52,30 @@ The contract has six parts:
 
 ## 2. Public names and generated signatures
 
-Source-named types and exported programs become JavaScript/TypeScript exports.
+Every source-named struct type and every exported program becomes a
+JavaScript/TypeScript export in the project's single package entry point.
 Their names and public parameter names must be portable ASCII identifiers and
-must avoid reserved JavaScript/TypeScript and generated names. Private helpers,
-stages, physical entries, wrappers, and fields may be mangled.
+must avoid reserved JavaScript/TypeScript and generated names. Struct names
+also exclude `Float32Array`, `Int32Array`, `Uint32Array`, and `ReadonlyArray`,
+which retain their host-collection meanings in generated signatures. Runtime
+API names remain available because all runtime types use compiler-private
+`$...` aliases. Private helpers, stages, physical entries, wrappers, and fields
+may be mangled.
 
 An exported indexed shorthand receives `LaunchOptions`:
 
 ```ts
 import type {
-  ComputeBuffer,
-  ComputeCommand,
-  LaunchOptions,
+  ComputeBuffer as $ComputeBuffer,
+  ComputeCommand as $ComputeCommand,
+  LaunchOptions as $LaunchOptions,
 } from "@depths/tach";
 
 export function scale(
-  values: ComputeBuffer<Float32Array | readonly number[]>,
+  values: $ComputeBuffer<Float32Array | readonly number[]>,
   factor: number,
-  $launch?: LaunchOptions<number>,
-): ComputeCommand;
+  $launch?: $LaunchOptions<number>,
+): $ComputeCommand;
 ```
 
 An explicit public program derives every dispatch domain in source and
@@ -78,19 +83,19 @@ receives only `CommandOptions`:
 
 ```ts
 import type {
-  CommandOptions,
-  ComputeBuffer,
-  ComputeCommand,
+  CommandOptions as $CommandOptions,
+  ComputeBuffer as $ComputeBuffer,
+  ComputeCommand as $ComputeCommand,
 } from "@depths/tach";
 
 export function transform(
-  input: ComputeBuffer<Float32Array | readonly number[]>,
-  output: ComputeBuffer<Float32Array | readonly number[]>,
+  input: $ComputeBuffer<Float32Array | readonly number[]>,
+  output: $ComputeBuffer<Float32Array | readonly number[]>,
   count: number,
   factor: number,
   bias: number,
-  $options?: CommandOptions,
-): ComputeCommand;
+  $options?: $CommandOptions,
+): $ComputeCommand;
 ```
 
 The final options object is compiler-generated and is not a Tach source
@@ -217,8 +222,7 @@ All size arithmetic is checked against the 32-bit ABI limit.
 
 Target lowering clones one logical indexed stage for every surviving program
 dispatch. The current policy is intentionally one physical kernel per
-dispatch; identical stages are not deduplicated and distinct dispatches are
-not fused.
+dispatch, in target-plan order.
 
 For each physical kernel:
 
@@ -292,8 +296,6 @@ between adjacent steps when an earlier stage writes a resource touched by the
 next stage. It also records a barrier across repeated program iterations when
 required.
 
-These are synchronization and allocation optimizations, not kernel fusion.
-
 ## 9. Repeat semantics
 
 Both generated option types include `repeat?: number`. The value must be a
@@ -322,8 +324,9 @@ runtimes must obey it.
 
 ## 10. Metadata schema 1
 
-Metadata is embedded in generated Web JavaScript and returned separately by
-the Go compiler API. The schema-1 shape is:
+Schema-1 execution metadata is embedded in generated Web JavaScript and held
+in memory for native validation. It is not a build sidecar or public package
+export. The complete internal shape is:
 
 ```ts
 interface Metadata {
@@ -471,6 +474,82 @@ truth test.
 Schema 1 is compiler/runtime internal while Tach is pre-1.0. Rebuild all
 artifacts together rather than treating it as a stable third-party wire
 format.
+
+### Target-neutral project description: schema 2
+
+The private compiler engine writes one schema-2 JSON value to the TypeScript
+CLI over stdout. This is a compiler/tooling protocol, not a generated file. It
+contains no JavaScript or TypeScript syntax:
+
+```ts
+interface ProjectDescription {
+  schema: 2;
+  name: string;       // Tach project identity
+  version: string;
+  package: string;    // generated npm package identity
+  title: string;
+  summary: string;
+  modules: Array<{
+    name: string;
+    kernels: Array<{
+      name: string;
+      identity: string; // canonical module/kernel
+      title?: string;
+      summary?: string;
+      types: DocumentedType[];
+      functions: DocumentedFunction[];
+    }>;
+  }>;
+}
+
+interface DocumentedFunction {
+  name: string;
+  role: "helper" | "stage" | "kernel" | "program";
+  exported: boolean;
+  summary?: string;
+  coordinates: Array<{ name: string; description?: string }>;
+  parameters: Array<{
+    name: string;
+    type: TypeRef;
+    buffer: boolean;
+    access?: "read" | "write" | "readWrite" | "atomic";
+    description?: string;
+  }>;
+  returns?: { type: TypeRef; description?: string };
+}
+
+interface DocumentedType {
+  name: string;
+  summary?: string;
+  fields: Array<{
+    name: string;
+    type: TypeRef;
+    description?: string;
+  }>;
+}
+
+interface TypeRef {
+  tach: string;
+  kind:
+    | "void" | "bool" | "i32" | "u32" | "f32"
+    | "vector" | "struct" | "atomic"
+    | "fixedArray" | "runtimeArray";
+  name?: string;
+  elem?: TypeRef;
+  count?: number;
+  lanes?: number;
+}
+```
+
+`TypeRef` carries the Tach spelling plus a target-neutral structural kind,
+element/count/lane information, and a struct name where applicable. Optional
+numeric fields are omitted when zero; consumers branch on `kind`, not on
+incidental property presence. Types and functions remain owned by their
+canonical kernel. Arrays are already ordered module, kernel, declaration,
+field, coordinate, and parameter sequences; renderers must preserve that
+compiler-owned order. The TypeScript renderer uses this description to
+generate Markdown and validated package-name imports; there is no dependency
+from Go source to TypeScript presentation.
 
 ## 11. WGSL representation
 
@@ -648,13 +727,33 @@ point:
 The native repository harness implements this contract and additionally runs
 Khronos `spirv-val --target-env vulkan1.1`.
 
-## 18. Artifact compatibility
+## 18. Project package and artifact compatibility
 
-The `.tach` file is the source of truth. One `all` build contains six files:
-`.tir`, `.wgsl`, `.spv`, `.spvasm`, `.js`, and `.d.ts`. Metadata is embedded in
-generated JavaScript and available through the compiler API; it is not a
-separate CLI artifact.
+`tach.json` plus every discovered module/kernel source is the source of truth.
+One successful build atomically installs exactly one target inventory:
 
-Public names, parameter order, logical types, host bytes, plan semantics, and
-runtime ownership form one synchronized result. Do not hand-edit generated
-files or combine outputs from different compiler versions.
+```text
+web                                  spirv
+build/                               build/
+  package.json                         kernel.spv
+  index.js                             README.md
+  index.d.ts                           docs/<module>.md
+  kernel.wgsl
+  README.md
+  docs/<module>.md
+```
+
+The web `package.json` uses the project version and web package name, exposes
+only `index.js`/`index.d.ts`, and declares the exact installed `@depths/tach`
+version because generated JavaScript imports `@depths/tach/internal`. It does
+not re-export the runtime. A consumer installs both packages and imports
+`tach` separately.
+
+SPIR-V output contains only `kernel.spv` and target-independent documentation.
+Target switching replaces the tree; docs-only generation preserves compiled
+entries and changes only `README.md` and `docs/`.
+
+Public names, parameter order, logical types, host bytes, plan semantics,
+runtime ownership, documentation, and package identity form one synchronized
+result. Do not hand-edit generated files or combine outputs from different
+compiler versions or project builds.

@@ -1,0 +1,11 @@
+{
+  "name": "tach-showcase",
+  "version": "0.1.0",
+  "web": {
+    "package": "@tach/showcase-kernels"
+  },
+  "docs": {
+    "title": "Tach GPU showcase",
+    "summary": "Six substantive rendering, mathematics, and physics workloads compiled into one GPU module."
+  }
+}

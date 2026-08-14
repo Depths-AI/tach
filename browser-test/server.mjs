@@ -1,23 +1,18 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import { dirname, extname, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
+const examplesBuild = join(root, "..", "examples", "build");
 const tachDist = dirname(fileURLToPath(import.meta.resolve("@depths/tach")));
 const tachPrefix = "/@depths/tach/";
 const host = "127.0.0.1";
 const port = Number.parseInt(process.env.PORT ?? "4173", 10);
 const contentTypes = new Map([
-  [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
-  [".json", "application/json; charset=utf-8"],
-  [".mjs", "text/javascript; charset=utf-8"],
-  [".spv", "application/octet-stream"],
-  [".tach", "text/plain; charset=utf-8"],
-  [".tir", "text/plain; charset=utf-8"],
   [".wgsl", "text/plain; charset=utf-8"],
 ]);
 
@@ -38,10 +33,11 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  const contentRoot = pathname.startsWith(tachPrefix) ? tachDist : root;
+  const generated = pathname.startsWith("/build/");
+  const contentRoot = pathname.startsWith(tachPrefix) ? tachDist : generated ? examplesBuild : root;
   const contentPath = pathname.startsWith(tachPrefix)
     ? pathname.slice(tachPrefix.length)
-    : pathname.slice(1);
+    : generated ? pathname.slice("/build/".length) : pathname.slice(1);
   const filePath = resolve(contentRoot, contentPath);
   if (filePath !== contentRoot && !filePath.startsWith(contentRoot + sep)) {
     response.writeHead(403);

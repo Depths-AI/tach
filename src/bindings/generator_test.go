@@ -62,7 +62,7 @@ func TestGenerateBaselineProgram(t *testing.T) {
 	if got := metadata.Targets.Web.Kernels[0].EntryPoint; got != "_tach_k0" {
 		t.Fatalf("entry = %q", got)
 	}
-	if !strings.Contains(artifacts.Declarations, "LaunchOptions<number>") || !strings.Contains(artifacts.JavaScript, "$tach.command(0") {
+	if !strings.Contains(artifacts.Declarations, "$LaunchOptions<number>") || !strings.Contains(artifacts.JavaScript, "$tach.command(0") {
 		t.Fatalf("generated artifacts:\n%s\n%s", artifacts.Declarations, artifacts.JavaScript)
 	}
 }
@@ -81,7 +81,7 @@ export function transform(input: buffer<float32[]>, output: buffer<float32[]>) {
 	if len(plan.Steps) != 2 || len(plan.Transients) != 1 {
 		t.Fatalf("plan = %#v", plan)
 	}
-	if !strings.Contains(artifacts.Declarations, "$options?: CommandOptions") {
+	if !strings.Contains(artifacts.Declarations, "$options?: $CommandOptions") {
 		t.Fatalf("declarations:\n%s", artifacts.Declarations)
 	}
 	if metadata.Targets.SPIRV != nil {
@@ -89,11 +89,36 @@ export function transform(input: buffer<float32[]>, output: buffer<float32[]>) {
 	}
 }
 
-func TestValidateMetadataRejectsDanglingPlan(t *testing.T) {
+func TestValidateMetadataRejectsCorruptRuntimeSeams(t *testing.T) {
 	_, metadata := generateSource(t, `export function fill[i](out: buffer<uint32[]>) { if (i < out.length) { out[i] = i; } }`, false)
-	metadata.Targets.Web.Programs[0].Steps[0].Kernel = 99
-	if err := ValidateMetadata(metadata); err == nil {
-		t.Fatal("accepted dangling physical kernel")
+	mutations := map[string]func(*Metadata){
+		"schema":        func(m *Metadata) { m.Schema = 0 },
+		"no target":     func(m *Metadata) { m.Targets.Web = nil },
+		"program count": func(m *Metadata) { m.Targets.Web.Programs = nil },
+		"program index": func(m *Metadata) { m.Targets.Web.Programs[0].Program = 1 },
+		"repeat":        func(m *Metadata) { m.Targets.Web.Programs[0].Repeat = "invalid" },
+		"step kind":     func(m *Metadata) { m.Targets.Web.Programs[0].Steps[0].Kind = "invalid" },
+		"kernel link":   func(m *Metadata) { m.Targets.Web.Programs[0].Steps[0].Kernel = 99 },
+		"entry point":   func(m *Metadata) { m.Targets.Web.Kernels[0].EntryPoint = "wrong" },
+		"workgroup":     func(m *Metadata) { m.Targets.Web.Kernels[0].WorkgroupSize[0] = 0 },
+		"binding group": func(m *Metadata) { m.Targets.Web.Kernels[0].Bindings[0].Group = 1 },
+		"binding index": func(m *Metadata) { m.Targets.Web.Kernels[0].Bindings[0].Binding = 2 },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var corrupted Metadata
+			if err := json.Unmarshal(encoded, &corrupted); err != nil {
+				t.Fatal(err)
+			}
+			mutate(&corrupted)
+			if err := ValidateMetadata(&corrupted); err == nil {
+				t.Fatal("accepted corrupt runtime metadata")
+			}
+		})
 	}
 }
 

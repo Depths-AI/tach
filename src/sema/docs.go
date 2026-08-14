@@ -8,59 +8,65 @@ import (
 	"tach/src/source"
 )
 
-func (c *Checker) checkDocumentation() error {
+func checkDocumentation(module *ast.Module) (flow.Documentation, error) {
 	docs := flow.Documentation{Types: map[string]flow.TypeDocumentation{}, Functions: map[string]flow.FunctionDocumentation{}}
-	module, rest, err := takeDocs(c.ast.Attrs)
+	var diagnostics source.Diagnostics
+	moduleDocs, rest, err := takeDocs(module.Attrs)
 	if err != nil {
-		return err
+		diagnostics = appendError(diagnostics, err)
 	}
 	if len(rest) > 0 {
-		return diag(rest[0].Span, "only @docs is valid at module scope")
+		diagnostics = appendError(diagnostics, diag(rest[0].Span, "only @docs is valid at kernel scope"))
 	}
-	if module != nil {
-		if err := readModuleDocs(*module, &docs); err != nil {
-			return err
+	if moduleDocs != nil {
+		if err := readModuleDocs(*moduleDocs, &docs); err != nil {
+			diagnostics = appendError(diagnostics, err)
 		}
 	}
-	for _, declaration := range c.ast.Decls {
+	for _, declaration := range module.Decls {
 		switch d := declaration.(type) {
 		case *ast.TypeDecl:
 			a, remaining, err := takeDocs(d.Attrs)
 			if err != nil {
-				return err
+				diagnostics = appendError(diagnostics, err)
 			}
 			if len(remaining) > 0 {
-				return diag(remaining[0].Span, "only @docs is valid on type %s", d.Name)
+				diagnostics = appendError(diagnostics, diag(remaining[0].Span, "only @docs is valid on type %s", d.Name))
 			}
 			d.Attrs = nil
 			if a != nil {
 				doc, err := readTypeDocs(*a, d)
 				if err != nil {
-					return err
+					diagnostics = appendError(diagnostics, err)
+					continue
 				}
 				docs.Types[d.Name] = doc
 			}
 		case *ast.FunctionDecl:
 			a, remaining, err := takeDocs(d.Attrs)
 			if err != nil {
-				return err
+				diagnostics = appendError(diagnostics, err)
 			}
 			d.Attrs = remaining
 			if a != nil {
 				doc, err := readFunctionDocs(*a, d)
 				if err != nil {
-					return err
+					diagnostics = appendError(diagnostics, err)
+					continue
 				}
 				docs.Functions[d.Name] = doc
 			}
 		}
 	}
-	c.flow.Documentation = docs
-	return nil
+	if len(diagnostics) > 0 {
+		return docs, diagnostics
+	}
+	return docs, nil
 }
 
 func takeDocs(attrs []ast.Attribute) (*ast.Attribute, []ast.Attribute, error) {
 	var docs *ast.Attribute
+	var duplicate error
 	rest := make([]ast.Attribute, 0, len(attrs))
 	for i := range attrs {
 		if attrs[i].Name != "docs" {
@@ -68,11 +74,14 @@ func takeDocs(attrs []ast.Attribute) (*ast.Attribute, []ast.Attribute, error) {
 			continue
 		}
 		if docs != nil {
-			return nil, nil, diag(attrs[i].Span, "duplicate @docs")
+			if duplicate == nil {
+				duplicate = diag(attrs[i].Span, "duplicate @docs")
+			}
+			continue
 		}
 		docs = &attrs[i]
 	}
-	return docs, rest, nil
+	return docs, rest, duplicate
 }
 
 func readModuleDocs(attribute ast.Attribute, out *flow.Documentation) error {

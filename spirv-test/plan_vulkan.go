@@ -169,7 +169,7 @@ func (h *vulkanHarness) executeProgramUnchecked(spirv, metadataJSON []byte, name
 		bindings := make([]vk.DescriptorSetLayoutBinding, 0, len(kernel.Bindings)+1)
 		for _, binding := range kernel.Bindings {
 			if binding.Group != 0 {
-				return nil, errors.New("Vulkan harness supports target set zero")
+				return nil, errors.New("vulkan harness supports target set zero")
 			}
 			bindings = append(bindings, descriptorLayoutBinding(binding.Binding, vk.DescriptorTypeStorageBuffer))
 		}

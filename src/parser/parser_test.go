@@ -1,6 +1,7 @@
 package parser_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,4 +65,28 @@ func TestModuleDocumentationMustComeFirst(t *testing.T) {
 	if _, err := parser.Parse("comments.tach", `/* removed */ export function k[i](out: buffer<uint32[]>) {}`); err == nil {
 		t.Fatal("accepted a block comment")
 	}
+}
+
+func FuzzParserRecoveryIsTotalAndDeterministic(f *testing.F) {
+	for _, seed := range []string{
+		`export function fill[i](out: buffer<uint32[]>) { if (i < out.length) { out[i] = i; } }`,
+		`@docs(summary("x")) function broken( { import "late/path"; }`,
+		"function x() { const value = \"unterminated\nreturn; }",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		// DECISION: bound one fuzz case at 64 KiB; project tests own larger-file pressure, and this cap can rise with parser limits.
+		if len(input) > 64<<10 {
+			t.Skip()
+		}
+		first, firstDiagnostics := parser.ParseRecover("fuzz.tach", input)
+		second, secondDiagnostics := parser.ParseRecover("fuzz.tach", input)
+		if first == nil || second == nil {
+			t.Fatal("recoverable parser returned a nil module")
+		}
+		if !reflect.DeepEqual(first, second) || !reflect.DeepEqual(firstDiagnostics, secondDiagnostics) {
+			t.Fatal("recoverable parse changed across identical runs")
+		}
+	})
 }

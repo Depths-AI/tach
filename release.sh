@@ -34,7 +34,7 @@ for command in cc git go node npm sha256sum spirv-val; do
     exit 1
   fi
 done
-if ! node -e 'process.exit(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(process.argv[1]) ? 0 : 1)' "$package_version"; then
+if ! node -e 'process.exit(/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(process.argv[1]) ? 0 : 1)' "$package_version"; then
   usage
 fi
 
@@ -82,10 +82,8 @@ go vet ./...
 npm run check:duplicates
 npm ci --ignore-scripts
 npm test
-host_compiler=$workspace/dist/tach
-if [ -f "$workspace/dist/tach.exe" ]; then
-  host_compiler=$workspace/dist/tach.exe
-fi
+host_compiler=$stage_dir/tach-host
+go build -trimpath -ldflags="-s -w -X main.version=$package_version" -o "$host_compiler" .
 
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
   target_os=${target%/*}
@@ -98,7 +96,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 wi
 
   echo "Building $target_os/$target_arch"
   CGO_ENABLED=0 GOOS=$target_os GOARCH=$target_arch \
-    go build -trimpath -ldflags="-s -w -X main.version=$version" -o "$asset" .
+    go build -trimpath -ldflags="-s -w -X main.version=$package_version" -o "$asset" .
 done
 
 cp tach-ts/package.json tach-ts/README.md tach-ts/cli.mjs LICENSE "$package_dir/"

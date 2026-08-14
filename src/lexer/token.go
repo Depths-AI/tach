@@ -57,7 +57,13 @@ const (
 )
 
 type Token struct {
-	Kind Kind
+	Kind    Kind
+	Text    string
+	Span    source.Span
+	Leading []Trivia
+}
+
+type Trivia struct {
 	Text string
 	Span source.Span
 }

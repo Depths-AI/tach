@@ -5,9 +5,16 @@ import "tach/src/source"
 type Node interface{ GetSpan() source.Span }
 
 type Module struct {
-	File  string
-	Attrs []Attribute
-	Decls []Decl
+	File    string
+	Attrs   []Attribute
+	Imports []Import
+	Decls   []Decl
+}
+
+type Import struct {
+	Target string
+	Raw    string
+	Span   source.Span
 }
 type Decl interface {
 	Node

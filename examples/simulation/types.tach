@@ -1,0 +1,25 @@
+@docs(
+  title("Particle data"),
+  summary("Defines the shared data model imported by particle kernels."),
+);
+
+@docs(
+  summary("Controls one particle-integration step."),
+  field(dt, "Elapsed simulation time."),
+  field(count, "Number of active particles."),
+)
+// Central ownership makes both the type and its documentation importable once.
+type ParticleParams = {
+  dt: float32,
+  count: uint32,
+};
+
+@docs(
+  summary("Position and velocity for one particle."),
+  field(position, "Current position vector."),
+  field(velocity, "Velocity applied during integration."),
+)
+type Particle = {
+  position: float32x4,
+  velocity: float32x4,
+};

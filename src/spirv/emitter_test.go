@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/ast"
+	"tach/src/flow"
 	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
@@ -34,19 +36,30 @@ func emitSource(t *testing.T, name, source string) []byte {
 	return bin
 }
 
+func particleModule(t *testing.T) *flow.Module {
+	t.Helper()
+	var modules []*ast.Module
+	for _, name := range []string{"types", "particles"} {
+		source, err := os.ReadFile("../../examples/simulation/" + name + ".tach")
+		if err != nil {
+			t.Fatal(err)
+		}
+		module, err := parser.Parse("simulation/"+name+".tach", string(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		module.File = "simulation/" + name
+		modules = append(modules, module)
+	}
+	module, _, err := sema.CheckAndLowerProject(modules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return module
+}
+
 func TestParticlesSPIRV(t *testing.T) {
-	src, err := os.ReadFile("../../examples/particles.tach")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := parser.Parse("particles.tach", string(src))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := particleModule(t)
 	opt.OptimizeLogical(m)
 	executable, err := spirv.Lower(m)
 	if err != nil {
@@ -190,11 +203,18 @@ export function structMemory[i](out: buffer<uint32>) {
 }
 
 func TestHostResourceAggregatesKeepExplicitLayout(t *testing.T) {
-	src, err := os.ReadFile("../../examples/particles.tach")
+	logical := particleModule(t)
+	if err := opt.OptimizeLogical(logical); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := spirv.Lower(logical)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin := emitSource(t, "particles.tach", string(src))
+	bin, err := spirv.Emit(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
 	m, err := spirv.Decode(bin)
 	if err != nil {
 		t.Fatal(err)

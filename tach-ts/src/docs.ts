@@ -6,51 +6,81 @@ interface TypeRef {
   readonly count?: number;
   readonly lanes?: number;
 }
+
 interface Field { readonly name: string; readonly type: TypeRef; readonly description?: string }
 interface DocumentedType { readonly name: string; readonly summary?: string; readonly fields: readonly Field[] }
 interface Parameter { readonly name: string; readonly type: TypeRef; readonly buffer: boolean; readonly access?: "read" | "write" | "readWrite" | "atomic"; readonly description?: string }
 interface FunctionDoc {
   readonly name: string;
+  readonly role: "helper" | "stage" | "kernel" | "program";
   readonly exported: boolean;
   readonly summary?: string;
   readonly coordinates: readonly { readonly name: string; readonly description?: string }[];
   readonly parameters: readonly Parameter[];
   readonly returns?: { readonly type: TypeRef; readonly description?: string };
 }
-export interface Documentation {
-  readonly schema: 1;
-  readonly source: string;
+interface KernelDoc {
+  readonly name: string;
+  readonly identity: string;
   readonly title?: string;
   readonly summary?: string;
   readonly types: readonly DocumentedType[];
   readonly functions: readonly FunctionDoc[];
 }
+interface ModuleDoc { readonly name: string; readonly kernels: readonly KernelDoc[] }
 
-export function renderDocumentation(module: Documentation): string {
-  if (module.schema !== 1 || !Array.isArray(module.types) || !Array.isArray(module.functions)) throw new TypeError("invalid Tach documentation description");
-  const title = module.title ?? module.source.replace(/\.[^.]*$/u, "");
-  let markdown = `# ${title}\n\n${paragraph(module.summary)}`;
-  if (module.types.length) {
-    markdown += "## Types\n\n";
-    for (const type of module.types) markdown += renderType(type);
+export interface Documentation {
+  readonly schema: 2;
+  readonly name: string;
+  readonly version: string;
+  readonly package: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly modules: readonly ModuleDoc[];
+}
+
+export interface DocumentationFiles {
+  readonly readme: string;
+  readonly modules: ReadonlyMap<string, string>;
+}
+
+export function renderDocumentation(project: Documentation): DocumentationFiles {
+  validate(project);
+  const modules = new Map<string, string>();
+  for (const module of project.modules) {
+    let markdown = `# ${module.name}\n\n`;
+    for (const kernel of module.kernels) {
+      markdown += `## ${kernel.title ?? kernel.name}\n\n**Source:** \`${kernel.identity}\`\n\n${paragraph(kernel.summary)}`;
+      if (kernel.types.length) {
+        markdown += "### Types\n\n";
+        for (const type of kernel.types) markdown += renderType(type);
+      }
+      const internal = kernel.functions.filter((fn) => !fn.exported);
+      const exported = kernel.functions.filter((fn) => fn.exported);
+      if (internal.length) {
+        markdown += "### Internal functions and stages\n\n";
+        for (const fn of internal) markdown += renderFunction(fn);
+      }
+      if (exported.length) {
+        markdown += "### TypeScript-callable programs\n\n";
+        for (const fn of exported) markdown += renderFunction(fn);
+      }
+    }
+    modules.set(module.name, markdown);
   }
-  const privateFunctions = module.functions.filter((fn) => !fn.exported);
-  const exportedFunctions = module.functions.filter((fn) => fn.exported);
-  if (privateFunctions.length) {
-    markdown += "## Internal functions and stages\n\n";
-    for (const fn of privateFunctions) markdown += renderFunction(fn);
+  let readme = `# ${project.title}\n\n${project.summary}\n\n## Installation\n\n\`\`\`console\nnpm install @depths/tach ${project.package}\n\`\`\`\n\n## TypeScript usage\n\nThis example is generated from the compiler-validated public ABI.\n\n\`\`\`ts\n${usage(project)}\`\`\`\n\n## Modules\n\n`;
+  for (const module of project.modules) readme += `- [${module.name}](docs/${encodeURIComponent(module.name)}.md)\n`;
+  return { readme, modules };
+}
+
+function validate(project: Documentation): void {
+  if (project.schema !== 2 || !Array.isArray(project.modules) || !project.name || !project.version || !project.package || !project.title || !project.summary) {
+    throw new TypeError("invalid Tach project documentation description");
   }
-  if (exportedFunctions.length) {
-    markdown += "## Exported programs\n\n";
-    for (const fn of exportedFunctions) markdown += renderFunction(fn);
-    markdown += "## TypeScript usage\n\nThis example is generated from the compiler-validated API.\n\n```ts\n";
-    markdown += usage(module, exportedFunctions) + "```\n";
-  }
-  return markdown;
 }
 
 function renderType(type: DocumentedType): string {
-  let out = `### \`${type.name}\`\n\n${paragraph(type.summary)}\`\`\`tach\ntype ${type.name} = {\n`;
+  let out = `#### \`${type.name}\`\n\n${paragraph(type.summary)}\`\`\`tach\ntype ${type.name} = {\n`;
   for (const field of type.fields) out += `  ${field.name}: ${field.type.tach},\n`;
   out += "};\n```\n\n| Field | Type | Description |\n|---|---|---|\n";
   for (const field of type.fields) out += `| \`${field.name}\` | \`${field.type.tach}\` | ${cell(field.description)} |\n`;
@@ -61,7 +91,7 @@ function renderFunction(fn: FunctionDoc): string {
   const prefix = fn.exported ? "export " : "";
   const coordinates = fn.coordinates.length ? `[${fn.coordinates.map((item) => item.name).join(", ")}]` : "";
   const result = fn.returns ? `: ${fn.returns.type.tach}` : "";
-  let out = `### \`${fn.name}\`\n\n${paragraph(fn.summary)}\`\`\`tach\n${prefix}function ${fn.name}${coordinates}(${fn.parameters.map((parameter) => `${parameter.name}: ${parameter.buffer ? `buffer<${parameter.type.tach}>` : parameter.type.tach}`).join(", ")})${result}\n\`\`\`\n\n`;
+  let out = `#### \`${fn.name}\`\n\n${paragraph(fn.summary)}**Role:** ${fn.role}${fn.exported ? " · exported to TypeScript" : " · Tach-internal"}\n\n\`\`\`tach\n${prefix}function ${fn.name}${coordinates}(${fn.parameters.map((parameter) => `${parameter.name}: ${parameter.buffer ? `buffer<${parameter.type.tach}>` : parameter.type.tach}`).join(", ")})${result}\n\`\`\`\n\n`;
   if (fn.coordinates.length) {
     out += "| Coordinate | Type | Description |\n|---|---|---|\n";
     for (const coordinate of fn.coordinates) out += `| \`${coordinate.name}\` | \`uint32\` | ${cell(coordinate.description)} |\n`;
@@ -76,18 +106,22 @@ function renderFunction(fn: FunctionDoc): string {
   return out;
 }
 
-function usage(module: Documentation, functions: readonly FunctionDoc[]): string {
-  const base = module.source.replace(/\.[^.]*$/u, "");
-  let out = `import { tach } from "@depths/tach";\nimport * as kernels from ${JSON.stringify(`./build/${base}.js`)};\n\n`;
+function usage(project: Documentation): string {
+  const types = project.modules.flatMap((module) => module.kernels.flatMap((kernel) => kernel.types.map((type) => type.name)));
+  const functions = project.modules.flatMap((module) => module.kernels.flatMap((kernel) => kernel.functions.filter((fn) => fn.exported)));
+  const imports = [...functions.map((fn) => fn.name), ...types.map((name) => `type ${name}`)];
+  let out = "import { tach as $$tach } from \"@depths/tach\";\n";
+  if (imports.length) out += `import {\n${imports.map((name) => `  ${name},`).join("\n")}\n} from ${JSON.stringify(project.package)};\n`;
+  out += "\n";
   for (const fn of functions) {
     out += `export async function run_${fn.name}(\n`;
     for (const parameter of fn.parameters) out += `  ${parameter.name}: ${tsType(parameter.type)},\n`;
     if (fn.coordinates.length) out += `  $size: ${fn.coordinates.length === 1 ? "number" : `readonly [${fn.coordinates.map(() => "number").join(", ")}]`},\n`;
-    out += ") {\n  return tach(async (gpu) => {\n";
-    for (const parameter of fn.parameters) if (parameter.buffer) out += `    const $${parameter.name} = gpu.buffer(${parameter.name});\n`;
+    out += ") {\n  return $$tach(async ($$gpu) => {\n";
+    for (const parameter of fn.parameters) if (parameter.buffer) out += `    const $${parameter.name} = $$gpu.buffer(${parameter.name});\n`;
     const args = fn.parameters.map((parameter) => `${parameter.buffer ? "$" : ""}${parameter.name}`);
     if (fn.coordinates.length) args.push("{ size: $size }");
-    out += `    await gpu.submit(kernels.${fn.name}(${args.join(", ")}));\n`;
+    out += `    await $$gpu.submit(${fn.name}(${args.join(", ")}));\n`;
     const output = fn.parameters.find((parameter) => parameter.buffer && parameter.access !== "read");
     if (output) out += `    return $${output.name}.read();\n`;
     out += "  });\n}\n\n";
@@ -99,10 +133,10 @@ function tsType(type: TypeRef): string {
   switch (type.kind) {
     case "bool": return "boolean";
     case "i32": case "u32": case "f32": case "atomic": return "number";
-    case "struct": return `kernels.${type.name!}`;
+    case "struct": return type.name!;
     case "vector": return `readonly [${Array(type.lanes).fill("number").join(", ")}]`;
     case "fixedArray": return `readonly ${tsType(type.elem!)}[]`;
-    case "runtimeArray": return typedArray(type.elem!) || `readonly ${tsType(type.elem!)}[]`;
+    case "runtimeArray": return typedArray(type.elem!) ?? `readonly ${tsType(type.elem!)}[]`;
     default: return "never";
   }
 }

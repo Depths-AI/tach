@@ -1,7 +1,8 @@
 # Tach browser correctness harness
 
-This private Playwright workspace compiles every maintained example and runs
-its generated JavaScript module through Chromium WebGPU. It exercises the same
+This private Playwright workspace builds the maintained multi-module
+`examples` Tach project once and runs its unified generated JavaScript module
+through Chromium WebGPU. It exercises the same
 `@depths/tach` package surface an application uses; it does not call Go from
 the browser or maintain handwritten shader fixtures.
 
@@ -37,10 +38,17 @@ development checkout. `TACH_BIN` can select an explicit executable.
 npm test --workspace=@tach/browser-test
 ```
 
-Playwright's global setup deletes and regenerates `browser-test/build/` by
-calling the public Node compiler API once for each `examples/*.tach` file. The
-test then starts the local server, loads those generated `.js` and `.wgsl`
-artifacts, and executes serially with one Chromium worker.
+Playwright's global setup calls the public project `build()` API once from the
+`examples` root. The compiler atomically regenerates `examples/build/` with
+one `index.js`, one `index.d.ts`, and one `kernel.wgsl` for every exported
+example endpoint. The test server maps that tree to `/build/`; tests import the
+single `/build/index.js`, fetch the exact standalone WGSL module, and execute
+serially with one Chromium worker.
+
+This arrangement checks more than seven isolated algorithms: it exercises
+one-tier project discovery, cross-file imports used by the particle example,
+global binding generation, multiple physical shader entries in one WGSL
+module, and public-program lookup through one package facade.
 
 Chromium is launched headless with WebGPU enabled. Hardware is preferred;
 `--enable-unsafe-swiftshader` permits Chromium's software implementation on a
@@ -68,5 +76,5 @@ npm run start --workspace=@tach/browser-test
 ```
 
 The server listens at <http://127.0.0.1:4173>. It serves only files beneath the
-harness or built `@depths/tach` package roots, rejects path traversal, disables
-caching, and enables cross-origin isolation headers.
+harness, `examples/build`, or built `@depths/tach` package roots, rejects path
+traversal, disables caching, and enables cross-origin isolation headers.

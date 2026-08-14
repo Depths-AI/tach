@@ -2,7 +2,6 @@ package backend
 
 import (
 	"fmt"
-	"strings"
 
 	"tach/src/abi"
 	"tach/src/flow"
@@ -572,25 +571,6 @@ func Verify(executable *Executable) error {
 		}
 	}
 	return nil
-}
-
-func Dump(executable *Executable) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "target %s\n", executable.Target)
-	for i, kernel := range executable.PhysicalKernels {
-		fmt.Fprintf(&b, "kernel %d @%s workgroup(%d,%d,%d) bindings=%d\n", i, kernel.Entry, kernel.Workgroup[0], kernel.Workgroup[1], kernel.Workgroup[2], len(kernel.Bindings))
-	}
-	for _, program := range executable.Programs {
-		fmt.Fprintf(&b, "program %d transients=%d repeat=%d\n", program.Program, len(program.Transients), program.Repeat)
-		for _, step := range program.Steps {
-			if step.Kind == DispatchStepKind {
-				fmt.Fprintf(&b, "  dispatch kernel=%d domain=%v\n", step.Kernel, step.Domain)
-			} else {
-				fmt.Fprintf(&b, "  barrier resources=%v\n", step.Barrier)
-			}
-		}
-	}
-	return b.String()
 }
 
 // DECISION: Physical kernels are one-per-surviving-dispatch for deterministic,

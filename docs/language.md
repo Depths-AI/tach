@@ -5,9 +5,10 @@ control flow, and expressions. It is not TypeScript executed on a GPU: types,
 memory, dispatch, and synchronization have deliberately narrower portable
 rules.
 
-This guide starts with the one-function path, then defines explicit
-multi-stage programs, the value language, parallel memory, and the complete
-grammar. The compiler accepts only what this document assigns a meaning.
+This guide starts with the one-function path inside a project, then defines
+imports, explicit multi-stage programs, the value language, parallel memory,
+formatting, and the complete grammar. The compiler accepts only what this
+document assigns a meaning.
 
 ## 1. The one-function path
 
@@ -40,13 +41,94 @@ defines an indexed GPU stage and a public program that dispatches that stage
 once over the host-provided launch size. No orchestration syntax is required
 for the common one-kernel case.
 
-## 2. Modules and function roles
+## 2. Projects, modules, imports, and function roles
 
-A `.tach` file contains types and functions. Declaration order is irrelevant:
-types and functions may refer to later declarations. Recursive value types and
-recursive call graphs are rejected.
+Tach compiles projects, never isolated files. The nearest ancestor
+`tach.json` is the project root. Every source lives exactly one tier below it:
 
-There are three function roles:
+```text
+simulation/
+  tach.json
+  data/
+    particles.tach
+  physics/
+    integrate.tach
+    simulate.tach
+```
+
+An immediate directory containing `.tach` files is a module; each immediate
+`.tach` file is a kernel file. Root-level or more deeply nested Tach sources
+are errors. The filesystem defines the module set—there is no source list,
+glob, or output path in the manifest.
+
+The manifest separates Tach identity from the name of the generated web
+package:
+
+```json
+{
+  "name": "simulation",
+  "version": "0.1.0",
+  "web": {
+    "package": "@studio/simulation"
+  },
+  "docs": {
+    "title": "Simulation",
+    "summary": "GPU simulation and rendering kernels."
+  }
+}
+```
+
+Every field is required and non-empty. `version` is Semantic Versioning and
+is shared by all targets; `web.package` is only the generated npm package
+identity and never appears in Tach imports. `docs.title` and `docs.summary`
+form the generated package README. Unknown fields, duplicate JSON keys,
+multiple JSON values, invalid versions, and invalid npm package names are
+errors. The manifest cannot enumerate modules or configure source depth,
+output paths, formatting, optimization, or target-specific language rules.
+
+Discovery is deterministic. Root-level and more deeply nested `.tach` files
+are rejected; the generated `build` directory, non-source files, and directory
+symlinks are not modules. Module and kernel identities that differ only by
+case, or two paths naming the same physical kernel file, are rejected. Kernel
+identities must also be valid canonical import spellings, so filesystem names
+cannot create unreachable kernels. They are sorted bytewise with `/`
+separators before parsing, checking, documentation, and emission.
+
+A kernel file may begin with file documentation, followed by one contiguous
+import block:
+
+```tach
+@docs(title("Integration"), summary("Particle integration stages."));
+
+import "data/particles";
+```
+
+The only import form is a string containing the extensionless
+`<module>/<kernel>` identity. It imports the complete file. There are no named,
+default, wildcard, aliased, package, conditional, dynamic, or re-export forms.
+The spelling contains exactly one `/`. Empty segments, `.`, `..`, `.tach`,
+backslashes, drive/URL prefixes, npm-style `@scope/package` names, missing
+targets, duplicate imports, and self imports are rejected. Imports are
+contiguous, precede declarations, and have no initialization or side effects.
+
+Declarations in the current file and its direct imports are visible. Imports
+are deliberately non-transitive: if `physics/simulate` directly names a type
+owned by `data/particles`, it must import `data/particles` even when another
+import already depends on that file. `export` never changes Tach visibility;
+it controls only generated JS/TypeScript exposure.
+
+All top-level type and function names share one project-global namespace and
+must be unique even across unrelated modules. Declaration order within a file
+is irrelevant: types and functions may refer to later visible declarations.
+Recursive value types and recursive call graphs are rejected.
+
+Both dependency views must be acyclic. The kernel graph has one node per file.
+The stricter module graph collapses files by directory, preventing two modules
+from depending on each other in opposite directions even when the individual
+file edges do not form a cycle. This gives the compiler deterministic,
+parallelizable dependency branches without changing source visibility.
+
+There are three fundamental function roles:
 
 ```text
 function helper(values...): Result { ... }
@@ -54,7 +136,7 @@ function stage[i](buffers..., values...) { ... }
 export function program(buffers..., values...) { ... }
 ```
 
-The fourth spelling is the baseline shorthand:
+The fourth source spelling is the baseline shorthand:
 
 ```text
 export function program[i](buffers..., values...) { ... }
@@ -141,10 +223,15 @@ Program declarations do not execute per invocation and have no ordinary
 statements, mutable locals, loops, returns, or `@workgroup`. They describe a
 checked dispatch graph; indexed stages contain the actual per-invocation code.
 
+Every struct type is generated into the TypeScript API. An unexported indexed
+stage is Tach-internal; an exported indexed stage and an exported unindexed
+program are host endpoints. An explicit orchestration program is not callable
+from Tach and cannot be used as a `run` target.
+
 ## 3. Structured documentation and comments
 
 `@docs(...)` is structured compiler input, not an opaque comment blob. A
-module attribute comes first and ends with `;`:
+kernel-file attribute comes first, may precede imports, and ends with `;`:
 
 ```tach
 @docs(
@@ -170,7 +257,7 @@ Every `@docs` requires exactly one non-empty `summary`.
 
 | Context | Additional clauses |
 |---|---|
-| module | `title("...")` |
+| kernel file | `title("...")` |
 | type | `field(name, "...")` |
 | any function | `param(name, "...")` |
 | indexed function | `coordinate(name, "...")` |
@@ -185,10 +272,13 @@ Documentation on a public program describes its host API. Documentation on a
 private stage describes the internal indexed operation. An exported indexed
 function supplies both roles through one declaration.
 
-Generated `.d.ts` output carries summaries, member descriptions, coordinates,
-and inferred buffer access as JSDoc. `tach docs FILE.tach` renders Markdown to
-standard output from a target-neutral compiler description and adds a
-TypeScript usage example from that same validated API.
+Generated `index.d.ts` output carries summaries, member descriptions,
+coordinates, and inferred buffer access as JSDoc. `tach docs` validates the
+project and atomically refreshes `build/README.md` plus one
+`build/docs/<module>.md` file per module without recompiling either GPU target.
+The README's TypeScript usage is derived from the same target-neutral checked
+ABI and is compiled under strict TypeScript settings in the repository suite.
+Every successful `tach build` refreshes the same documentation.
 
 `//` starts a single-line implementation comment. It may appear wherever
 whitespace is accepted. Tach has no block-comment form.
@@ -309,8 +399,7 @@ transient. The same resource cannot fill two buffer formals of one stage. A
 value argument may be a matching public value or nested field, a supported
 literal, or a checked shape when the formal is `uint32`.
 
-Every `run` remains a distinct physical dispatch today. Tach does not perform
-inter-stage fusion.
+Every `run` contributes one ordered physical dispatch to the program plan.
 
 ## 6. Data types
 
@@ -585,9 +674,14 @@ source type or storage class.
 ## 13. Lexical and scope rules
 
 Identifiers begin with a Unicode letter or `_`, then contain Unicode letters,
-digits, or `_`. Public type, program, and parameter names emitted to
-JavaScript/TypeScript must also be portable ASCII identifiers and avoid
-reserved host-language names.
+digits, or `_`. Type names, exported function names, and parameters of exported
+functions must also be portable ASCII JavaScript/TypeScript identifiers and
+avoid TypeScript keywords. Type names additionally cannot be `Float32Array`,
+`Int32Array`, `Uint32Array`, or `ReadonlyArray`, because those spellings retain
+their host-collection meanings in generated signatures. Runtime API names such
+as `ComputeBuffer` remain safe because declarations import them through
+compiler-private `$...` aliases. Private helper and stage names retain the
+broader Tach identifier rule; backend-private names are mangled deterministically.
 
 Whitespace is insignificant. Statements end with `;`. Parameter, argument,
 attribute, and object-literal lists accept a trailing comma. Type fields use
@@ -613,7 +707,8 @@ claiming a representation unavailable on one target.
 The grammar below summarizes syntax; semantic restrictions above still apply.
 
 ```text
-module          := [docs-attribute ";"] {declaration}
+module          := [docs-attribute ";"] {import-decl} {declaration}
+import-decl     := "import" STRING ";"
 declaration     := {attribute} (type-decl | function-decl)
 
 type-decl       := "type" IDENT "=" "{" fields "}" [";"]
@@ -673,13 +768,28 @@ struct-literal  := "{" [literal-field {"," literal-field} [","]] "}"
 literal-field   := IDENT ":" expression
 ```
 
-## 15. Deliberate boundaries
+## 15. Canonical formatting
+
+`tach fmt` discovers the nearest project and formats every kernel as one
+transaction. A lexical or syntactic error prevents all writes. The formatter
+preserves string contents, `//` comments, import order, and declaration order;
+it performs no semantic rewrites.
+
+The fixed style is UTF-8 with LF line endings, one final newline, two-space
+indentation, semicolon-terminated statements, spaces around binary operators,
+and one blank line between top-level declarations. Imports remain contiguous,
+one per line, with one blank line before declarations. Lists target 100 columns;
+multiline lists use one item per line and a trailing comma. An indivisible
+identifier, string, or comment may exceed the target.
+
+## 16. Deliberate boundaries
 
 Tach currently has no pointers, pointer arithmetic, binding annotations,
 ambient invocation objects, recursion, resource aliasing, `break`, `continue`,
-block comments, imports, or provider extensions.
+block comments, cross-project imports, named imports, re-exports, deeper source
+trees, or provider extensions.
 
 Public programs express multiple dispatches and temporary resources, but not
-arbitrary host control flow. Distinct `run` statements are not fused. These
-boundaries keep one source meaning valid for WebGPU/WGSL and Vulkan/SPIR-V and
-leave target adaptation inside the compiler.
+arbitrary host control flow. These boundaries keep one source meaning valid
+for WebGPU/WGSL and Vulkan/SPIR-V and leave target adaptation inside the
+compiler.

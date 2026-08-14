@@ -1,11 +1,11 @@
 @docs(
   title("Atomic accumulation"),
-  summary("Demonstrates workgroup memory, barriers, and atomic updates to shared GPU state.")
+  summary("Demonstrates workgroup memory, barriers, and atomic updates to shared GPU state."),
 );
 
 @docs(
   summary("Global counters updated atomically by the kernel."),
-  field(total, "Number of lanes that observed an untouched workgroup slot.")
+  field(total, "Number of lanes that observed an untouched workgroup slot."),
 )
 type Counters = {
   total: atomic<uint32>,
@@ -14,19 +14,17 @@ type Counters = {
 @docs(
   summary("Counts the first atomic update performed by each workgroup lane."),
   coordinate(i, "Global invocation index."),
-  param(counters, "Global counter state updated by all workgroups.")
+  param(counters, "Global counter state updated by all workgroups."),
 )
 @workgroup(64)
 export function accumulate[i](counters: buffer<Counters>) {
   let scratch: shared<atomic<uint32>[64]>;
   const lane = i % 64;
-
   // Establish the explicit initialization before any lane uses shared state.
   if (lane == 0) {
     atomicStore(scratch[0], 0);
   }
   workgroupBarrier();
-
   const previous = atomicAdd(scratch[lane], 1);
   // Only the first update to a lane contributes to the global total.
   if (previous == 0) {

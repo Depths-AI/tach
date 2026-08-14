@@ -1,0 +1,26 @@
+@docs(
+  title("Color utilities"),
+  summary("Shares display-safe color helpers across both rendering workloads."),
+);
+
+@docs(
+  summary("Clamps a scalar to zero through one."),
+  param(value, "Value to clamp."),
+  returns("The clamped value."),
+)
+function saturate(value: float32): float32 {
+  return value < 0.0 ? 0.0 : value > 1.0 ? 1.0 : value;
+}
+
+@docs(
+  summary("Packs RGB into opaque RGBA8."),
+  param(color, "RGB value."),
+  returns("Packed RGBA8 pixel."),
+)
+function packColor(color: float32x3): uint32 {
+  // RGBA lanes occupy the low-to-high bytes consumed by ImageData.
+  const red = uint32(saturate(color.x) * 255.0);
+  const green = uint32(saturate(color.y) * 255.0);
+  const blue = uint32(saturate(color.z) * 255.0);
+  return red | (green << 8) | (blue << 16) | (255 << 24);
+}

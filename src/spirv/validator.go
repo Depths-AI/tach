@@ -15,7 +15,7 @@ type Instruction struct {
 }
 
 // Module is the binary-level representation consumed by Tach's SPIR-V
-// validator and disassembler.
+// validator and diagnostic summary.
 type Module struct {
 	Version      uint32
 	Generator    uint32
@@ -37,7 +37,7 @@ func Decode(data []byte) (*Module, error) {
 		return nil, fmt.Errorf("bad SPIR-V magic 0x%08x", words[0])
 	}
 	if words[1] != Version {
-		return nil, fmt.Errorf("Tach SPIR-V profile requires version 1.3, got word 0x%08x", words[1])
+		return nil, fmt.Errorf("tach SPIR-V profile requires version 1.3, got word 0x%08x", words[1])
 	}
 	if words[3] == 0 {
 		return nil, fmt.Errorf("SPIR-V id bound must be non-zero")
@@ -491,7 +491,7 @@ func (v *validation) validateLayoutAndDefinitions() error {
 				return fmt.Errorf("invalid extended instruction import")
 			}
 			if name != "GLSL.std.450" {
-				return fmt.Errorf("Tach supports only GLSL.std.450 extended instructions, got %q", name)
+				return fmt.Errorf("tach supports only GLSL.std.450 extended instructions, got %q", name)
 			}
 			for id, existing := range v.extImports {
 				if existing == name && id != a[0] {
@@ -502,11 +502,11 @@ func (v *validation) validateLayoutAndDefinitions() error {
 		case OpMemoryModel:
 			memory++
 			if a[0] != AddressingLogical || a[1] != MemoryGLSL450 {
-				return fmt.Errorf("Tach requires Logical + GLSL450 memory model")
+				return fmt.Errorf("tach requires Logical + GLSL450 memory model")
 			}
 		case OpEntryPoint:
 			if a[0] != ExecutionModelGLCompute {
-				return fmt.Errorf("Tach supports GLCompute entry points only")
+				return fmt.Errorf("tach supports GLCompute entry points only")
 			}
 			name, _, _ := literalString(a, 2)
 			if _, exists := v.entryPoints[a[1]]; exists {
@@ -515,7 +515,7 @@ func (v *validation) validateLayoutAndDefinitions() error {
 			v.entryPoints[a[1]] = name
 		case OpExecutionMode:
 			if a[1] != ExecutionModeLocalSize {
-				return fmt.Errorf("Tach supports LocalSize execution mode only")
+				return fmt.Errorf("tach supports LocalSize execution mode only")
 			}
 			if a[2] == 0 || a[3] == 0 || a[4] == 0 {
 				return fmt.Errorf("LocalSize components must be positive")
@@ -566,17 +566,17 @@ func (v *validation) validateLayoutAndDefinitions() error {
 			v.types[a[0]] = &typeInfo{kind: typeBool}
 		case OpTypeInt:
 			if a[1] != 32 || (a[2] != 0 && a[2] != 1) {
-				return fmt.Errorf("Tach integer type must be 32-bit signed/unsigned")
+				return fmt.Errorf("tach integer type must be 32-bit signed/unsigned")
 			}
 			v.types[a[0]] = &typeInfo{kind: typeInt, width: a[1], signed: a[2] == 1}
 		case OpTypeFloat:
 			if a[1] != 32 {
-				return fmt.Errorf("Tach float type must be float32")
+				return fmt.Errorf("tach float type must be float32")
 			}
 			v.types[a[0]] = &typeInfo{kind: typeFloat, width: a[1]}
 		case OpTypeVector:
 			if a[2] < 2 || a[2] > 4 {
-				return fmt.Errorf("Tach vector width must be 2..4")
+				return fmt.Errorf("tach vector width must be 2..4")
 			}
 			v.types[a[0]] = &typeInfo{kind: typeVector, elem: a[1], lanes: a[2]}
 		case OpTypeArray:
@@ -664,10 +664,10 @@ func (v *validation) validateLayoutAndDefinitions() error {
 		return fmt.Errorf("unterminated OpFunction")
 	}
 	if caps != 1 {
-		return fmt.Errorf("Tach module must declare Shader capability exactly once")
+		return fmt.Errorf("tach module must declare Shader capability exactly once")
 	}
 	if memory != 1 {
-		return fmt.Errorf("Tach module must declare one memory model")
+		return fmt.Errorf("tach module must declare one memory model")
 	}
 	return nil
 }
@@ -1733,15 +1733,15 @@ func (v *validation) validateDecorationsAndABI() error {
 		switch storage {
 		case StorageInput:
 			if d.builtin == nil {
-				return fmt.Errorf("Input variable %%%d lacks BuiltIn decoration", id)
+				return fmt.Errorf("input variable %%%d lacks BuiltIn decoration", id)
 			}
 			if d.binding != nil || d.set != nil {
-				return fmt.Errorf("Input builtin %%%d cannot have descriptor decorations", id)
+				return fmt.Errorf("input builtin %%%d cannot have descriptor decorations", id)
 			}
 			switch *d.builtin {
 			case BuiltInNumWorkgroups, BuiltInWorkgroupID, BuiltInLocalInvocationID, BuiltInGlobalInvocationID, BuiltInLocalInvocationIndex:
 			default:
-				return fmt.Errorf("Input %%%d uses builtin %d outside Tach profile", id, *d.builtin)
+				return fmt.Errorf("input %%%d uses builtin %d outside Tach profile", id, *d.builtin)
 			}
 		case StorageUniform, StorageStorageBuffer:
 			if d.binding == nil || d.set == nil {
@@ -1771,10 +1771,10 @@ func (v *validation) validateDecorationsAndABI() error {
 			}
 		case StorageWorkgroup:
 			if d.builtin != nil || d.binding != nil || d.set != nil || d.nonWritable {
-				return fmt.Errorf("Workgroup variable %%%d has invalid interface/descriptor decoration", id)
+				return fmt.Errorf("workgroup variable %%%d has invalid interface/descriptor decoration", id)
 			}
 			if err := v.rejectWorkgroupExplicitLayout(vt.elem, map[uint32]bool{}); err != nil {
-				return fmt.Errorf("Workgroup variable %%%d: %w", id, err)
+				return fmt.Errorf("workgroup variable %%%d: %w", id, err)
 			}
 		default:
 			return fmt.Errorf("global variable %%%d storage class %d outside Tach profile", id, storage)

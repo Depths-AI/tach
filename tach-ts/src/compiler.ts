@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { access, chmod, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -13,13 +13,13 @@ export interface CompilerRunOptions {
   readonly env?: Readonly<Record<string, string>>;
 }
 
-export type BuildTarget = "web" | "spirv" | "all";
+export type BuildTarget = "web" | "spirv";
 
 export interface BuildOptions extends CompilerRunOptions {
   readonly target?: BuildTarget;
 }
 
-export interface CompilerRun {
+interface CompilerRun {
   readonly path: string;
   readonly stdout: string;
   readonly stderr: string;
@@ -69,7 +69,7 @@ function target(): NativeTarget {
   };
 }
 
-async function packageVersion(): Promise<string> {
+export async function packageVersion(): Promise<string> {
   const info = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as unknown;
   const version = typeof info === "object" && info !== null && "version" in info
     ? (info as { readonly version?: unknown }).version
@@ -166,10 +166,14 @@ async function installCompiler(native: NativeTarget, version: string): Promise<s
 }
 
 export async function compilerPath(): Promise<string> {
+  let path: string;
   const override = process.env.TACH_BIN;
   if (override) {
-    const path = isAbsolute(override) ? override : resolve(process.cwd(), override);
-    if (await readableExecutable(path)) return path;
+    path = isAbsolute(override) ? override : resolve(process.cwd(), override);
+    if (await readableExecutable(path)) {
+      await verifyCompilerVersion(path);
+      return path;
+    }
     throw new TachError(
       "compiler-install",
       `TACH_BIN does not point to an executable: ${path}`,
@@ -180,37 +184,45 @@ export async function compilerPath(): Promise<string> {
   const native = target();
 
   const installed = join(nativeDirectory, native.executable);
-  if (await readableExecutable(installed)) return installed;
-  const development = await developmentCompiler(native);
-  if (development) return development;
-  try {
-    return await installCompiler(native, await packageVersion());
-  } catch (cause) {
-    throw normalizeError(cause, "compiler-install", "compilerPath");
+  if (await readableExecutable(installed)) path = installed;
+  else {
+    const development = await developmentCompiler(native);
+    if (development) path = development;
+    else {
+      try {
+        path = await installCompiler(native, await packageVersion());
+      } catch (cause) {
+        throw normalizeError(cause, "compiler-install", "compilerPath");
+      }
+    }
+  }
+  await verifyCompilerVersion(path);
+  return path;
+}
+
+async function verifyCompilerVersion(path: string): Promise<void> {
+  const expected = await packageVersion();
+  const result = spawn(path, ["_version"], { stdio: ["ignore", "pipe", "pipe"] });
+  const stdout: Uint8Array[] = [];
+  const stderr: Uint8Array[] = [];
+  result.stdout.on("data", (chunk: Uint8Array) => stdout.push(chunk));
+  result.stderr.on("data", (chunk: Uint8Array) => stderr.push(chunk));
+  const version = await new Promise<string>((resolveVersion, rejectVersion) => {
+    result.once("error", rejectVersion);
+    result.once("close", (code) => code === 0
+      ? resolveVersion(Buffer.concat(stdout).toString("utf8").trim())
+      : rejectVersion(new Error(Buffer.concat(stderr).toString("utf8").trim() || `compiler exited ${code}`)));
+  });
+  if (version !== expected && !(expected === "0.0.0" && version === "dev")) {
+    throw new TachError("compiler-install", `compiler version ${version} does not match @depths/tach ${expected}`, { operation: "compilerPath" });
   }
 }
 
-export async function runCompiler(
-  args: readonly string[],
-  options: CompilerRunOptions = {},
-): Promise<CompilerRun> {
-  const documentation = args[0] === "docs";
-  if (documentation && args.length !== 2) {
-    throw new TachError(
-      "compiler-execution",
-      "tach docs expects exactly one .tach file",
-      { operation: "compiler" },
-    );
-  }
+async function runNative(args: readonly string[], options: CompilerRunOptions = {}): Promise<CompilerRun> {
   const path = await compilerPath();
-
   let child;
   try {
-    child = spawn(path, documentation ? ["describe", args[1]!] : [...args], {
-      cwd: options.cwd,
-      env: { ...process.env, ...options.env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    child = spawn(path, [...args], { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: ["ignore", "pipe", "pipe"] });
   } catch (cause) {
     throw normalizeError(cause, "compiler-execution", "compiler");
   }
@@ -219,45 +231,158 @@ export async function runCompiler(
     const stderrChunks: Uint8Array[] = [];
     child.stdout.on("data", (chunk: Uint8Array) => stdoutChunks.push(chunk));
     child.stderr.on("data", (chunk: Uint8Array) => stderrChunks.push(chunk));
-    child.once("error", (cause) => {
-      rejectRun(normalizeError(cause, "compiler-execution", "compiler"));
-    });
+    child.once("error", (cause) => rejectRun(normalizeError(cause, "compiler-execution", "compiler")));
     child.once("close", (code, signal) => {
-      let stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      if (code === 0 && documentation) {
-        try {
-          stdout = renderDocumentation(JSON.parse(stdout) as Documentation);
-        } catch (cause) {
-          rejectRun(normalizeError(cause, "compiler-execution", "docs"));
-          return;
-        }
-      }
-      const output = {
-        path,
-        stdout,
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-      };
-      if (code === 0) {
-        resolveRun(output);
-        return;
-      }
+      const output = { path, stdout: Buffer.concat(stdoutChunks).toString("utf8"), stderr: Buffer.concat(stderrChunks).toString("utf8") };
+      if (code === 0) return resolveRun(output);
       const reason = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
-      rejectRun(new TachError(
-        "compiler-execution",
-        `tach ${args.join(" ")} failed with ${reason}`,
-        {
-          operation: "compiler",
-          cause: { ...output, exitCode: code, signal },
-        },
-      ));
+      rejectRun(new TachError("compiler-execution", `${args[0]} failed with ${reason}${output.stderr ? `\n${output.stderr.trimEnd()}` : ""}`, { operation: "compiler", cause: { ...output, exitCode: code, signal } }));
     });
   });
 }
 
-export async function build(
-  source: string,
-  options: BuildOptions = {},
-): Promise<CompilerRun> {
-  const { target, ...runOptions } = options;
-  return runCompiler(target === undefined ? ["build", source] : ["build", "--target", target, source], runOptions);
+async function projectRoot(cwd = process.cwd()): Promise<string> {
+  let directory = resolve(cwd);
+  for (;;) {
+    try {
+      if ((await stat(join(directory, "tach.json"))).isFile()) return realpath(directory);
+    } catch {}
+    const parent = dirname(directory);
+    if (parent === directory) throw new TachError("compiler-execution", `no tach.json found from ${cwd}`, { operation: "project" });
+    directory = parent;
+  }
+}
+
+function parseDescription(stdout: string): Documentation {
+  try {
+    return JSON.parse(stdout) as Documentation;
+  } catch (cause) {
+    throw normalizeError(cause, "compiler-execution", "description");
+  }
+}
+
+function generatedPackage(project: Documentation, runtimeVersion: string): object {
+  return {
+    name: project.package,
+    version: project.version,
+    type: "module",
+    sideEffects: false,
+    exports: { ".": { types: "./index.d.ts", import: "./index.js" } },
+    dependencies: { "@depths/tach": runtimeVersion },
+  };
+}
+
+async function writeDocumentation(root: string, project: Documentation): Promise<void> {
+  const rendered = renderDocumentation(project);
+  const directory = join(root, "docs");
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(root, "README.md"), rendered.readme, "utf8");
+  await Promise.all([...rendered.modules].map(([name, markdown]) => writeFile(join(directory, `${name}.md`), markdown, "utf8")));
+}
+
+async function inventory(root: string): Promise<string[]> {
+  const files: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else files.push(relative(root, path).replaceAll("\\", "/"));
+    }
+  }
+  await visit(root);
+  return files.sort();
+}
+
+function expectedInventory(project: Documentation, target: BuildTarget): string[] {
+  const files = ["README.md", ...project.modules.map((module) => `docs/${module.name}.md`)];
+  files.push(...target === "web" ? ["index.d.ts", "index.js", "kernel.wgsl", "package.json"] : ["kernel.spv"]);
+  return files.sort();
+}
+
+async function assertInventory(stage: string, project: Documentation, target: BuildTarget): Promise<void> {
+  const actual = await inventory(stage);
+  const expected = expectedInventory(project, target);
+  if (actual.join("\n") !== expected.join("\n")) throw new Error(`invalid staged artifact inventory:\n${actual.join("\n")}`);
+}
+
+async function replaceBuild(root: string, stage: string): Promise<void> {
+  const destination = join(root, "build");
+  const backup = join(root, `.build.${randomUUID()}.backup`);
+  let previous = false;
+  try {
+    const info = await lstat(destination);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${destination} is not a replaceable build directory`);
+    await rename(destination, backup);
+    previous = true;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+  }
+  try {
+    await rename(stage, destination);
+  } catch (cause) {
+    if (previous) await rename(backup, destination);
+    throw cause;
+  }
+  if (previous) await rm(backup, { recursive: true, force: true });
+}
+
+export interface ProjectResult { readonly root: string; readonly description: Documentation }
+
+export async function build(options: BuildOptions = {}): Promise<ProjectResult> {
+  const { target = "web", ...runOptions } = options;
+  const root = await projectRoot(runOptions.cwd);
+  const stage = join(root, `.build.${randomUUID()}.tmp`);
+  await mkdir(stage);
+  try {
+    const run = await runNative(["_build", "--target", target, "--output", stage], { ...runOptions, cwd: root });
+    const description = parseDescription(run.stdout);
+    await writeDocumentation(stage, description);
+    if (target === "web") await writeFile(join(stage, "package.json"), `${JSON.stringify(generatedPackage(description, await packageVersion()), null, 2)}\n`, "utf8");
+    await assertInventory(stage, description, target);
+    await replaceBuild(root, stage);
+    return { root, description };
+  } catch (cause) {
+    await rm(stage, { recursive: true, force: true });
+    throw cause;
+  }
+}
+
+export async function check(options: CompilerRunOptions = {}): Promise<ProjectResult> {
+  const root = await projectRoot(options.cwd);
+  const run = await runNative(["_check"], { ...options, cwd: root });
+  const description = parseDescription(run.stdout);
+  renderDocumentation(description);
+  JSON.stringify(generatedPackage(description, await packageVersion()));
+  return { root, description };
+}
+
+export async function docs(options: CompilerRunOptions = {}): Promise<ProjectResult> {
+  const root = await projectRoot(options.cwd);
+  const run = await runNative(["_docs"], { ...options, cwd: root });
+  const description = parseDescription(run.stdout);
+  const stage = join(root, `.build.${randomUUID()}.tmp`);
+  try {
+    try {
+      const current = join(root, "build");
+      const info = await lstat(current);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${current} is not a build directory`);
+      await cp(current, stage, { recursive: true, errorOnExist: true });
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      await mkdir(stage);
+    }
+    await rm(join(stage, "README.md"), { force: true });
+    await rm(join(stage, "docs"), { recursive: true, force: true });
+    await writeDocumentation(stage, description);
+    await replaceBuild(root, stage);
+    return { root, description };
+  } catch (cause) {
+    await rm(stage, { recursive: true, force: true });
+    throw cause;
+  }
+}
+
+export async function format(options: CompilerRunOptions = {}): Promise<void> {
+  const root = await projectRoot(options.cwd);
+  await runNative(["_fmt"], { ...options, cwd: root });
 }

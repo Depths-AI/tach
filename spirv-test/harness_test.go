@@ -6,12 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"tach/src/compiler"
+	"tach/src/flow"
 	"tach/src/spirv"
 )
 
@@ -51,7 +51,12 @@ func TestMain(m *testing.M) {
 
 func TestExamplesVulkan(t *testing.T) {
 	cases := exampleCases()
-	if err := checkExampleCoverage(cases); err != nil {
+	compilation, err := compiler.Build(filepath.Join(repositoryRoot(), "examples"), compiler.TargetSPIRV, 0)
+	if err != nil {
+		report.setupFailure = err.Error()
+		t.Fatal(err)
+	}
+	if err := checkExampleCoverage(cases, compilation); err != nil {
 		report.setupFailure = err.Error()
 		t.Fatal(err)
 	}
@@ -67,6 +72,14 @@ func TestExamplesVulkan(t *testing.T) {
 		t.Fatal(report.setupFailure)
 	}
 	report.validatorVersion = strings.SplitN(strings.TrimSpace(string(versionOutput)), "\n", 2)[0]
+	if err := validateSPIRV(validator, t.TempDir(), "kernel", compilation.SPIRV); err != nil {
+		report.setupFailure = err.Error()
+		t.Fatal(err)
+	}
+	if _, err := spirv.Summary(compilation.SPIRV); err != nil {
+		report.setupFailure = err.Error()
+		t.Fatal(err)
+	}
 
 	harness, err := openVulkan()
 	if err != nil {
@@ -88,23 +101,7 @@ func TestExamplesVulkan(t *testing.T) {
 				report.results = append(report.results, result)
 			}()
 
-			compilation, err := compiler.CompileFile(filepath.Join(repositoryRoot(), "examples", testCase.name+".tach"))
-			if err != nil {
-				result.status, result.failure = "failed", err.Error()
-				t.Error(err)
-				return
-			}
 			result.spirvBytes = len(compilation.SPIRV)
-			if err := validateSPIRV(validator, t.TempDir(), testCase.name, compilation.SPIRV); err != nil {
-				result.status, result.failure = "failed", err.Error()
-				t.Error(err)
-				return
-			}
-			if _, err := spirv.Summary(compilation.SPIRV); err != nil {
-				result.status, result.failure = "failed", err.Error()
-				t.Error(err)
-				return
-			}
 			output, err := harness.executeProgram(
 				compilation.SPIRV,
 				compilation.Metadata,
@@ -134,29 +131,42 @@ func validateSPIRV(validator, directory, name string, module []byte) error {
 	return nil
 }
 
-func checkExampleCoverage(cases []exampleCase) error {
-	entries, err := filepath.Glob(filepath.Join(repositoryRoot(), "examples", "*.tach"))
-	if err != nil {
-		return err
-	}
-	sources := make([]string, len(entries))
-	for i, entry := range entries {
-		sources[i] = strings.TrimSuffix(filepath.Base(entry), ".tach")
-	}
+func checkExampleCoverage(cases []exampleCase, compilation *compiler.Result) error {
 	covered := map[string]bool{}
 	for _, testCase := range cases {
-		covered[testCase.name] = true
+		if covered[testCase.program] {
+			return fmt.Errorf("exported program %s has multiple Vulkan cases", testCase.program)
+		}
+		covered[testCase.program] = true
 	}
-	tests := make([]string, 0, len(covered))
+	for _, program := range compilation.Module.Programs {
+		if !covered[program.Name] {
+			return fmt.Errorf("exported program %s has no Vulkan case", program.Name)
+		}
+		delete(covered, program.Name)
+	}
 	for name := range covered {
-		tests = append(tests, name)
-	}
-	sort.Strings(sources)
-	sort.Strings(tests)
-	if strings.Join(sources, "\n") != strings.Join(tests, "\n") {
-		return fmt.Errorf("SPIR-V cases %v do not exactly cover examples %v", tests, sources)
+		return fmt.Errorf("Vulkan case %s has no exported program", name)
 	}
 	return nil
+}
+
+func TestExampleCoverageRequiresExactlyOneCasePerProgram(t *testing.T) {
+	compilation := &compiler.Result{Module: &flow.Module{Programs: []*flow.Program{{Name: "one"}}}}
+	for name, cases := range map[string][]exampleCase{
+		"missing":   nil,
+		"extra":     {{program: "two"}},
+		"duplicate": {{program: "one"}, {program: "one"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := checkExampleCoverage(cases, compilation); err == nil {
+				t.Fatal("invalid coverage accepted")
+			}
+		})
+	}
+	if err := checkExampleCoverage([]exampleCase{{program: "one"}}, compilation); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func repositoryRoot() string {
