@@ -342,19 +342,26 @@ contract.
 
 ## Compiler commands and artifacts
 
-The public `tach` command is delivered by `@depths/tach`. It always operates on
-the nearest complete project and accepts no source-file argument:
+The public `tach` command is delivered by `@depths/tach`. Project commands
+operate on the nearest complete project and accept no source-file argument:
 
 ```text
 tach build [--target web|spirv]
 tach check
 tach docs
 tach fmt
+tach instructions [--details <section>...]
 tach version
 tach help
 tach --help
 tach -h
 ```
+
+`tach instructions` works outside a project and prints the dense AI-agent
+guide. Its `§N` references are retrievable without emitting the whole reference:
+`tach instructions --details 6 7` prints only the import and visibility
+sections. Both layers ship inside `@depths/tach`; retrieval needs neither a
+Tach project nor the native compiler or network.
 
 `build` defaults to `web`. Target switching replaces the complete generated
 tree, so stale artifacts from another target cannot survive:

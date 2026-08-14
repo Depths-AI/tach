@@ -7,7 +7,7 @@
   "files": [
     "cli.mjs",
     "dist/",
-    "scripts/",
+    "scripts/install.mjs",
     "README.md"
   ],
   "exports": {
@@ -28,8 +28,8 @@
     "tach": "./cli.mjs"
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node scripts/instructions.mjs",
+    "check": "tsc -p tsconfig.json --noEmit && node scripts/instructions.mjs --check",
     "test": "npm run build && node --test tests/*.test.mjs",
     "prepare": "npm run build",
     "postinstall": "node scripts/install.mjs"

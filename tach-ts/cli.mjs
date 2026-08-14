@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { readFile } from "node:fs/promises";
+
 import { build, check, docs, format, packageVersion } from "./dist/compiler.js";
 import { TachError } from "./dist/error.js";
 
@@ -10,16 +12,18 @@ Usage:
   tach check
   tach docs
   tach fmt
+  tach instructions [--details <section>...]
   tach version
   tach help
 
 Commands:
-  build    build the nearest Tach project (web by default)
-  check    validate the complete web and SPIR-V project pipeline without writing
-  docs     refresh only generated project documentation
-  fmt      format every kernel in the nearest Tach project
-  version  print the installed Tach version
-  help     print this help
+  build         build the nearest Tach project (web by default)
+  check         validate the complete web and SPIR-V project pipeline without writing
+  docs          refresh only generated project documentation
+  fmt           format every kernel in the nearest Tach project
+  instructions  print AI-agent guidance or selected numbered detail sections
+  version       print the installed Tach version
+  help          print this help
 `;
 
 const args = process.argv.slice(2);
@@ -33,6 +37,26 @@ try {
       if (args.length !== 1) throw new Error("version accepts no arguments");
       console.log(`tach ${await packageVersion()}`);
       break;
+    case "instructions": {
+      if (args.length !== 1 && (args[1] !== "--details" || args.length < 3)) {
+        throw new Error("usage: tach instructions [--details <section>...]");
+      }
+      const bundle = JSON.parse(await readFile(new URL("./dist/instructions.json", import.meta.url), "utf8"));
+      if (args.length === 1) {
+        process.stdout.write(`${bundle.mini}\n`);
+        break;
+      }
+      const requested = [...new Set(args.slice(2))];
+      const selected = requested.map((number) => {
+        if (!/^[1-9]\d*$/u.test(number) || !bundle.sections[number]) {
+          throw new Error(`instruction section ${JSON.stringify(number)} does not exist`);
+        }
+        const section = bundle.sections[number];
+        return `## ${number}. ${section.title}\n\n${section.markdown}`;
+      });
+      process.stdout.write(`${selected.join("\n\n")}\n`);
+      break;
+    }
     case "build": {
       let target = "web";
       if (args.length === 3 && args[1] === "--target" && (args[2] === "web" || args[2] === "spirv")) target = args[2];

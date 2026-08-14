@@ -47,6 +47,7 @@ test("the public CLI is authoritative and the private compiler resolves", async 
   for (const help of helps) {
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /tach build \[--target web\|spirv\]/u);
+    assert.match(help.stdout, /tach instructions \[--details <section>\.\.\.\]/u);
     assert.equal(help.stdout, helps[0].stdout);
   }
   const version = spawnSync(process.execPath, [cli, "version"], { encoding: "utf8" });
@@ -57,6 +58,29 @@ test("the public CLI is authoritative and the private compiler resolves", async 
   assert.match(unknown.stderr, /unknown command/u);
   for (const args of [["build", "kernel.tach"], ["build", "--target", "invalid"], ["check", "--target", "web"], ["fmt", "kernel.tach"]]) {
     const rejected = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8" });
+    assert.notEqual(rejected.status, 0, `${args.join(" ")} unexpectedly succeeded`);
+  }
+});
+
+test("bundled instructions expose dense context and exact detail chunks", async () => {
+  const bundle = JSON.parse(await readFile(join(packageRoot, "dist", "instructions.json"), "utf8"));
+  assert.equal(bundle.schema, 1);
+  assert.deepEqual(Object.keys(bundle.sections), Array.from({ length: 85 }, (_, index) => String(index + 1)));
+
+  const mini = spawnSync(process.execPath, [cli, "instructions"], { cwd: tmpdir(), encoding: "utf8" });
+  assert.equal(mini.status, 0, mini.stderr);
+  assert.equal(mini.stdout.trim(), bundle.mini);
+  assert.ok(mini.stdout.trim().split(/\s+/u).length >= 1_500);
+  assert.doesNotMatch(mini.stdout, /INSTRUCTIONS\.md#/u);
+
+  const details = spawnSync(process.execPath, [cli, "instructions", "--details", "47", "6", "47"], { cwd: tmpdir(), encoding: "utf8" });
+  assert.equal(details.status, 0, details.stderr);
+  assert.ok(details.stdout.indexOf("## 47. CLI command surface") < details.stdout.indexOf("## 6. Imports"));
+  assert.equal(details.stdout.match(/^## 47\./gmu)?.length, 1);
+  assert.doesNotMatch(details.stdout, /^## 7\./mu);
+
+  for (const args of [["instructions", "--details"], ["instructions", "--details", "0"], ["instructions", "--details", "86"], ["instructions", "--details", "1,2"], ["instructions", "unexpected"]]) {
+    const rejected = spawnSync(process.execPath, [cli, ...args], { cwd: tmpdir(), encoding: "utf8" });
     assert.notEqual(rejected.status, 0, `${args.join(" ")} unexpectedly succeeded`);
   }
 });

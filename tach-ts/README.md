@@ -425,19 +425,28 @@ loss are retained and surface at submission or synchronization boundaries.
 ## Project compiler command
 
 The Node executable published by this package is the only public command
-surface. It discovers the nearest ancestor `tach.json` and never accepts a
-source-file argument:
+surface. Project commands discover the nearest ancestor `tach.json` and never
+accept a source-file argument:
 
 ```text
 tach build [--target web|spirv]
 tach check
 tach docs
 tach fmt
+tach instructions [--details <section>...]
 tach version
 tach help
 tach --help
 tach -h
 ```
+
+`tach instructions` is project-independent and prints the dense first context
+for an AI coding agent. Each `§N` pointer names an independently retrievable
+reference chunk; for example, `tach instructions --details 20 21 22` prints
+only domain, workgroup, and edge-guard details. Section numbers are positive,
+space-separated integers. The compact guide and every detail chunk reside in
+the installed npm package: retrieval performs no project discovery, compiler
+execution, or network request.
 
 `tach build` defaults to `web`. It compiles every discovered module/kernel into
 one in-memory program, writes a uniquely named sibling stage, validates its
