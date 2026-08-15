@@ -11,12 +11,14 @@ const server = Deno.serve({
       headers: { "content-type": "text/html" },
     });
   }
-  if (path !== "/app.js" && path !== "/kernel.wgsl") {
+  if (path !== "/app.js" && path !== "/kernel.wgsl.gz") {
     return new Response("not found", { status: 404 });
   }
   return new Response(await Deno.readFile(new URL(`dist${path}`, root)), {
     headers: {
-      "content-type": path.endsWith(".js") ? "text/javascript" : "text/plain",
+      "content-type": path.endsWith(".js")
+        ? "text/javascript"
+        : "application/gzip",
     },
   });
 });

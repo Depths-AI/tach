@@ -146,7 +146,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
       "index.d.ts",
       "index.js",
       "kernel.spv",
-      "kernel.wgsl",
+      "kernel.wgsl.gz",
       "package.json",
     ]);
     assert.deepEqual(await names(join(root, "build", "docs")), ["kernels.md"]);
@@ -159,7 +159,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
     );
     assert.match(
       generated,
-      /new URL\("\.\/kernel\.wgsl", import\.meta\.url\)/u,
+      /new URL\("\.\/kernel\.wgsl\.gz\?v=[0-9a-f]{64}", import\.meta\.url\)/u,
     );
     assert.match(generated, /new URL\("\.\/kernel\.spv", import\.meta\.url\)/u);
     const declarations = await Deno.readTextFile(
@@ -190,7 +190,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
       "index.d.ts",
       "index.js",
       "kernel.spv",
-      "kernel.wgsl",
+      "kernel.wgsl.gz",
       "package.json",
     ];
     const ordinary = new Map(
@@ -208,7 +208,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
       "index.d.ts",
       "index.js",
       "kernel.spv",
-      "kernel.wgsl",
+      "kernel.wgsl.gz",
       "package.json",
     ]);
     assert.deepEqual(await names(join(root, "build", "diagnostics")), [
@@ -268,7 +268,7 @@ Deno.test("docs are atomic and formatting is project-wide", async () => {
       "index.d.ts",
       "index.js",
       "kernel.spv",
-      "kernel.wgsl",
+      "kernel.wgsl.gz",
       "package.json",
     ];
     const preserved = new Map(

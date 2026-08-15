@@ -2,8 +2,10 @@ package compiler
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,12 +66,25 @@ func TestProjectBuildWritesCompleteNativeArtifacts(t *testing.T) {
 		for i := range entries {
 			names[i] = entries[i].Name()
 		}
-		want := "kernel.spv,kernel.wgsl,project.json,runtime.json"
+		want := "kernel.spv,kernel.wgsl.gz,project.json,runtime.json"
 		if verbose {
-			want = "diagnostics,kernel.spv,kernel.wgsl,project.json,runtime.json"
+			want = "diagnostics,kernel.spv,kernel.wgsl.gz,project.json,runtime.json"
 		}
 		if got := strings.Join(names, ","); got != want {
 			t.Fatalf("verbose=%v files = %s, want %s", verbose, got, want)
+		}
+		compressed, err := os.ReadFile(filepath.Join(output, "kernel.wgsl.gz"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader, err := gzip.NewReader(bytes.NewReader(compressed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		decompressed, err := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if err != nil || closeErr != nil || string(decompressed) != result.WGSL {
+			t.Fatalf("compressed WGSL did not round-trip: read=%v close=%v", err, closeErr)
 		}
 		if verbose {
 			entries, err := os.ReadDir(filepath.Join(output, "diagnostics"))
@@ -417,7 +432,7 @@ func TestOneAndManyWorkerBuildsAreByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one.WGSL != many.WGSL || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.MetadataJSON, many.MetadataJSON) || !bytes.Equal(one.Description, many.Description) {
+	if one.WGSL != many.WGSL || !bytes.Equal(one.CompressedWGSL, many.CompressedWGSL) || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.MetadataJSON, many.MetadataJSON) || !bytes.Equal(one.Description, many.Description) {
 		t.Fatal("worker count changed artifacts")
 	}
 }
@@ -443,7 +458,7 @@ func TestWideProjectBuildIsCompleteAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one.WGSL != many.WGSL || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.MetadataJSON, many.MetadataJSON) || !bytes.Equal(one.Description, many.Description) {
+	if one.WGSL != many.WGSL || !bytes.Equal(one.CompressedWGSL, many.CompressedWGSL) || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.MetadataJSON, many.MetadataJSON) || !bytes.Equal(one.Description, many.Description) {
 		t.Fatal("wide-project artifacts changed with worker count")
 	}
 	for i := range 32 {

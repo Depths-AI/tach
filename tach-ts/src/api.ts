@@ -33,6 +33,10 @@ export interface TachAdapterInfo {
 export interface Tach {
   readonly adapter: TachAdapterInfo;
   buffer<T>(value: T): ComputeBuffer<T>;
+  prepare(
+    first: ComputeCommand,
+    ...rest: readonly ComputeCommand[]
+  ): Promise<void>;
   submit(
     first: ComputeCommand,
     ...rest: readonly ComputeCommand[]

@@ -191,6 +191,7 @@ export interface Driver {
   writeBuffer(buffer: DriverBuffer, bytes: Uint8Array): void;
   readBuffer(buffer: DriverBuffer, byteLength: number): Promise<Uint8Array>;
   destroyBuffer(buffer: DriverBuffer): void;
+  prepare(commands: readonly PreparedCommand[]): Promise<void>;
   submit(commands: readonly PreparedCommand[]): Promise<void>;
   idle(): Promise<void>;
   close(): void;

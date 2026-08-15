@@ -21,7 +21,7 @@ import (
 	"unsafe"
 )
 
-const nativeABI = 1
+const nativeABI = 2
 
 type nativeModule struct {
 	value   *C.tv_module
@@ -439,6 +439,29 @@ func tach_module(pointer unsafe.Pointer, spirv *C.uint8_t, spirvLength C.size_t,
 	s.nextModule++
 	s.modules[id] = nativeModule{value: module, kernels: kernels}
 	*output = C.uint32_t(id)
+	return 0
+}
+
+//export tach_prepare
+func tach_prepare(pointer unsafe.Pointer, moduleID C.uint32_t, kernels *C.uint32_t, count C.size_t) C.int32_t {
+	s := resolve(pointer)
+	if s == nil || kernels == nil || count == 0 || count > 1<<20 {
+		return -1
+	}
+	s.Lock()
+	defer s.Unlock()
+	module, ok := s.modules[uint32(moduleID)]
+	if !ok {
+		return s.fail(fmt.Errorf("unknown native module %d", moduleID))
+	}
+	for _, index := range unsafe.Slice(kernels, int(count)) {
+		if uint32(index) >= uint32(len(module.kernels)) {
+			return s.fail(fmt.Errorf("invalid physical kernel %d", index))
+		}
+		if C.tv_module_prepare(module.value, index) == 0 {
+			return s.fail(s.nativeError())
+		}
+	}
 	return 0
 }
 

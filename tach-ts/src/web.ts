@@ -24,9 +24,60 @@ interface CompiledKernel {
   readonly pipeline: GPUComputePipeline;
 }
 interface ModuleCache {
-  source?: Promise<string>;
-  module?: GPUShaderModule;
+  module?: Promise<GPUShaderModule>;
   readonly pipelines: Map<number, Promise<CompiledKernel>>;
+}
+
+const shaderCacheName = "tach-wgsl-v1";
+const shaderCacheLifetime = 7 * 24 * 60 * 60 * 1000;
+
+async function shaderSource(url: URL): Promise<string> {
+  let cache: Cache | undefined;
+  if (
+    (url.protocol === "http:" || url.protocol === "https:") &&
+    typeof caches !== "undefined"
+  ) {
+    try {
+      cache = await caches.open(shaderCacheName);
+      const now = Date.now();
+      // DECISION: O(n) expiry keeps one standards-only store; shard it if an
+      // origin ever accumulates thousands of generated Tach projects.
+      await Promise.all((await cache.keys()).map(async (request) => {
+        const stored = await cache!.match(request),
+          expires = Number(stored?.headers.get("x-tach-expires"));
+        if (!Number.isSafeInteger(expires) || expires <= now) {
+          await cache!.delete(request);
+        }
+      }));
+      const cached = await cache.match(url.href);
+      if (cached) {
+        const expires = Number(cached.headers.get("x-tach-expires"));
+        if (Number.isSafeInteger(expires) && expires > now) {
+          return await cached.text();
+        }
+      }
+    } catch { /* Persistent caching must not gate GPU execution. */ }
+  }
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`could not load WGSL (${response.status})`);
+  }
+  if (!response.body) throw new Error("WGSL response has no body");
+  const source = await new Response(
+    response.body.pipeThrough(new DecompressionStream("gzip")),
+  ).text();
+  if (cache) {
+    void cache.put(
+      url.href,
+      new Response(source, {
+        headers: {
+          "content-type": "text/plain",
+          "x-tach-expires": String(Date.now() + shaderCacheLifetime),
+        },
+      }),
+    ).catch(() => {});
+  }
+  return source;
 }
 
 function gpuBuffer(buffer: DriverBuffer | undefined): GPUBuffer {
@@ -219,17 +270,13 @@ class WebDriver implements Driver {
       const kernel = command.target.kernels[index];
       if (!kernel) throw new TypeError(`invalid WebGPU kernel ${index}`);
       pending = this.#capture(kernel.entryPoint, "kernel", async () => {
-        cache!.source ??= fetch(command.shader).then((response) => {
-          if (!response.ok) {
-            throw new Error(`could not load WGSL (${response.status})`);
-          }
-          return response.text();
-        });
-        cache!.module ??= this.device.createShaderModule({
-          label: "Tach shader module",
-          code: await cache!.source,
-        });
-        return this.#compilePipeline(cache!.module!, kernel);
+        cache!.module ??= shaderSource(command.shader).then((code) =>
+          this.device.createShaderModule({
+            label: "Tach shader module",
+            code,
+          })
+        );
+        return this.#compilePipeline(await cache!.module, kernel);
       });
       cache.pipelines.set(index, pending);
     }
@@ -283,7 +330,9 @@ class WebDriver implements Driver {
     return { layout, pipeline };
   }
 
-  async submit(commands: readonly PreparedCommand[]): Promise<void> {
+  async #compileCommands(
+    commands: readonly PreparedCommand[],
+  ): Promise<Map<PreparedCommand, Map<number, CompiledKernel>>> {
     const compiled = new Map<PreparedCommand, Map<number, CompiledKernel>>();
     await Promise.all(commands.map(async (command) => {
       const kernels = new Map<number, CompiledKernel>();
@@ -299,6 +348,15 @@ class WebDriver implements Driver {
         ),
       );
     }));
+    return compiled;
+  }
+
+  async prepare(commands: readonly PreparedCommand[]): Promise<void> {
+    await this.#compileCommands(commands);
+  }
+
+  async submit(commands: readonly PreparedCommand[]): Promise<void> {
+    const compiled = await this.#compileCommands(commands);
     await this.#capture("submit", "kernel", () => {
       const scratch = this.#resolveScratch(commands),
         parameters = this.#writeParameters(commands);

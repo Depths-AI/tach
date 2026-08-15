@@ -46,6 +46,6 @@ const bundled = await new Deno.Command(Deno.execPath(), {
 }).output();
 if (!bundled.success) throw new Error(`deno bundle exited ${bundled.code}`);
 await Deno.copyFile(
-  new URL("generated/kernel.wgsl", here),
-  new URL("dist/kernel.wgsl", here),
+  new URL("generated/kernel.wgsl.gz", here),
+  new URL("dist/kernel.wgsl.gz", here),
 );

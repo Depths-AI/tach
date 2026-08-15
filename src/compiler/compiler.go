@@ -1,8 +1,11 @@
 package compiler
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -21,6 +24,7 @@ type Result struct {
 	Web             *backend.Executable
 	SPIRVExecutable *backend.Executable
 	WGSL            string
+	CompressedWGSL  []byte
 	SPIRV           []byte
 	Metadata        *bindings.Metadata
 	MetadataJSON    []byte
@@ -40,10 +44,10 @@ func WriteNativeArtifacts(result *Result, output string, verbose bool) error {
 		return fmt.Errorf("output must be an existing non-symlink directory: %s", root)
 	}
 	files := map[string][]byte{
-		"kernel.wgsl":  []byte(result.WGSL),
-		"kernel.spv":   result.SPIRV,
-		"project.json": result.Description,
-		"runtime.json": result.MetadataJSON,
+		"kernel.wgsl.gz": result.CompressedWGSL,
+		"kernel.spv":     result.SPIRV,
+		"project.json":   result.Description,
+		"runtime.json":   result.MetadataJSON,
 	}
 	if verbose {
 		for name, value := range map[string]any{
@@ -89,6 +93,18 @@ func diagnosticJSON(value any) ([]byte, error) {
 	return append(data, '\n'), err
 }
 
+func compressWGSL(source string) ([]byte, error) {
+	var output bytes.Buffer
+	compressed := gzip.NewWriter(&output)
+	if _, err := io.WriteString(compressed, source); err != nil {
+		return nil, err
+	}
+	if err := compressed.Close(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
 func Build(cwd string, workers int) (*Result, error) {
 	return compile(cwd, true, workers)
 }
@@ -130,6 +146,10 @@ func compile(cwd string, build bool, workers int) (*Result, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("web backend: %w", err)
+		}
+		result.CompressedWGSL, err = compressWGSL(result.WGSL)
+		if err != nil {
+			return nil, fmt.Errorf("WGSL compression: %w", err)
 		}
 		result.SPIRVExecutable, err = spirv.Lower(logical)
 		if err == nil {

@@ -446,7 +446,8 @@ int tv_module_kernel(tv_module *module, uint32_t index, const char *entry, const
   return 1;
 }
 
-static int prepare_kernel(tv_module *module, uint32_t index) {
+int tv_module_prepare(tv_module *module, uint32_t index) {
+  if (!module || index >= module->kernel_count) return module ? set_error(module->context, "invalid physical kernel %u", index) : 0;
   tv_context *context = module->context;
   tv_kernel *kernel = &module->kernels[index];
   if (kernel->pipeline) return 1;
@@ -547,7 +548,7 @@ int tv_submission_dispatch(tv_submission *submission, tv_module *module, uint32_
   if (!submission || !module || module->context != submission->context || kernel_index >= module->kernel_count || !x || !y || !z)
     return submission ? set_error(submission->context, "invalid dispatch") : 0;
   tv_context *context = submission->context; tv_kernel *kernel = &module->kernels[kernel_index];
-  if (!prepare_kernel(module, kernel_index) || resource_count != kernel->binding_count || parameter_size != (kernel->has_parameters ? kernel->parameter_size : 0))
+  if (!tv_module_prepare(module, kernel_index) || resource_count != kernel->binding_count || parameter_size != (kernel->has_parameters ? kernel->parameter_size : 0))
     return set_error(context, "dispatch does not match physical kernel %s", kernel->entry ? kernel->entry : "<uninitialized>");
   if (x > context->properties.limits.maxComputeWorkGroupCount[0] || y > context->properties.limits.maxComputeWorkGroupCount[1] || z > context->properties.limits.maxComputeWorkGroupCount[2])
     return set_error(context, "dispatch exceeds Vulkan workgroup-count limits");

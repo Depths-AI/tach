@@ -22,7 +22,7 @@ interface DenoAPI {
   readFile(path: URL): Promise<Uint8Array>;
 }
 
-const abi = 1, textDecoder = new TextDecoder(), textEncoder = new TextEncoder();
+const abi = 2, textDecoder = new TextDecoder(), textEncoder = new TextEncoder();
 let nativeLibrary: ReturnType<DenoAPI["dlopen"]> | undefined;
 const symbols = {
   tach_abi_version: { parameters: [], result: "u32" },
@@ -30,6 +30,11 @@ const symbols = {
   tach_info: { parameters: ["pointer", "buffer", "usize"], result: "i32" },
   tach_module: {
     parameters: ["pointer", "buffer", "usize", "buffer", "usize", "buffer"],
+    result: "i32",
+    nonblocking: true,
+  },
+  tach_prepare: {
+    parameters: ["pointer", "u32", "buffer", "usize"],
     result: "i32",
     nonblocking: true,
   },
@@ -288,7 +293,37 @@ class VulkanDriver implements Driver {
     return pending;
   }
 
+  async prepare(commands: readonly PreparedCommand[]): Promise<void> {
+    const requested = new Map<
+      ModuleDefinition,
+      { readonly command: PreparedCommand; readonly kernels: Set<number> }
+    >();
+    for (const command of commands) {
+      let module = requested.get(command.module);
+      if (!module) {
+        module = { command, kernels: new Set() };
+        requested.set(command.module, module);
+      }
+      for (const step of command.steps) {
+        if (step.kind === "dispatch") module.kernels.add(step.kernel);
+      }
+    }
+    await Promise.all([...requested.values()].map(async (request) => {
+      const module = await this.#module(request.command),
+        kernels = Uint32Array.from(request.kernels),
+        status = await this.#call(
+          "tach_prepare",
+          this.session,
+          module,
+          kernels,
+          kernels.length,
+        );
+      this.#check("prepare", status);
+    }));
+  }
+
   async submit(commands: readonly PreparedCommand[]): Promise<void> {
+    await this.prepare(commands);
     const modules = await Promise.all(
         commands.map((command) => this.#module(command)),
       ),

@@ -805,6 +805,7 @@ async function execute(
   workload: Workload,
 ): Promise<{ readonly result: BenchmarkResult; readonly frame?: Uint32Array }> {
   try {
+    await gpu.prepare(workload.command);
     await complete(gpu, workload.command);
     const gpuSamplesMs: number[] = [];
     for (let sample = 0; sample < samples; sample++) {

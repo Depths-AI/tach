@@ -17,7 +17,11 @@ function tach(workOrOptions = {}, options = {}) {
   return typeof workOrOptions === "function" ? run(workOrOptions) : run();
 }
 
-function defineModule({ source, resources, kernels }) {
+const compressedShader = new URL(
+  "data:application/gzip;base64,H4sIAAAAAAAEAFMAAEXPbOkBAAAA",
+);
+
+function defineModule({ shader = compressedShader, resources, kernels }) {
   const kernel = kernels[0];
   const publicParameters = kernel.parameters.map((parameter) =>
     parameter.resource === undefined
@@ -88,7 +92,7 @@ function defineModule({ source, resources, kernels }) {
   };
   return defineRuntimeModule({
     shaders: {
-      web: new URL(`data:text/plain,${encodeURIComponent(source)}`),
+      web: shader,
       spirv: new URL("file:///unused.spv"),
     },
     schema: 1,
@@ -127,6 +131,7 @@ function fakeWebGPU({
     scopesPopped: 0,
     scopesPushed: 0,
     shaders: 0,
+    shaderSources: [],
     submitted: 0,
     workDone: 0,
     writes: 0,
@@ -169,6 +174,7 @@ function fakeWebGPU({
     createShaderModule(descriptor) {
       if (shaderError) throw shaderError;
       calls.shaders++;
+      calls.shaderSources.push(descriptor.code);
       return { descriptor };
     },
     createBindGroupLayout(descriptor) {
@@ -277,7 +283,6 @@ const scalarBuffer = {
 };
 
 const clear = defineModule({
-  source: "",
   resources: [scalarBuffer],
   kernels: [{
     name: "clear",
@@ -289,7 +294,6 @@ const clear = defineModule({
 });
 
 const plane = defineModule({
-  source: "",
   resources: [scalarBuffer],
   kernels: [{
     name: "plane",
@@ -301,7 +305,6 @@ const plane = defineModule({
 });
 
 const fill = defineModule({
-  source: "",
   resources: [{
     name: "data",
     group: 0,
@@ -338,7 +341,6 @@ const fill = defineModule({
 });
 
 const configure = defineModule({
-  source: "",
   resources: [scalarBuffer],
   kernels: [{
     name: "configure",
@@ -369,7 +371,6 @@ const configure = defineModule({
 });
 
 const vectors = defineModule({
-  source: "",
   resources: [{
     name: "values",
     group: 0,
@@ -400,7 +401,6 @@ const vectors = defineModule({
 });
 
 const combine = defineModule({
-  source: "",
   resources: [0, 1].map((binding) => ({
     name: `data${binding}`,
     group: 0,
@@ -430,7 +430,7 @@ const combine = defineModule({
 
 const graph = defineRuntimeModule({
   shaders: {
-    web: new URL("data:text/plain,"),
+    web: compressedShader,
     spirv: new URL("file:///unused.spv"),
   },
   schema: 1,
@@ -753,6 +753,106 @@ test("one pass carries multiple kernels and reuses resident parameters and bind 
   }
 });
 
+test("prepare compiles without execution and submit reuses the pipeline", async () => {
+  const fake = fakeWebGPU(), gpu = await tach({ gpu: fake.gpu });
+  try {
+    const command = fill.command(0, [gpu.buffer(new Uint32Array([0])), 1]);
+    await gpu.prepare(command);
+    assert.equal(fake.calls.shaders, 1);
+    assert.deepEqual(fake.calls.shaderSources, [" "]);
+    assert.equal(fake.calls.pipelines, 1);
+    assert.equal(fake.calls.submitted, 0);
+    assert.equal(fake.calls.dispatches, 0);
+    await gpu.submit(command);
+    assert.equal(fake.calls.shaders, 1);
+    assert.equal(fake.calls.pipelines, 1);
+    assert.equal(fake.calls.submitted, 1);
+    assert.equal(fake.calls.dispatches, 1);
+  } finally {
+    gpu.close();
+  }
+});
+
+test("decompressed WGSL remains cached across sessions for seven days", async () => {
+  const url = new URL("https://tach.test/kernel.wgsl.gz?v=test"),
+    module = defineModule({
+      shader: url,
+      resources: [scalarBuffer],
+      kernels: [{
+        name: "cached",
+        entryPoint: "cached",
+        dimensions: 1,
+        workgroupSize: [1, 1, 1],
+        parameters: [{ name: "data", resource: 0 }],
+      }],
+    }),
+    responses = new Map();
+  const key = (request) =>
+    request instanceof Request ? request.url : String(request);
+  const cache = {
+    keys() {
+      return Promise.resolve(
+        [...responses.keys()].map((url) => new Request(url)),
+      );
+    },
+    match(request) {
+      return Promise.resolve(responses.get(key(request))?.clone());
+    },
+    put(request, response) {
+      responses.set(key(request), response.clone());
+      return Promise.resolve();
+    },
+    delete(request) {
+      return Promise.resolve(responses.delete(key(request)));
+    },
+  };
+  const originalFetch = globalThis.fetch,
+    originalCaches = Object.getOwnPropertyDescriptor(globalThis, "caches");
+  let fetches = 0;
+  globalThis.fetch = () => {
+    fetches++;
+    return Promise.resolve(
+      new Response(
+        Uint8Array.from(
+          atob("H4sIAAAAAAAEAFMAAEXPbOkBAAAA"),
+          (character) => character.charCodeAt(0),
+        ),
+      ),
+    );
+  };
+  Object.defineProperty(globalThis, "caches", {
+    configurable: true,
+    value: { open: () => Promise.resolve(cache) },
+  });
+  const prepare = async () => {
+    const fake = fakeWebGPU(), gpu = await tach({ gpu: fake.gpu });
+    try {
+      await gpu.prepare(
+        module.command(0, [gpu.buffer(new Uint32Array([0]))]),
+      );
+      assert.deepEqual(fake.calls.shaderSources, [" "]);
+    } finally {
+      gpu.close();
+    }
+  };
+  try {
+    await prepare();
+    await prepare();
+    assert.equal(fetches, 1);
+    responses.set(
+      url.href,
+      new Response("expired", { headers: { "x-tach-expires": "0" } }),
+    );
+    await prepare();
+    assert.equal(fetches, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalCaches) {
+      Object.defineProperty(globalThis, "caches", originalCaches);
+    } else delete globalThis.caches;
+  }
+});
+
 test("one command records a repeated multi-step plan with reusable growing scratch", async () => {
   const fake = fakeWebGPU();
   const gpu = await tach({ gpu: fake.gpu });
@@ -760,6 +860,7 @@ test("one command records a repeated multi-step plan with reusable growing scrat
     await gpu.submit(
       graph.command(0, [gpu.buffer(new Uint32Array(1))], { repeat: 3 }),
     );
+    assert.equal(fake.calls.shaders, 1);
     assert.equal(fake.calls.pipelines, 2);
     assert.equal(fake.calls.dispatches, 6);
     assert.equal(fake.calls.passes, 1);

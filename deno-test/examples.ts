@@ -42,8 +42,10 @@ lanes.splice(0, 4, 1, 2, 3, 4);
 
 function execute(): Promise<string> {
   return tach(async (gpu) => {
-    const counters = gpu.buffer({ total: 0 });
-    await gpu.submit(programs.accumulate(counters));
+    const counters = gpu.buffer({ total: 0 }),
+      accumulation = programs.accumulate(counters);
+    await gpu.prepare(accumulation);
+    await gpu.submit(accumulation);
     equal(await counters.read(), { total: 64 }, "atomics");
 
     const bits = gpu.buffer(Array<number>(8).fill(0));

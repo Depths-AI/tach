@@ -66,32 +66,47 @@ class Session implements Tach, RuntimeOwner {
     return createComputeBuffer(this, value);
   }
 
-  submit(
+  #execute(
+    operation: "prepare" | "submit",
     first: ComputeCommand,
-    ...rest: readonly ComputeCommand[]
+    rest: readonly ComputeCommand[],
   ): Promise<void> {
-    this.assertHealthy("submit");
+    this.assertHealthy(operation);
     const states = [first, ...rest].map((value, index) =>
-      getCommandState(value, `submit[${index}]`)
+      getCommandState(value, `${operation}[${index}]`)
     );
     for (const state of states) {
       if (state.owner !== this) {
         throw new TachError(
           "lifecycle",
           "compute command belongs to a different Tach session",
-          { operation: "submit" },
+          { operation },
         );
       }
     }
     const pending = this.#submissionTail.then(async () => {
-      this.assertHealthy("submit");
-      await this.driver.submit(states.map((state) => state.prepare()));
-      this.assertHealthy("submit");
+      this.assertHealthy(operation);
+      await this.driver[operation](states.map((state) => state.prepare()));
+      this.assertHealthy(operation);
     });
     this.#submissionTail = pending.catch((cause) => {
-      this.#deferredFailure ??= normalizeError(cause, "kernel", "submit");
+      this.#deferredFailure ??= normalizeError(cause, "kernel", operation);
     });
     return pending;
+  }
+
+  prepare(
+    first: ComputeCommand,
+    ...rest: readonly ComputeCommand[]
+  ): Promise<void> {
+    return this.#execute("prepare", first, rest);
+  }
+
+  submit(
+    first: ComputeCommand,
+    ...rest: readonly ComputeCommand[]
+  ): Promise<void> {
+    return this.#execute("submit", first, rest);
   }
 
   async idle(): Promise<void> {
