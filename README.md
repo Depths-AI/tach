@@ -1,3 +1,13 @@
+<p align="center">
+  <img src="tach.svg" alt="Tach logo" width="144">
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@depths/tach"><img src="https://img.shields.io/npm/v/%40depths%2Ftach?style=flat-square" alt="npm version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Depths-AI/tach?style=flat-square" alt="license"></a>
+  <a href="docs/architecture.md"><img src="https://img.shields.io/badge/targets-WebGPU%20%7C%20Vulkan%201.3-111827?style=flat-square" alt="WebGPU and Vulkan 1.3"></a>
+</p>
+
 # Tach
 
 Tach is a small, typed language for general-purpose GPU programming from

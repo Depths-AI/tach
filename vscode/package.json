@@ -1,0 +1,69 @@
+{
+  "name": "tach",
+  "displayName": "Tach",
+  "description": "Syntax highlighting for the Tach GPU programming language.",
+  "version": "0.1.0",
+  "publisher": "depths-ai",
+  "author": {
+    "name": "Depths AI",
+    "url": "https://depthsai.com"
+  },
+  "icon": "icon.png",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://depthsai.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Depths-AI/tach.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "tach",
+    "gpu",
+    "gpgpu",
+    "wgsl",
+    "spir-v"
+  ],
+  "files": [
+    "icon.png",
+    "language-configuration.json",
+    "README.md",
+    "syntaxes/tach.tmLanguage.json"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "tach",
+        "aliases": [
+          "Tach",
+          "tach"
+        ],
+        "extensions": [
+          ".tach"
+        ],
+        "icon": {
+          "light": "./icon.png",
+          "dark": "./icon.png"
+        },
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tach",
+        "scopeName": "source.tach",
+        "path": "./syntaxes/tach.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[tach]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 2
+      }
+    }
+  }
+}
