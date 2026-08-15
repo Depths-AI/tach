@@ -130,28 +130,28 @@ async function readableExecutable(path: string): Promise<boolean> {
 }
 
 function target(): NativeTarget {
-  const os = Deno.build.os === "windows"
-    ? "windows"
-    : Deno.build.os === "darwin" || Deno.build.os === "linux"
-    ? Deno.build.os
-    : undefined;
-  const arch = Deno.build.arch === "x86_64"
-    ? "amd64"
-    : Deno.build.arch === "aarch64"
-    ? "arm64"
-    : undefined;
-  if (!os || !arch) {
+  const targets: Readonly<Record<string, NativeTarget>> = {
+    "windows:x86_64": {
+      executable: "tach.exe",
+      asset: "tach-windows-amd64.exe",
+    },
+    "windows:aarch64": {
+      executable: "tach.exe",
+      asset: "tach-windows-arm64.exe",
+    },
+    "linux:x86_64": { executable: "tach", asset: "tach-linux-amd64" },
+    "linux:aarch64": { executable: "tach", asset: "tach-linux-arm64" },
+    "darwin:aarch64": { executable: "tach", asset: "tach-darwin-arm64" },
+  };
+  const native = targets[Deno.build.os + ":" + Deno.build.arch];
+  if (!native) {
     throw new TachError(
       "compiler-platform",
       `Tach does not publish a compiler for ${Deno.build.os}/${Deno.build.arch}`,
       { operation: "compilerPath" },
     );
   }
-  const executable = os === "windows" ? "tach.exe" : "tach";
-  return {
-    executable,
-    asset: `tach-${os}-${arch}${os === "windows" ? ".exe" : ""}`,
-  };
+  return native;
 }
 
 export async function packageVersion(): Promise<string> {
@@ -219,13 +219,6 @@ async function installCompiler(
   native: NativeTarget,
   version: string,
 ): Promise<string> {
-  if (version === "0.0.0") {
-    throw new TachError(
-      "compiler-install",
-      "development compiler is missing; run `npm run compiler` at the Tach repository root",
-      { operation: "compilerPath" },
-    );
-  }
   const repository = Deno.env.get("TACH_GITHUB_REPOSITORY") ?? "Depths-AI/tach";
   const releaseBase =
     `https://github.com/${repository}/releases/download/v${version}`;
@@ -320,7 +313,7 @@ async function verifyCompilerVersion(path: string): Promise<void> {
     );
   }
   const version = decoder.decode(result.stdout).trim();
-  if (version !== expected && !(expected === "0.0.0" && version === "dev")) {
+  if (version !== expected) {
     throw new TachError(
       "compiler-install",
       `compiler version ${version} does not match @depths/tach ${expected}`,

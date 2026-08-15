@@ -15,6 +15,6 @@
     "test": "npm run benchmark"
   },
   "dependencies": {
-    "@depths/tach": "0.0.0"
+    "@depths/tach": "0.1.0"
   }
 }

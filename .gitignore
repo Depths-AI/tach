@@ -1,6 +1,7 @@
 /build/
 /dist/
 /node_modules/
+/.env
 *.test
 /spirv-test/test-report.md
 /native/tach-vulkan.*

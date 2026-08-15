@@ -1,11 +1,12 @@
 {
   "name": "@depths/tach",
-  "version": "0.0.0",
-  "description": "Managed TypeScript runtime and native compiler for Tach GPU kernels",
+  "version": "0.1.0",
+  "description": "Ergonomic cross-platform GPU programming for Typescript",
+  "author": "Depths AI",
+  "homepage": "https://depthsai.com",
   "type": "module",
   "sideEffects": false,
   "files": [
-    "cli.ts",
     "dist/",
     "native/",
     "README.md"
@@ -24,11 +25,11 @@
     }
   },
   "bin": {
-    "tach": "./cli.ts"
+    "tach": "./dist/cli.js"
   },
   "scripts": {
     "build": "deno run -A scripts/build.ts && deno run -A scripts/instructions.ts",
-    "check": "deno lint src declarations scripts cli.ts tests && deno check src/index.ts src/internal.ts src/compiler.ts declarations/*.ts cli.ts scripts/*.ts tests/*.js && deno run --allow-read scripts/instructions.ts --check",
+    "check": "deno lint src declarations scripts tests && deno check src/*.ts declarations/*.ts scripts/*.ts tests/*.js && deno run --allow-read scripts/instructions.ts --check",
     "test": "npm run build && deno test -A --node-modules-dir=manual tests",
     "prepare": "npm run build"
   },

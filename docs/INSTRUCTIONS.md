@@ -921,7 +921,7 @@ Arguments of `run` are also intentionally constrained. A buffer argument must
 directly name one public buffer parameter or one earlier transient declaration;
 arbitrary indexing, conditionals, and buffer-producing expressions are invalid.
 A value argument may be a matching public value, a nested field of one, a
-supported literal, or—when the stage formal is `uint32`—an earlier checked
+supported literal, or-when the stage formal is `uint32`-an earlier checked
 shape. These restrictions keep orchestration declarative and make all resource
 and parameter sources knowable before GPU execution.
 

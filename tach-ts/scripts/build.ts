@@ -15,7 +15,7 @@ for (
     "src/compiler.ts",
     "declarations/index.ts",
     "declarations/compiler.ts",
-    "cli.ts",
+    "src/cli.ts",
     "scripts/instructions.ts",
   ]
 ) {
@@ -85,6 +85,22 @@ const result = await new Deno.Command(Deno.execPath(), {
   stderr: "inherit",
 }).output();
 if (!result.success) throw new Error(`deno bundle exited ${result.code}`);
+const cli = await new Deno.Command(Deno.execPath(), {
+  args: [
+    "bundle",
+    "--quiet",
+    "--platform",
+    "deno",
+    "--outdir",
+    "dist",
+    "src/cli.ts",
+  ],
+  cwd: root,
+  stdin: "null",
+  stdout: "inherit",
+  stderr: "inherit",
+}).output();
+if (!cli.success) throw new Error(`CLI bundle exited ${cli.code}`);
 const declarations = await new Deno.Command(Deno.execPath(), {
   args: [
     "bundle",

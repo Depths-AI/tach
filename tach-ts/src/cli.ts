@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-env --allow-run --allow-net
 
-import { build, check, docs, format, packageVersion } from "./dist/compiler.js";
+import { build, check, docs, format, packageVersion } from "./compiler.ts";
 
 const help = `Tach — lean typed GPGPU compiler
 
@@ -46,7 +46,7 @@ try {
       }
       const bundle = JSON.parse(
         await Deno.readTextFile(
-          new URL("./dist/instructions.json", import.meta.url),
+          new URL("../dist/instructions.json", import.meta.url),
         ),
       ) as {
         readonly mini: string;

@@ -58,7 +58,7 @@ simulation/
 
 An immediate directory containing `.tach` files is a module; each immediate
 `.tach` file is a kernel file. Root-level or more deeply nested Tach sources
-are errors. The filesystem defines the module set—there is no source list,
+are errors. The filesystem defines the module set-there is no source list,
 glob, or output path in the manifest.
 
 The manifest separates Tach identity from the name of the generated JavaScript

@@ -3,7 +3,7 @@ import { build, check, compilerPath, docs, format } from "../dist/compiler.js";
 
 const packageRoot = decodeURIComponent(new URL("../", import.meta.url).pathname)
   .replace(/^\/(.:\/)/u, "$1");
-const cli = `${packageRoot}/cli.ts`;
+const cli = `${packageRoot}/src/cli.ts`;
 const manifest = {
   name: "fixture",
   version: "0.1.0",
@@ -183,7 +183,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
         type: "module",
         sideEffects: false,
         exports: { ".": { types: "./index.d.ts", default: "./index.js" } },
-        dependencies: { "@depths/tach": "0.0.0" },
+        dependencies: { "@depths/tach": "0.1.0" },
       },
     );
     const artifacts = [

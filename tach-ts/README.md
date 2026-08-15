@@ -509,7 +509,7 @@ uses normal browser WebGPU security and module fetching.
 The native Vulkan host currently ships for x86-64 Windows and Linux and
 requires a Vulkan 1.3 loader/device supporting Synchronization2 and
 `shaderZeroInitializeWorkgroupMemory`. Compiler binaries are published for
-x64 and arm64 Linux, macOS, and Windows.
+x64 and arm64 Windows and Linux, plus Apple-silicon macOS.
 
 ## Repository validation
 
