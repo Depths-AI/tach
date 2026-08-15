@@ -465,7 +465,13 @@ registry=$registry
       }
       Write-Host "Created draft GitHub release $Version"
     } elseif ($release.target_commitish -ne $head) {
-      throw "existing GitHub release targets $($release.target_commitish), not $head"
+      if (-not $release.draft -or @($release.assets).Count -ne 0) {
+        throw "existing GitHub release targets $($release.target_commitish), not $head"
+      }
+      $release = Invoke-GitHub "Patch" "/repos/$repository/releases/$($release.id)" @{
+        target_commitish = $head
+      }
+      Write-Host "Retargeted empty draft release $Version"
     }
 
     $publicFiles = @($manifest.artifacts.name) + @("release.json", "checksums.txt")
@@ -486,7 +492,7 @@ registry=$registry
         continue
       }
       $upload = $release.upload_url -replace '\{\?name,label\}$', ""
-      $uri = "$upload?name=$([Uri]::EscapeDataString($name))"
+      $uri = "${upload}?name=$([Uri]::EscapeDataString($name))"
       $uploadParameters = @{
         Uri = $uri
         Method = "Post"
