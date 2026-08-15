@@ -37,7 +37,7 @@ func Decode(data []byte) (*Module, error) {
 		return nil, fmt.Errorf("bad SPIR-V magic 0x%08x", words[0])
 	}
 	if words[1] != Version {
-		return nil, fmt.Errorf("tach SPIR-V profile requires version 1.3, got word 0x%08x", words[1])
+		return nil, fmt.Errorf("tach SPIR-V profile requires version 1.6, got word 0x%08x", words[1])
 	}
 	if words[3] == 0 {
 		return nil, fmt.Errorf("SPIR-V id bound must be non-zero")
@@ -155,7 +155,10 @@ func validateArity(op Op, a []uint32) error {
 	case OpFunctionCall:
 		return atLeast(a, 3)
 	case OpVariable:
-		return exact(a, 3)
+		if len(a) != 3 && len(a) != 4 {
+			return fmt.Errorf("has %d operands, want 3 or 4", len(a))
+		}
+		return nil
 	case OpLoad:
 		return exact(a, 3)
 	case OpStore:
@@ -723,10 +726,18 @@ func (v *validation) validateReferencesAndTypes() error {
 				return err
 			}
 			_, next, _ := literalString(a, 2)
+			seen := map[uint32]bool{}
 			for _, id := range a[next:] {
 				if err := v.requireID(id, ctx+" interface"); err != nil {
 					return err
 				}
+				if _, global := v.globalVars[id]; !global {
+					return fmt.Errorf("%s interface id %%%d is not a global variable", ctx, id)
+				}
+				if seen[id] {
+					return fmt.Errorf("%s contains duplicate interface id %%%d", ctx, id)
+				}
+				seen[id] = true
 			}
 		case OpExecutionMode:
 			if err := v.requireID(a[0], ctx); err != nil {
@@ -833,6 +844,20 @@ func (v *validation) validateReferencesAndTypes() error {
 			}
 			if pt.kind != typePointer || pt.storage != a[2] {
 				return fmt.Errorf("%s variable result type/storage mismatch", ctx)
+			}
+			if a[2] == StorageWorkgroup {
+				if len(a) != 4 {
+					return fmt.Errorf("%s Workgroup variable requires a null initializer", ctx)
+				}
+				initializerType, err := v.requireValue(a[3], ctx+" initializer")
+				if err != nil {
+					return err
+				}
+				if initializerType != pt.elem || v.m.Instructions[v.defs[a[3]]].Op != OpConstantNull {
+					return fmt.Errorf("%s Workgroup initializer must be OpConstantNull of the pointee type", ctx)
+				}
+			} else if len(a) != 3 {
+				return fmt.Errorf("%s storage class %d cannot have an initializer in Tach's profile", ctx, a[2])
 			}
 		case OpFunction:
 			if _, err := v.requireType(a[0], ctx); err != nil {
@@ -2362,29 +2387,26 @@ func (v *validation) validateEntryPoints() error {
 		if _, ok := v.localSize[fid]; !ok {
 			return fmt.Errorf("entry point %q lacks LocalSize", name)
 		}
-		// Parse declared interface set.
 		decl := map[uint32]bool{}
 		for _, in := range v.m.Instructions {
 			if in.Op == OpEntryPoint && in.Operands[1] == fid {
 				_, next, _ := literalString(in.Operands, 2)
-				for _, id := range in.Operands[next:] {
+				var previous uint32
+				for index, id := range in.Operands[next:] {
+					if index > 0 && id <= previous {
+						return fmt.Errorf("entry point %q interface ids are not unique and ascending", name)
+					}
 					decl[id] = true
+					previous = id
 				}
 			}
 		}
-		used := map[uint32]bool{}
-		for _, l := range f.order {
-			for _, idx := range f.blocks[l].insts {
-				in := v.m.Instructions[idx]
-				for _, id := range valueUses(in) {
-					if v.globalVars[id] == StorageInput {
-						used[id] = true
-					}
-				}
-			}
+		used, err := v.entryGlobals(fid, map[uint32]bool{}, map[uint32]bool{})
+		if err != nil {
+			return fmt.Errorf("entry point %q: %w", name, err)
 		}
 		if !setEq(decl, used) {
-			return fmt.Errorf("entry point %q interface %v does not exactly match statically used Input globals %v", name, keys(decl), keys(used))
+			return fmt.Errorf("entry point %q interface %v does not exactly match statically used globals %v", name, keys(decl), keys(used))
 		}
 	}
 	for fid := range v.localSize {
@@ -2393,6 +2415,43 @@ func (v *validation) validateEntryPoints() error {
 		}
 	}
 	return nil
+}
+
+func (v *validation) entryGlobals(fid uint32, visiting, visited map[uint32]bool) (map[uint32]bool, error) {
+	used := map[uint32]bool{}
+	var walk func(uint32) error
+	walk = func(functionID uint32) error {
+		if visiting[functionID] {
+			return fmt.Errorf("recursive static call graph at function %%%d", functionID)
+		}
+		if visited[functionID] {
+			return nil
+		}
+		function := v.functions[functionID]
+		if function == nil {
+			return fmt.Errorf("static call graph references non-function %%%d", functionID)
+		}
+		visiting[functionID] = true
+		for _, label := range function.order {
+			for _, index := range function.blocks[label].insts {
+				instruction := v.m.Instructions[index]
+				for _, operand := range valueUses(instruction) {
+					if root := v.pointerRoot[operand]; root != 0 {
+						used[root] = true
+					}
+				}
+				if instruction.Op == OpFunctionCall {
+					if err := walk(instruction.Operands[2]); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		delete(visiting, functionID)
+		visited[functionID] = true
+		return nil
+	}
+	return used, walk(fid)
 }
 func keys(m map[uint32]bool) []uint32 {
 	r := make([]uint32, 0, len(m))
@@ -2421,5 +2480,22 @@ func Summary(data []byte) (string, error) {
 		}
 	}
 	sort.Strings(entries)
-	return fmt.Sprintf("SPIR-V 1.3: %d words, bound %d, entries [%s]", len(data)/4, m.Bound, strings.Join(entries, ", ")), nil
+	return fmt.Sprintf("SPIR-V 1.6: %d words, bound %d, entries [%s]", len(data)/4, m.Bound, strings.Join(entries, ", ")), nil
+}
+
+func Disassemble(data []byte) (string, error) {
+	if err := Validate(data); err != nil {
+		return "", err
+	}
+	m, _ := Decode(data)
+	var out strings.Builder
+	fmt.Fprintf(&out, "; SPIR-V 1.6\n; Bound %d\n", m.Bound)
+	for _, instruction := range m.Instructions {
+		fmt.Fprintf(&out, "%04d: %s", instruction.Offset, opName(instruction.Op))
+		for _, operand := range instruction.Operands {
+			fmt.Fprintf(&out, " %d", operand)
+		}
+		out.WriteByte('\n')
+	}
+	return out.String(), nil
 }

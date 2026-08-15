@@ -6,8 +6,8 @@ This document defines names, resource identity, bytes, physical dispatch
 plans, launch geometry, lifetime, and synchronization.
 
 Application code normally consumes generated modules and `@depths/tach`; it
-does not implement this ABI. Native runtimes and compiler contributors need
-the complete contract.
+does not implement this ABI. The Tach-owned WebGPU/Vulkan drivers and compiler
+contributors need the complete contract.
 
 See [the language guide](language.md) for source semantics and
 [the IR guide](ir.md) for logical programs, kernel templates, and executable
@@ -108,8 +108,8 @@ program. Public parameters retain source order and map buffer parameters to
 resource-table indices. Plain parameters remain typed host values.
 
 Different public buffer parameters are distinct, non-aliasing objects. The
-TypeScript runtime rejects one `ComputeBuffer` passed in more than one buffer
-position of a command. A native runtime must enforce the same rule. In-place
+shared runtime rejects one `ComputeBuffer` passed in more than one buffer
+position of a command before either driver sees it. In-place
 work uses one buffer parameter.
 
 Within an explicit program, a stage buffer argument names either an external
@@ -249,12 +249,12 @@ block. A block is limited to 16 KiB, the portable floor shared by the target
 profiles.
 
 The same plan drives WGSL, SPIR-V, embedded metadata, TypeScript packing, and
-the Vulkan harness. Kernel IR continues to contain logical parameters; no
+the Vulkan runtime. Kernel IR continues to contain logical parameters; no
 binding, physical bool, or padding member leaks into it.
 
 ## 7. Program plans and shape evaluation
 
-Each public program receives one plan per requested target. A plan contains:
+Each public program receives one plan per target. A plan contains:
 
 ```text
 program index
@@ -324,9 +324,9 @@ runtimes must obey it.
 
 ## 10. Metadata schema 1
 
-Schema-1 execution metadata is embedded in generated Web JavaScript and held
-in memory for native validation. It is not a build sidecar or public package
-export. The complete internal shape is:
+Schema-1 execution metadata is embedded in the singular generated JavaScript
+module and consumed by either host driver. It is not a build sidecar or public
+package export. The complete internal shape is:
 
 ```ts
 interface Metadata {
@@ -336,7 +336,7 @@ interface Metadata {
     fields: Array<{ name: string; type: string }>;
   }>;
   programs: PublicProgram[];
-  targets: { web?: TargetPlan; spirv?: TargetPlan };
+  targets: { web: TargetPlan; spirv: TargetPlan };
 }
 
 interface PublicProgram {
@@ -365,6 +365,9 @@ interface PublicProgram {
 }
 
 interface TargetPlan {
+  vulkan?: "1.3";
+  spirv?: "1.6";
+  features?: Array<"synchronization2" | "shaderZeroInitializeWorkgroupMemory">;
   kernels: Array<{
     entryPoint: string;
     workgroupSize: [number, number, number];
@@ -452,7 +455,8 @@ interface HostLayout {
 }
 ```
 
-Each present target contains parallel `kernels` and `programs` arrays:
+Both targets are mandatory and contain parallel `kernels` and `programs`
+arrays. Only `targets.spirv` carries the exact Vulkan/SPIR-V feature profile:
 
 ```text
 targets.web.kernels[]       physical entry, workgroup, bindings, value block
@@ -553,7 +557,7 @@ from Go source to TypeScript presentation.
 
 ## 11. WGSL representation
 
-WGSL contains all physical kernels for the Web target. Each has its own
+WGSL contains all physical kernels for the WebGPU plan. Each has its own
 group-0 storage variables, wrappers, optional uniform block, selected builtin
 inputs, and private entry name.
 
@@ -567,17 +571,19 @@ The runtime builds layouts from metadata and never parses WGSL.
 
 ## 12. SPIR-V representation
 
-SPIR-V 1.3 uses Logical addressing and the Shader capability. Host-visible
-storage and uniform aggregates carry descriptor, member-offset, and
+SPIR-V 1.6 uses Logical addressing and the Shader capability under Tach's
+Vulkan 1.3 profile. Host-visible storage and uniform aggregates carry
+descriptor, member-offset, and
 array-stride decorations. Logical SSA/helper values and Workgroup memory use
 undecorated logical aggregate types.
 
 Aggregate loads, stores, and parameter reconstruction cross the logical/
 physical boundary field by field. Padding never becomes a logical member.
 
-Tach guarantees zero-initialized shared memory. The SPIR-V backend emits a
-first-local-invocation initialization prologue and a workgroup barrier because
-native SPIR-V cannot assume WGSL's initialization rule.
+Tach guarantees zero-initialized shared memory. Every Workgroup variable has
+an `OpConstantNull` initializer and the host requires
+`shaderZeroInitializeWorkgroupMemory`; no synthetic store loop or barrier is
+inserted. The host also requires Synchronization2 for plan barriers.
 
 ## 13. Host values and materialization
 
@@ -587,7 +593,7 @@ layout. The first submitted use:
 1. selects the compiler-emitted resource layout;
 2. validates and packs the host value;
 3. requires the exact fixed size or a complete valid runtime tail;
-4. creates and uploads a WebGPU storage buffer; and
+4. creates and uploads the selected driver's storage buffer; and
 5. fixes that handle's codec and byte length.
 
 Before materialization, `write(value)` may change the future size. Afterward,
@@ -609,8 +615,8 @@ interface ComputeBuffer<T> {
 ```
 
 Reading an unmaterialized handle returns a clone. Reading a materialized handle
-waits for earlier submissions, copies through a temporary map-read buffer,
-decodes, destroys the temporary, and returns a clone. `destroy()` is
+waits for earlier submissions, copies through the driver's readback path,
+decodes, releases temporary transfer state, and returns a clone. `destroy()` is
 idempotent; later use is a lifecycle error.
 
 ## 14. Commands and submission
@@ -627,9 +633,10 @@ through:
 await gpu.submit(first, second);
 ```
 
-All commands must belong to one session. `submit` prepares them, records their
-plans in argument order into one compute pass and command buffer, and performs
-one queue submission. Its promise resolves after preparation/submission, not
+All commands must belong to one session. `submit` prepares host-neutral plans
+in argument order and passes one batch to the selected driver. WebGPU records
+one compute pass/command buffer; Vulkan records a pooled native command buffer
+with explicit barriers. Its promise resolves after preparation/submission, not
 after GPU completion.
 
 For indexed shorthand, explicit launch sizes must be positive safe integers
@@ -673,10 +680,13 @@ try {
 The caller owns synchronization and closure. Both forms share one engine and
 the same ownership rules.
 
-Generated modules cache shader modules and physical pipelines per device.
-Sessions cache bind groups by layout and buffer range, one aligned parameter
-arena, and scratch allocations by transient color. Parameter blocks use
-dynamic offsets. Arena and scratch growth retire old buffers until `idle()`.
+The shared session caches ownership and submission state. WebGPU caches shader
+modules and physical pipelines per device, bind groups by layout/buffer range,
+one aligned parameter arena, and scratch allocations by transient color;
+dynamic offsets select parameter blocks and replaced buffers retire until
+`idle()`. Vulkan caches SPIR-V modules, lazy physical pipelines/layouts,
+device-local external and scratch buffers, and reusable submission records
+containing descriptor pool, command buffer, fence, and mapped parameter arena.
 
 Completion boundaries are:
 
@@ -684,8 +694,8 @@ Completion boundaries are:
 - `buffer.read()` for earlier work plus readback; and
 - exit from `tach(callback)`.
 
-`close()` is immediate and idempotent. Call `idle()` first when graceful GPU
-completion matters.
+`close()` is synchronous and idempotent teardown. Call `idle()` first when
+successful GPU completion must be observed before teardown.
 
 ## 16. Errors
 
@@ -699,16 +709,17 @@ class TachError extends Error {
 }
 ```
 
-Codes distinguish WebGPU availability, adapter/device acquisition and loss,
-GPU validation/out-of-memory/internal errors, compiler installation/execution,
+Codes distinguish WebGPU and Vulkan availability, adapter/device acquisition
+and loss, Vulkan profile/native failures, GPU validation/out-of-memory/internal
+errors, compiler installation/execution,
 buffer and program failures, lifecycle misuse, and user callback failures.
 Original causes are retained. Error scopes, device loss, and uncaptured errors
 surface at submission or synchronization boundaries rather than disappearing.
 
-## 17. Native Vulkan obligations
+## 17. Tach-owned Vulkan 1.3 obligations
 
-A native consumer must execute the target plan, not merely load one entry
-point:
+The Deno driver and native library execute the target plan rather than merely
+loading one entry point:
 
 1. decode and validate schema-1 metadata;
 2. select the public program and matching SPIR-V program plan;
@@ -724,34 +735,40 @@ point:
 12. synchronize work before upload and after execution as required by the
     embedding application.
 
-The native repository harness implements this contract and additionally runs
-Khronos `spirv-val --target-env vulkan1.1`.
+The native boundary rejects incompatible metadata before module creation,
+requires Vulkan API 1.3 plus Synchronization2 and
+`shaderZeroInitializeWorkgroupMemory`, validates buffer sizes and dispatch
+limits, and reports driver failures through the coarse Tach FFI wire. The Deno
+correctness harness additionally runs Khronos
+`spirv-val --target-env vulkan1.3` before hardware execution.
 
 ## 18. Project package and artifact compatibility
 
 `tach.json` plus every discovered module/kernel source is the source of truth.
-One successful build atomically installs exactly one target inventory:
+One successful build atomically installs one complete dual-host inventory:
 
 ```text
-web                                  spirv
-build/                               build/
-  package.json                         kernel.spv
-  index.js                             README.md
-  index.d.ts                           docs/<module>.md
+build/
+  package.json
+  index.js
+  index.d.ts
   kernel.wgsl
+  kernel.spv
   README.md
   docs/<module>.md
 ```
 
-The web `package.json` uses the project version and web package name, exposes
+The `package.json` uses the project version and JavaScript package name, exposes
 only `index.js`/`index.d.ts`, and declares the exact installed `@depths/tach`
 version because generated JavaScript imports `@depths/tach/internal`. It does
 not re-export the runtime. A consumer installs both packages and imports
 `tach` separately.
 
-SPIR-V output contains only `kernel.spv` and target-independent documentation.
-Target switching replaces the tree; docs-only generation preserves compiled
-entries and changes only `README.md` and `docs/`.
+The one `index.js` embeds both executable plans and sibling URLs for WGSL and
+SPIR-V. Browser and Deno consumers import the same facade; runtime host
+selection chooses the matching plan and shader. `tach build --verbose` adds
+only compiler diagnostics. Docs-only generation preserves every compiled
+entry and changes only `README.md` and `docs/`.
 
 Public names, parameter order, logical types, host bytes, plan semantics,
 runtime ownership, documentation, and package identity form one synchronized

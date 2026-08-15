@@ -3,7 +3,7 @@
 This document is context for AI coding agents that use Tach as a programming
 language through the published `@depths/tach` npm package. Its subject is writing
 Tach applications: project layout, source semantics, compiler commands, generated
-packages, TypeScript integration, the managed WebGPU runtime, correctness,
+packages, TypeScript integration, the unified WebGPU/Vulkan runtime, correctness,
 debugging, and performance.
 
 Treat every rule below as part of one language-and-tooling contract. Do not infer
@@ -27,16 +27,18 @@ The compiler owns shader entry points, bindings, padding, byte layout, launch
 geometry, target validation, generated TypeScript signatures, and the physical
 execution plan. Application code must not assign descriptor numbers, declare
 provider built-ins, hand-pack padding, edit generated shaders, or reach into
-WebGPU buffers owned by the Tach runtime.
+backend buffers owned by the Tach runtime.
 
-A Web application has two distinct source layers:
+An application has two distinct source layers and one host-neutral generated
+boundary:
 
 ```text
 Tach project                         TypeScript application
 -----------                          ----------------------
-<module>/<kernel>.tach   build ->   generated command constructors
+<module>/<kernel>.tach   build ->   one generated command facade
 tach.json                            @depths/tach runtime
-                                     application control and I/O
+                                     browser -> WebGPU/WGSL
+                                     Deno -> Vulkan/SPIR-V
 ```
 
 Keep responsibilities on the correct side:
@@ -58,7 +60,8 @@ buffer.read() / gpu.idle()  -> wait for completion when required
 
 ## 2. Five-minute complete example
 
-Compilation requires Node.js 22 or newer. Browser execution requires WebGPU.
+Compilation and server execution use Deno. Browser execution requires WebGPU;
+Deno execution requires Tach's supported Vulkan 1.3 native host.
 Install the compiler and runtime in the consuming npm application:
 
 ```sh
@@ -71,7 +74,7 @@ Create a Tach project root with this `tach.json`:
 {
   "name": "scaling",
   "version": "0.1.0",
-  "web": {
+  "javascript": {
     "package": "@example/scaling"
   },
   "docs": {
@@ -112,8 +115,9 @@ npx tach check
 npx tach build
 ```
 
-The default Web build creates `build/index.js`, `build/index.d.ts`, one cohesive
-`build/kernel.wgsl`, a generated package manifest, and generated Markdown.
+The build creates `build/index.js`, `build/index.d.ts`, cohesive
+`build/kernel.wgsl` and `build/kernel.spv`, a generated package manifest, and
+generated Markdown.
 Use the runtime and generated project as separate imports:
 
 ```ts
@@ -170,7 +174,7 @@ app/
 
 Run `npx tach build` from `app/gpu` or any descendant. TypeScript can then import
 `../gpu/build/index.js`, or the generated `build/` package can be linked,
-installed, packed, or published under its configured Web package name.
+installed, packed, or published under its configured JavaScript package name.
 
 ## 4. The manifest contract
 
@@ -180,7 +184,7 @@ The project manifest has one fixed shape:
 {
   "name": "simulation",
   "version": "0.1.0",
-  "web": {
+  "javascript": {
     "package": "@studio/simulation"
   },
   "docs": {
@@ -195,14 +199,14 @@ All fields are required and non-empty:
 | Field | Meaning |
 |---|---|
 | `name` | Tach project identity |
-| `version` | SemVer shared by every build target |
-| `web.package` | npm identity of the generated Web package |
+| `version` | SemVer shared by every generated artifact |
+| `javascript.package` | npm identity of the generated host-neutral package |
 | `docs.title` | heading of the generated package README |
 | `docs.summary` | introductory text of the generated package README |
 
-`name` and `web.package` deliberately describe different identities. Tach
+`name` and `javascript.package` deliberately describe different identities. Tach
 imports never contain either value; they identify files inside the current
-project. The Web package name is used only when consuming or publishing the
+project. The JavaScript package name is used only when consuming or publishing the
 generated npm package.
 
 The manifest rejects unknown fields, duplicate JSON keys, multiple JSON values,
@@ -1665,7 +1669,7 @@ is project-wide.
 The npm package exposes this complete public command set:
 
 ```text
-tach build [--target web|spirv]
+tach build [--verbose]
 tach check
 tach docs
 tach fmt
@@ -1681,10 +1685,9 @@ source-file argument.
 
 | Command | Use |
 |---|---|
-| `tach build` | validate and replace `build/`; target defaults to Web |
-| `tach build --target web` | generate the Web npm package and WGSL |
-| `tach build --target spirv` | generate one SPIR-V module |
-| `tach check` | validate the whole project through both targets, write nothing |
+| `tach build` | validate and replace `build/` with the complete dual-host package |
+| `tach build --verbose` | build the same package plus compiler diagnostics |
+| `tach check` | validate the whole project through both hosts, write nothing |
 | `tach docs` | validate and refresh only generated Markdown |
 | `tach fmt` | transactionally format every kernel |
 | `tach instructions` | print the dense AI-agent language and tooling guide |
@@ -1701,37 +1704,38 @@ Both layers are immutable assets inside the installed `@depths/tach` package;
 retrieval performs no project discovery, native compiler execution, or network
 request.
 
-Use `npx tach ...` in an npm application to select the installed package binary.
-Do not invoke obsolete or imagined commands such as `tach wgsl`, `tach ir`,
-`tach spirv`, `tach compile <file>`, or `tach format <file>`.
+Use `npx tach ...` in an npm application to select the installed package
+binary. The table above is the complete command surface; project commands
+accept neither source paths nor backend selection.
 
 ## 48. Validation workflow
 
 For ordinary application changes, use the project-wide order `fmt -> check ->
 build`; the quick start gives the exact `npx tach` commands.
 
-`tach check` is targetless and intentionally checks both Web and SPIR-V
+`tach check` intentionally checks both WebGPU and Vulkan/SPIR-V
 compatibility without writes. It catches project layout, import graph, syntax,
 documentation, typing, resource, dispatch, target, generated-binding, and
 package-description failures relevant to the public project.
 
-`tach build` defaults to `web`, which matches browser-first application work.
-Use `--target spirv` only when the application needs the native artifact. A
-target switch replaces the whole `build/` inventory; it does not retain Web
-files beside SPIR-V or vice versa.
+`tach build` always emits both executable artifacts and the singular package
+facade. Use `--verbose` only when inspecting compiler-owned IR, executable
+plans, runtime/project descriptions, or SPIR-V disassembly. Verbosity never
+changes executable semantics.
 
 Run `tach docs` when only `@docs` or manifest documentation changed and compiled
 target files should remain untouched. Run a full build before distributing the
 package so executable output and documentation are one current set.
 
-In CI, at minimum run `tach check`. Also run the target build whose artifacts
-the application publishes or deploys. Type-check the consuming TypeScript code
+In CI, at minimum run `tach check`, then one ordinary build for any published
+or deployed package. Type-check the consuming TypeScript code
 against generated `index.d.ts`; never duplicate generated signatures in a
 handwritten declaration file.
 
 ## 49. Build output
 
-Build output always lives at `<project>/build`. A Web build contains exactly:
+Build output always lives at `<project>/build`. An ordinary build contains
+exactly:
 
 ```text
 build/
@@ -1739,6 +1743,7 @@ build/
   index.js
   index.d.ts
   kernel.wgsl
+  kernel.spv
   README.md
   docs/
     <module>.md
@@ -1746,26 +1751,19 @@ build/
 
 There is one `docs/<module>.md` for each discovered module. `index.js` and
 `index.d.ts` expose all project types and exported functions through one entry
-point. `kernel.wgsl` contains the cohesive generated shader module.
+point. `kernel.wgsl` and the SPIR-V 1.6 `kernel.spv` contain corresponding
+physical stages for WebGPU and Vulkan 1.3.
 
-A SPIR-V build contains:
-
-```text
-build/
-  kernel.spv
-  README.md
-  docs/
-    <module>.md
-```
-
-It emits one cohesive SPIR-V 1.3 module and is not an npm package.
+`--verbose` additionally writes `diagnostics/flow.ir`, logical and per-target
+Kernel IR, both plan JSON files, private project/runtime JSON descriptions, and
+`kernel.spvasm`. These files are observations, never runtime inputs.
 
 The build is replaced atomically as one compiler-owned set. Never edit files in
 `build/`, copy only selected generated files over an older build, or expect
 custom files placed there to survive. Store application-authored wrappers,
 tests, assets, and deployment scripts outside `build/`.
 
-## 50. Consuming the generated Web package
+## 50. Consuming the generated package
 
 During local development, import the generated entry directly:
 
@@ -1778,7 +1776,7 @@ import type { Particle } from "../gpu/build/index.js";
 Use `import type` whenever a generated name is needed only as a TypeScript type.
 
 For package-style consumption, link, install, pack, or publish the generated
-`build/` directory under `tach.json.web.package`:
+`build/` directory under `tach.json.javascript.package`:
 
 ```ts
 import { tach } from "@depths/tach";
@@ -1792,12 +1790,13 @@ The consuming application should also declare and import `@depths/tach`
 directly when it uses the public runtime.
 
 Never import `@depths/tach/internal`. That subpath exists only for code emitted
-by the matching Tach compiler. Do not load `kernel.wgsl` manually or reconstruct
-bindings from it; use generated command constructors.
+by the matching Tach compiler. Do not load either shader manually or
+reconstruct bindings; use generated command constructors. The same import runs
+through WebGPU in a browser and Tach's Vulkan runtime in Deno.
 
-## 51. Programmatic build tooling for Node
+## 51. Programmatic build tooling for Deno
 
-Node-only application build scripts may use `@depths/tach/compiler`:
+Deno application build scripts may use `@depths/tach/compiler`:
 
 ```ts
 import {
@@ -1807,21 +1806,22 @@ import {
   format,
 } from "@depths/tach/compiler";
 
-await format({ cwd: process.cwd() });
-await check({ cwd: process.cwd() });
-await build({ cwd: process.cwd(), target: "web" });
+const cwd = Deno.cwd();
+await format({ cwd });
+await check({ cwd });
+await build({ cwd, verbose: true });
 await compilerPath();
 ```
 
 `cwd` is a starting directory for nearest-project discovery, not a source file.
 `build`, `check`, and `docs` return the canonical project root and checked
 project description. The same entry exports `docs({ cwd })` for the docs-only
-route. `build` accepts only `web` or `spirv`; replace `web` above when producing
-the native target. The other operations are targetless. Options may provide an
+route. `build` accepts only the optional `verbose` flag; there is no target
+selection. Options may provide an
 environment overlay when build tooling needs controlled process settings.
 
-Do not import this entry into browser code. Use it only in Node scripts,
-bundler plugins, task runners, or CI orchestration. Prefer the CLI when no
+Do not import this entry into browser code. Use it only in Deno build scripts,
+task runners, or CI orchestration. Prefer the CLI when no
 programmatic composition is needed; it is the smaller and more portable
 application setup.
 
@@ -1882,7 +1882,7 @@ import { tach } from "@depths/tach";
 
 Choose one of two ownership styles. `tach(work, options?)` creates a scoped job;
 `tach(options?)` creates a persistent session. Both accept the same
-`TachOptions` for GPU source, adapter preferences, and device requirements.
+`TachOptions` for portable adapter preference.
 
 ### Scoped job
 
@@ -1903,7 +1903,7 @@ a `ComputeBuffer`; any buffer belongs to the closing session.
 
 ```ts
 const gpu = await tach({
-  adapter: { powerPreference: "high-performance" },
+  powerPreference: "high-performance",
 });
 
 try {
@@ -1926,14 +1926,19 @@ The application-facing shape is:
 
 ```ts
 interface TachOptions {
-  readonly gpu?: GPU;
-  readonly adapter?: GPURequestAdapterOptions;
-  readonly device?: GPUDeviceDescriptor;
+  readonly powerPreference?: "low-power" | "high-performance";
+}
+
+interface TachAdapterInfo {
+  readonly backend: "webgpu" | "vulkan";
+  readonly name: string;
+  readonly vendor?: string;
+  readonly architecture?: string;
+  readonly type?: "integrated" | "discrete" | "virtual" | "cpu" | "unknown";
 }
 
 interface Tach {
-  readonly adapter: GPUAdapter;
-  readonly device: GPUDevice;
+  readonly adapter: TachAdapterInfo;
   buffer<T>(value: T): ComputeBuffer<T>;
   submit(
     first: ComputeCommand,
@@ -1950,10 +1955,12 @@ interface ComputeBuffer<T> {
 }
 ```
 
-`gpu` overrides `navigator.gpu`, mainly for controlled environments. `adapter`
-and `device` pass standard request options/descriptors to WebGPU acquisition.
+The browser passes `powerPreference` to WebGPU adapter selection. Deno uses the
+same preference when ranking compatible Vulkan devices. It is not a guarantee.
+`adapter` deliberately exposes portable observations rather than a raw WebGPU
+or Vulkan object.
 
-`ComputeBuffer` intentionally hides its underlying `GPUBuffer`. Application
+`ComputeBuffer` intentionally hides its underlying backend allocation. Application
 code cannot bind it manually, mix it with another session, or choose a physical
 layout. The runtime package root exports `tach`, `TachError`, and their public
 types; generated program functions come from the generated project package.
@@ -2110,8 +2117,8 @@ Use a completion boundary only when the application needs one:
 - `await buffer.read()` waits for earlier work and performs readback.
 - returning from `tach(async gpu => ...)` waits before session closure.
 
-`gpu.close()` is immediate and idempotent. In a persistent session, call
-`await gpu.idle()` first when graceful completion matters:
+`gpu.close()` is synchronous and idempotent teardown. In a persistent session,
+call `await gpu.idle()` first when successful completion must be observed:
 
 ```ts
 try {
@@ -2156,6 +2163,9 @@ device-lost
 gpu-validation
 gpu-out-of-memory
 gpu-internal
+vulkan-unavailable
+vulkan-profile
+native
 buffer
 kernel
 lifecycle
@@ -2165,7 +2175,8 @@ compiler-install
 compiler-execution
 ```
 
-Codes distinguish capability/acquisition, GPU execution, buffer and command
+Codes distinguish WebGPU/Vulkan capability and acquisition, native profile and
+execution, buffer and command
 contracts, lifecycle misuse, scoped callback failures, and compiler delivery.
 The original cause is retained. `operation` identifies a relevant operation
 when available.
@@ -2268,9 +2279,10 @@ ill-conditioned numerical method is accurate for the application's data.
 
 Test at three separate boundaries: project validity, generated TypeScript ABI,
 and real GPU results. `tach check` is the mandatory static gate, but it does not
-replace execution tests. A consuming application should build the Web target,
-type-check its actual calls against generated `index.d.ts`, and run representative
-commands in an environment with real or intentionally controlled WebGPU.
+replace execution tests. A consuming application should build the complete
+package, type-check its actual calls against generated `index.d.ts`, and run
+representative commands through every deployed host: WebGPU in browsers and
+Vulkan in Deno.
 
 For every indexed operation, include domain sizes around workgroup boundaries:
 
@@ -2360,7 +2372,7 @@ path. Allocate and initialize buffers before the interval unless transfers are
 part of the question. Read exact results once after timing to prove work was not
 optimized away or misconfigured. Use workloads large enough that fixed launch
 noise does not dominate, report input dimensions, command/repeat counts,
-completion boundary, hardware/browser, and whether power state was controlled.
+completion boundary, backend/adapter, and whether power state was controlled.
 
 Use `repeat` only when repeated complete-program semantics match the workload.
 A safe one-dispatch program may internalize repeat, so repeat and multiple host
@@ -2370,7 +2382,7 @@ not GPU execution versus a TypeScript loop or cold setup. Report raw samples or
 distribution statistics; do not turn a noisy microbenchmark into a pass/fail
 claim.
 
-## 67. Web package integration and distribution
+## 67. Package integration and distribution
 
 The Tach source project and consuming npm project may share a repository without
 sharing identity. When `package.json` and `tach.json` share a root, the npm
@@ -2381,7 +2393,7 @@ package can expose scripts such as:
   "scripts": {
     "gpu:fmt": "tach fmt",
     "gpu:check": "tach check",
-    "gpu:build": "tach build --target web"
+    "gpu:build": "tach build"
   }
 }
 ```
@@ -2391,48 +2403,44 @@ placeholder into the manifest by hand.
 
 Run commands with a working directory whose nearest `tach.json` is the intended
 project. If the manifest lives in `gpu/`, invoke the CLI from that directory or
-pass its resolved directory as the Node API's `cwd` option in an application
+pass its resolved directory as the Deno API's `cwd` option in an application
 build script. Tach's CLI itself has no project-path flag.
 
 For an application-local build, import `gpu/build/index.js` directly and ensure
 the Tach build runs before TypeScript type-checking or bundling. For independent
 distribution, treat `gpu/build/` as the generated npm package: its
-`package.json` carries `web.package`, the Tach project version, entry points,
+`package.json` carries `javascript.package`, the Tach project version, entry points,
 and the matching `@depths/tach` dependency. Pack or publish that directory only after a
-fresh successful Web build. Consumers then install the generated package and
+fresh successful build. Consumers then install the generated package and
 `@depths/tach`, importing runtime and kernels separately.
 
-Do not copy only `index.js`, rewrite its dependency, or replace `kernel.wgsl`
+Do not copy only `index.js`, rewrite its dependency, or replace either shader
 behind a previously generated module. Generated JavaScript, declarations,
-shader text, package metadata, and docs are one versioned unit. Do not run a
+both shader modules, package metadata, and docs are one versioned unit. Do not run a
 package formatter or declaration generator over `build/`; any desired wrapper
 belongs in application-authored source outside it.
 
-Because every Web build replaces `build/`, publish/copy/package artifacts before
-switching that same project to the SPIR-V target. A repository that needs both
-deployments should automate two builds and copy each completed target inventory
-to its separate deployment destination. Never use the compiler-owned `build/`
-directory itself as long-lived mixed-target storage.
+One build is already complete for browser and Deno deployments. Preserve its
+whole inventory when packing, copying, or publishing; never create partial
+per-host packages.
 
-## 68. SPIR-V target boundary
+## 68. Unified browser and Deno host boundary
 
-`tach build --target spirv` validates the same complete project and emits one
-cohesive `build/kernel.spv` plus target-independent generated Markdown. It emits
-no JavaScript, TypeScript declaration, Web package manifest, or WGSL. Switching
-from Web to SPIR-V removes those Web artifacts because a build directory always
-represents exactly one target.
+`tach build` emits one package containing `index.js`, `index.d.ts`, WGSL, and
+SPIR-V 1.6. The facade embeds both executable plans and URLs to the two sibling
+shader files. There is no target flag and no separate server facade.
 
-The managed `@depths/tach` execution API is WebGPU-facing; it does not load
-`kernel.spv` or provide a JavaScript Vulkan runtime. A native application that
-consumes SPIR-V owns its Vulkan integration and synchronization. Tach source
-still contains no Vulkan descriptor annotations or target conditionals: keep
-one portable language meaning and let `tach check` validate both targets.
+The managed `@depths/tach` API detects the host. A browser uses WebGPU and WGSL;
+Deno uses Tach's packaged Vulkan 1.3 runtime and SPIR-V. Both consume identical
+commands, buffers, host layouts, program ordering, and lifecycle rules. Tach
+source and application calls therefore contain no Vulkan descriptors, WebGPU
+objects, target conditionals, or provider-specific branches.
 
-Do not import SPIR-V output into the generated Web package, and do not expect a
-SPIR-V build to preserve a previously generated `index.d.ts`. If an application
-only runs on Web, the SPIR-V path still matters through `tach check` because
-portability is a language constraint, while Web remains the default emitted
-target.
+The Vulkan host requires an x86-64 Windows or Linux runtime, Vulkan API 1.3,
+robust buffer access, Synchronization2, and zero-initialized workgroup memory.
+Unavailable or incompatible devices fail with structured Tach errors. Do not
+load `kernel.spv` yourself: the managed driver owns profile enforcement,
+pipelines, descriptors, staging, barriers, submission reuse, and readback.
 
 ## 69. Pattern: one-dimensional map
 
@@ -2863,7 +2871,7 @@ indexed stages.
 
 When asked to add GPU work to an application, follow this sequence:
 
-1. Locate the nearest intended `tach.json` and inspect its generated Web package
+1. Locate the nearest intended `tach.json` and inspect its generated JavaScript package
    name.
 2. Inventory existing modules, kernel identities, global declaration names,
    types, helpers, stages, and exported programs.
@@ -2878,7 +2886,7 @@ When asked to add GPU work to an application, follow this sequence:
     local implementation reasoning.
 11. Run project-wide formatting.
 12. Run targetless checking.
-13. Build Web unless the task specifically needs SPIR-V.
+13. Build the complete dual-host package.
 14. Inspect generated `index.d.ts` and update the TypeScript caller to match it.
 15. Exercise the real runtime path with representative data and explicit
     completion only where output is consumed.
@@ -2991,8 +2999,9 @@ Remember the complete system in six statements:
 4. Buffers hold persistent GPU storage, transients hold program-local scratch,
    and parallel writes require ownership, atomics, workgroup synchronization,
    or another dispatch.
-5. `tach build` generates the host package; `@depths/tach` opens sessions,
-   creates buffers, submits generated commands, and owns WebGPU details.
+5. `tach build` generates one browser/Deno package; `@depths/tach` opens
+   sessions, creates buffers, submits generated commands, and owns WebGPU or
+   Vulkan details.
 6. GPU work is asynchronous and resident by default: submission is not
    completion, generated calls are not execution, and readback is never free.
 

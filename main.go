@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -40,8 +41,8 @@ func main() {
 
 func build(args []string) error {
 	flags := flag.NewFlagSet("_build", flag.ContinueOnError)
-	targetName := flags.String("target", "web", "")
 	output := flags.String("output", "", "")
+	verbose := flags.Bool("verbose", false, "")
 	workers := flags.Int("workers", 0, "")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -49,16 +50,9 @@ func build(args []string) error {
 	if flags.NArg() != 0 || *output == "" {
 		return fmt.Errorf("_build requires --output and no positional arguments")
 	}
-	target, err := compiler.ParseBuildTarget(*targetName)
-	if err != nil {
-		return err
-	}
-	result, err := compiler.Build(".", target, *workers)
+	result, err := compiler.Build(".", *workers)
 	if err == nil {
-		err = compiler.WriteNativeArtifacts(result, target, *output)
-	}
-	if err == nil {
-		_, err = os.Stdout.Write(result.Description)
+		err = compiler.WriteNativeArtifacts(result, *output, *verbose)
 	}
 	return err
 }
@@ -70,7 +64,15 @@ func check(args []string) error {
 	}
 	result, err := compiler.Check(".", workers)
 	if err == nil {
-		_, err = os.Stdout.Write(result.Description)
+		payload := struct {
+			Project json.RawMessage `json:"project"`
+			Runtime json.RawMessage `json:"runtime"`
+		}{result.Description, result.MetadataJSON}
+		var data []byte
+		data, err = json.Marshal(payload)
+		if err == nil {
+			_, err = os.Stdout.Write(data)
+		}
 	}
 	return err
 }

@@ -1,16 +1,18 @@
 # Tach large GPU showcase
 
-This workspace measures six fixed, sustained GPU workloads from one generated
-Tach project package through Chromium WebGPU. It has one profile and no performance
-verdicts. The harness records what the selected adapter did.
+This standalone npm workspace measures six fixed, sustained GPU workloads from
+one generated Tach project package through both Chromium/WebGPU and
+Deno/Vulkan 1.3. It has one workload profile and no performance verdicts. The
+harness records what each selected adapter did.
 
 Each workload lives in its own `.tach` kernel file. `kernels/mesh` and
 `kernels/procedural` directly import shared color helpers from
 `shared/color`, exercising project imports in addition to six independent
 public programs. One project build merges all seven files into one
-JavaScript/TypeScript facade and one WGSL module. The TypeScript host imports
-all six public programs from `build/index.js` and executes them in one
-persistent Tach session.
+JavaScript/TypeScript facade, one WGSL module, and one SPIR-V 1.6 module. One
+host-neutral workload implementation imports all six public programs from
+`build/index.js`; the browser and Deno runners each execute it in one
+persistent Tach session through the same `tach` API.
 
 ## Workloads
 
@@ -37,7 +39,8 @@ does not infer overdraw from triangle count.
 
 ## Timing
 
-One adapter and Tach session are reused for the complete run. Each workload:
+Each backend reuses one adapter and Tach session for its complete run. Each
+workload:
 
 1. allocates and uploads its resident inputs outside timing;
 2. completes one untimed warmup;
@@ -52,10 +55,10 @@ Every sample measures:
 gpu.submit(command) through gpu.idle()
 ```
 
-This includes command preparation, encoding, queue submission, and GPU
+This includes command preparation, backend encoding, queue submission, and GPU
 completion. It excludes initial allocation/upload, output readback, PNG
-encoding, validation, and report writing. Browser scheduling and the managed
-runtime boundary remain part of the observation.
+encoding, validation, and report writing. The managed runtime and respective
+browser or native FFI boundary remain part of each observation.
 
 Throughput uses work intrinsic to each algorithm:
 
@@ -91,15 +94,16 @@ From the repository root:
 
 ```sh
 npm run compiler
+npm run native
 npm run build --workspace=@depths/tach
-npm run install:browser --workspace=@tach/showcase-ts
 npm run benchmark --workspace=@tach/showcase-ts
 ```
 
-`npm run check --workspace=@tach/showcase-ts` builds the complete Tach project
-once and type-checks its TypeScript consumer against the one generated package
-without running hardware work. `tach build` also refreshes ignored generated
-README/module documentation for inspection alongside the compiled package.
+`npm run check --workspace=@tach/showcase-ts` lints and type-checks both host
+entries and the shared workload implementation without running hardware work.
+The build script compiles the Tach project once, copies the complete package
+locally, bundles the browser entry with Deno, and places the exact WGSL beside
+it. Deno directly imports the same generated package and uses its SPIR-V.
 
 ## Reports
 
@@ -108,10 +112,14 @@ Every successful benchmark writes:
 ```text
 showcase-ts/reports/gpu.json
 showcase-ts/reports/gpu.md
-showcase-ts/reports/procedural.png
-showcase-ts/reports/mesh.png
+showcase-ts/reports/webgpu-procedural.png
+showcase-ts/reports/webgpu-mesh.png
+showcase-ts/reports/vulkan-procedural.png
+showcase-ts/reports/vulkan-mesh.png
 ```
 
-JSON is the machine-readable source. Markdown contains the adapter, timing
-contract, raw samples, medians, throughput, FPS, validation, and full workload
-details. Reports are local observations and ignored by Git.
+JSON is the machine-readable source and contains separate host records.
+Markdown puts both backends in one comparison table and then records their
+adapter, timing contract, raw samples, medians, throughput, FPS, validation,
+and full workload details. Each PNG is the exact post-timing readback from its
+named backend. Reports are local observations and ignored by Git.

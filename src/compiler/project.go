@@ -23,11 +23,11 @@ import (
 )
 
 type manifest struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Web     struct {
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	JavaScript struct {
 		Package string `json:"package"`
-	} `json:"web"`
+	} `json:"javascript"`
 	Docs struct {
 		Title   string `json:"title"`
 		Summary string `json:"summary"`
@@ -127,7 +127,7 @@ func readManifest(path string) (manifest, error) {
 	if err := requireEOF(decoder); err != nil {
 		return manifest{}, fmt.Errorf("tach.json: %w", err)
 	}
-	for _, field := range [][2]string{{"name", result.Name}, {"version", result.Version}, {"web.package", result.Web.Package}, {"docs.title", result.Docs.Title}, {"docs.summary", result.Docs.Summary}} {
+	for _, field := range [][2]string{{"name", result.Name}, {"version", result.Version}, {"javascript.package", result.JavaScript.Package}, {"docs.title", result.Docs.Title}, {"docs.summary", result.Docs.Summary}} {
 		if strings.TrimSpace(field[1]) == "" {
 			return manifest{}, fmt.Errorf("tach.json: %s is required and must be non-empty", field[0])
 		}
@@ -135,8 +135,8 @@ func readManifest(path string) (manifest, error) {
 	if !semverPattern.MatchString(result.Version) {
 		return manifest{}, fmt.Errorf("tach.json: version %q is not semantic versioning", result.Version)
 	}
-	if !npmPattern.MatchString(result.Web.Package) || len(result.Web.Package) > 214 {
-		return manifest{}, fmt.Errorf("tach.json: web.package %q is not a valid npm package name", result.Web.Package)
+	if !npmPattern.MatchString(result.JavaScript.Package) || len(result.JavaScript.Package) > 214 {
+		return manifest{}, fmt.Errorf("tach.json: javascript.package %q is not a valid npm package name", result.JavaScript.Package)
 	}
 	return result, nil
 }
@@ -556,7 +556,7 @@ func relative(root, path string) string {
 }
 
 func (p *project) description() bindings.ProjectInput {
-	input := bindings.ProjectInput{Name: p.Manifest.Name, Version: p.Manifest.Version, Package: p.Manifest.Web.Package, Title: p.Manifest.Docs.Title, Summary: p.Manifest.Docs.Summary}
+	input := bindings.ProjectInput{Name: p.Manifest.Name, Version: p.Manifest.Version, Package: p.Manifest.JavaScript.Package, Title: p.Manifest.Docs.Title, Summary: p.Manifest.Docs.Summary}
 	for _, kernel := range p.Kernels {
 		item := bindings.KernelInput{Module: kernel.Module, Name: kernel.Name, Identity: kernel.Identity, Documentation: kernel.Documentation}
 		for _, declaration := range kernel.AST.Decls {

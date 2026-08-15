@@ -5,41 +5,32 @@
   "type": "module",
   "sideEffects": false,
   "files": [
-    "cli.mjs",
+    "cli.ts",
     "dist/",
-    "scripts/install.mjs",
+    "native/",
     "README.md"
   ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
     },
     "./compiler": {
       "types": "./dist/compiler.d.ts",
       "import": "./dist/compiler.js"
     },
     "./internal": {
-      "types": "./dist/internal.d.ts",
-      "import": "./dist/internal.js"
+      "default": "./dist/internal.js"
     }
   },
   "bin": {
-    "tach": "./cli.mjs"
+    "tach": "./cli.ts"
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node scripts/instructions.mjs",
-    "check": "tsc -p tsconfig.json --noEmit && node scripts/instructions.mjs --check",
-    "test": "npm run build && node --test tests/*.test.mjs",
-    "prepare": "npm run build",
-    "postinstall": "node scripts/install.mjs"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "devDependencies": {
-    "@types/node": "26.2.0",
-    "typescript": "7.0.2"
+    "build": "deno run -A scripts/build.ts && deno run -A scripts/instructions.ts",
+    "check": "deno lint src declarations scripts cli.ts tests && deno check src/index.ts src/internal.ts src/compiler.ts declarations/*.ts cli.ts scripts/*.ts tests/*.js && deno run --allow-read scripts/instructions.ts --check",
+    "test": "npm run build && deno test -A --node-modules-dir=manual tests",
+    "prepare": "npm run build"
   },
   "publishConfig": {
     "access": "public"

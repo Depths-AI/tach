@@ -1,10 +1,12 @@
 package spirv
 
-// Tach emits a deliberately small, fully-owned SPIR-V 1.3 compute profile.
+import "tach/src/backend"
+
+// Tach emits a deliberately small, fully-owned SPIR-V 1.6 compute profile.
 // Values below are fixed by the SPIR-V unified specification.
 const (
 	Magic   uint32 = 0x07230203
-	Version uint32 = 0x00010300
+	Version uint32 = backend.SPIRVBinaryVersion
 )
 
 type Op uint16

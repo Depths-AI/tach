@@ -1,80 +1,69 @@
 # Tach browser correctness harness
 
-This private Playwright workspace builds the maintained multi-module
-`examples` Tach project once and runs its unified generated JavaScript module
-through Chromium WebGPU. It exercises the same
-`@depths/tach` package surface an application uses; it does not call Go from
-the browser or maintain handwritten shader fixtures.
+This private npm workspace proves that the canonical `examples/` Tach project
+works through the published `@depths/tach` surface in Chromium WebGPU. The
+harness is Deno-native, standalone, and owns its project build, static server,
+Chrome launch, DevTools Protocol client, and semantic assertions. It shares no
+runner helper or handwritten shader fixture with another workspace.
 
-The seven examples cover atomics/shared memory, bitwise operations, structured
-control, `for` lowering, math intrinsics and vectors, structs, and scalar
-runtime arrays. Each case checks:
+## What it exercises
 
-- generated WGSL reports no Chromium compilation errors;
-- execution produces the expected typed data;
-- no uncaptured WebGPU error occurs; and
-- buffers, commands, parameters, submission, and scoped cleanup use the public
-  runtime contract.
+`scripts/build.ts` calls `@depths/tach/compiler` on `examples/`, copies the
+complete generated package into local ignored `generated/`, bundles
+`src/main.ts`, and places the exact generated WGSL beside the browser module.
+The browser imports all public commands through one generated `index.js`.
 
-An additional case submits commands with different parameter values in one
-submission and across submissions to check parameter isolation and ordering.
+The seven canonical programs cover:
 
-## Setup
+- shared-memory atomics;
+- shifts, masks, complements, and unsigned integer behavior;
+- structured branches and compound assignment;
+- bounded `for` lowering;
+- vectors and the complete scalar math intrinsic set;
+- imported struct types and particle integration; and
+- scalar runtime arrays, repeated commands, and parameter isolation.
+
+One scoped Tach session submits the complete corpus. Assertions use decoded
+GPU results, including exact integer outcomes and tolerance-checked floating
+point results. Batched commands with different uniform values and later
+submissions verify ordering and parameter-arena separation. Success therefore
+proves project discovery/imports, the global facade, multi-entry WGSL,
+generated codecs, public command construction, execution, readback, and
+cleanup together.
+
+## Browser runner
+
+`test.ts` starts a loopback-only Deno server and launches an installed Chrome
+or Chromium with WebGPU enabled. It uses the browser's DevTools Protocol
+directly and has no external runner or bundler dependency.
+Set `CHROME_BIN` only when Chrome is outside the standard platform locations.
+
+The server exposes only its local app bundle and `kernel.wgsl`. The runner
+waits for a single browser result, prints the selected adapter and number of
+programs, then closes Chrome, aborts the server, and removes its temporary
+profile even after failure.
+
+## Run
 
 From the repository root:
 
 ```sh
-npm ci
-npm run compiler
-npm run install:browser --workspace=@tach/browser-test
-```
-
-The package compiler resolver finds `dist/tach` or `dist/tach.exe` in this
-development checkout. `TACH_BIN` can select an explicit executable.
-
-## Run
-
-```sh
+npm ci --ignore-scripts
 npm test --workspace=@tach/browser-test
 ```
 
-Playwright's global setup calls the public project `build()` API once from the
-`examples` root. The compiler atomically regenerates `examples/build/` with
-one `index.js`, one `index.d.ts`, and one `kernel.wgsl` for every exported
-example endpoint. The test server maps that tree to `/build/`; tests import the
-single `/build/index.js`, fetch the exact standalone WGSL module, and execute
-serially with one Chromium worker.
+The workspace depends on local `@depths/tach` through the root npm workspace.
+`npm run build` must have produced `dist/tach.exe` or `dist/tach`; alternatively
+`TACH_BIN` may identify the exactly matching compiler.
 
-This arrangement checks more than seven isolated algorithms: it exercises
-one-tier project discovery, cross-file imports used by the particle example,
-global binding generation, multiple physical shader entries in one WGSL
-module, and public-program lookup through one package facade.
-
-Chromium is launched headless with WebGPU enabled. Hardware is preferred;
-`--enable-unsafe-swiftshader` permits Chromium's software implementation on a
-GPU-less host. Software fallback is appropriate here only because all shaders
-are trusted local compiler output. The first case logs whether adapter metadata
-looks hardware-accelerated or software-emulated.
-
-For an interactive browser window:
+Useful individual commands:
 
 ```sh
-npm run test:headed --workspace=@tach/browser-test
+npm run build --workspace=@tach/browser-test
+npm run check --workspace=@tach/browser-test
 ```
 
-The harness uses Playwright's line reporter and leaves no custom Markdown
-report. Failures, traces, and standard Playwright artifacts use the workspace's
-ignored output directories.
-
-## Inspect generated examples
-
-Build fixtures and run the static server without the test runner:
-
-```sh
-npm run build:examples --workspace=@tach/browser-test
-npm run start --workspace=@tach/browser-test
-```
-
-The server listens at <http://127.0.0.1:4173>. It serves only files beneath the
-harness, `examples/build`, or built `@depths/tach` package roots, rejects path
-traversal, disables caching, and enables cross-origin isolation headers.
+`check` lints and type-checks the standalone harness. `test` rebuilds the
+canonical project and performs real browser execution. It writes no custom
+report or pass/fail Markdown; process status and assertion diagnostics are the
+test contract.

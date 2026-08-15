@@ -28,13 +28,13 @@ case $version in
   *[!A-Za-z0-9._-]*) usage ;;
 esac
 
-for command in cc git go node npm sha256sum spirv-val; do
+for command in cc deno git go npm sha256sum spirv-val; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "tach release: required command not found: $command" >&2
     exit 1
   fi
 done
-if ! node -e 'process.exit(/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(process.argv[1]) ? 0 : 1)' "$package_version"; then
+if ! TACH_RELEASE_VERSION=$package_version deno eval 'Deno.exit(/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(Deno.env.get("TACH_RELEASE_VERSION") ?? "") ? 0 : 1)'; then
   usage
 fi
 
@@ -99,8 +99,15 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 wi
     go build -trimpath -ldflags="-s -w -X main.version=$package_version" -o "$asset" .
 done
 
-cp tach-ts/package.json tach-ts/README.md tach-ts/cli.mjs LICENSE "$package_dir/"
-cp -R tach-ts/dist tach-ts/scripts "$package_dir/"
+for library in tach-vulkan.windows.x86_64.dll tach-vulkan.linux.x86_64.so; do
+  if [ ! -f "tach-ts/native/$library" ]; then
+    echo "tach release: missing native runtime tach-ts/native/$library" >&2
+    exit 1
+  fi
+done
+
+cp tach-ts/package.json tach-ts/README.md tach-ts/cli.ts LICENSE "$package_dir/"
+cp -R tach-ts/dist tach-ts/native "$package_dir/"
 (cd "$package_dir" && \
   npm version "$package_version" --no-git-tag-version --ignore-scripts >/dev/null)
 npm pack "$package_dir" \
@@ -117,7 +124,7 @@ mkdir "$install_test_dir"
   TACH_BIN="$host_compiler" node_modules/.bin/tach version >/dev/null
   node_modules/.bin/tach instructions >/dev/null
   node_modules/.bin/tach instructions --details 1 85 >/dev/null
-  node --input-type=module -e 'const m = await import("@depths/tach"); if (Object.keys(m).sort().join() !== "TachError,tach") process.exit(1)'
+  deno eval --node-modules-dir=manual 'const m = await import("@depths/tach"); if (Object.keys(m).sort().join() !== "TachError,tach") Deno.exit(1)'
 )
 
 (

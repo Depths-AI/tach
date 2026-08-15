@@ -1,0 +1,19 @@
+{
+  "name": "@tach/deno-test",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Public Deno and Vulkan integration harness for Tach-generated modules",
+  "type": "module",
+  "imports": {
+    "#kernels": "./generated/index.js"
+  },
+  "scripts": {
+    "build": "deno run -A --node-modules-dir=manual build.ts",
+    "check": "deno lint build.ts examples.ts && deno check --node-modules-dir=manual build.ts examples.ts",
+    "test": "npm run build && spirv-val --target-env vulkan1.3 generated/kernel.spv && deno run --allow-ffi --allow-read --node-modules-dir=manual examples.ts"
+  },
+  "dependencies": {
+    "@depths/tach": "0.0.0"
+  }
+}

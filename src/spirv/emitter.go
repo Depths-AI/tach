@@ -4,17 +4,77 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
 	"tach/src/abi"
 	"tach/src/backend"
+	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/layout"
 	"tach/src/types"
 )
 
-// Emit lowers verified Tach IR to a SPIR-V 1.3 compute module and immediately
+type inputKind uint8
+
+const (
+	inputGlobalIndex inputKind = iota + 1
+	inputLocalIndex
+	inputLocalLinear
+)
+
+type program struct {
+	executable *backend.Executable
+	source     *ir.Module
+	functions  map[*ir.Function]*backend.Coordinates
+	kernels    map[*ir.Function]*backend.PhysicalKernel
+}
+
+func Lower(logical *flow.Module) (*backend.Executable, error) {
+	return backend.Lower(logical, backend.SPIRVProfile)
+}
+
+func lower(executable *backend.Executable) (*program, error) {
+	functions, kernels, err := executable.IndexFunctions()
+	if err != nil {
+		return nil, err
+	}
+	return &program{executable: executable, source: executable.KernelModule, functions: functions, kernels: kernels}, nil
+}
+
+func inputs(_ *ir.Function, coordinates *backend.Coordinates) map[inputKind]bool {
+	used := map[inputKind]bool{}
+	for id, coordinate := range coordinates.Values {
+		if coordinates.Uses[id] == 0 {
+			continue
+		}
+		switch coordinate.Space {
+		case backend.Global:
+			used[inputGlobalIndex] = true
+		case backend.Local:
+			used[inputLocalIndex] = true
+		case backend.LocalLinear:
+			used[inputLocalLinear] = true
+		}
+	}
+	return used
+}
+
+func coordinate(f *backend.Coordinates, id ir.ValueID) (inputKind, uint32) {
+	coordinate := f.Values[id]
+	switch coordinate.Space {
+	case backend.Global:
+		return inputGlobalIndex, uint32(coordinate.Dimension)
+	case backend.Local:
+		return inputLocalIndex, uint32(coordinate.Dimension)
+	case backend.LocalLinear:
+		return inputLocalLinear, 0
+	}
+	panic("unknown lowered coordinate space")
+}
+
+// Emit lowers verified Tach IR to a SPIR-V 1.6 compute module and immediately
 // parses and validates the produced binary with Tach's own SPIR-V validator.
 func Emit(executable *backend.Executable) ([]byte, error) {
 	if err := backend.Verify(executable); err != nil {
@@ -65,6 +125,8 @@ type builder struct {
 	parameterIDs    map[*ir.Function]uint32
 	inputIDs        map[inputKind]uint32
 	workgroupIDs    map[string][]uint32
+	globalUses      map[string]map[uint32]bool
+	calls           map[string]map[string]bool
 	glsl450         uint32
 }
 
@@ -90,6 +152,8 @@ func newBuilder(p *program) *builder {
 		parameterIDs:    map[*ir.Function]uint32{},
 		inputIDs:        map[inputKind]uint32{},
 		workgroupIDs:    map[string][]uint32{},
+		globalUses:      map[string]map[uint32]bool{},
+		calls:           map[string]map[string]bool{},
 	}
 }
 
@@ -144,14 +208,12 @@ func (b *builder) build() error {
 	if err := b.emitWorkgroups(); err != nil {
 		return err
 	}
-	b.emitEntryPoints()
-
 	for _, f := range b.m.Functions {
 		if err := b.emitFunction(f); err != nil {
 			return fmt.Errorf("SPIR-V lower %s: %w", f.Name, err)
 		}
 	}
-	return nil
+	return b.emitEntryPoints()
 }
 
 func (b *builder) words() []uint32 {
@@ -473,7 +535,11 @@ func (b *builder) emitWorkgroups() error {
 			}
 			id := b.id()
 			ids[i] = id
-			emit(&b.typesGlobals, OpVariable, ptr, id, StorageWorkgroup)
+			zero, err := b.nullConstant(w.Type)
+			if err != nil {
+				return fmt.Errorf("workgroup %s.%s initializer: %w", f.Name, w.Name, err)
+			}
+			emit(&b.typesGlobals, OpVariable, ptr, id, StorageWorkgroup, zero)
 			emit(&b.debug, OpName, append([]uint32{id}, encodeString("__tach_w_"+f.Name+"_"+strconv.Itoa(i))...)...)
 		}
 		b.workgroupIDs[f.Name] = ids
@@ -481,25 +547,60 @@ func (b *builder) emitWorkgroups() error {
 	return nil
 }
 
-func (b *builder) emitEntryPoints() {
-	order := []inputKind{inputGlobalIndex, inputLocalIndex, inputLocalLinear}
+func (b *builder) emitEntryPoints() error {
 	for _, f := range b.m.Functions {
 		if f.Kind != ir.Stage {
 			continue
 		}
-		used := inputs(f, b.p.functions[f])
 		ops := []uint32{ExecutionModelGLCompute, b.funcIDs[f.Name]}
 		ops = append(ops, encodeString(f.Name)...)
-		// SPIR-V 1.3 entry-point interfaces contain Input/Output variables only.
-		for _, k := range order {
-			if used[k] {
-				ops = append(ops, b.inputIDs[k])
-			}
+		globals, err := b.entryGlobals(f.Name, map[string]bool{}, map[string]bool{})
+		if err != nil {
+			return err
 		}
+		ops = append(ops, globals...)
 		emit(&b.entryPoints, OpEntryPoint, ops...)
 		workgroup := b.p.kernels[f].Workgroup
 		emit(&b.execModes, OpExecutionMode, b.funcIDs[f.Name], ExecutionModeLocalSize, workgroup[0], workgroup[1], workgroup[2])
 	}
+	return nil
+}
+
+func (b *builder) entryGlobals(name string, visiting, visited map[string]bool) ([]uint32, error) {
+	used := map[uint32]bool{}
+	var walk func(string) error
+	walk = func(function string) error {
+		if visiting[function] {
+			return fmt.Errorf("recursive static call graph at %s", function)
+		}
+		if visited[function] {
+			return nil
+		}
+		if b.funcIDs[function] == 0 {
+			return fmt.Errorf("static call graph references unknown function %s", function)
+		}
+		visiting[function] = true
+		for id := range b.globalUses[function] {
+			used[id] = true
+		}
+		for callee := range b.calls[function] {
+			if err := walk(callee); err != nil {
+				return err
+			}
+		}
+		delete(visiting, function)
+		visited[function] = true
+		return nil
+	}
+	if err := walk(name); err != nil {
+		return nil, err
+	}
+	ids := make([]uint32, 0, len(used))
+	for id := range used {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
 }
 
 func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
@@ -625,9 +726,6 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	if err := s.emitParameters(); err != nil {
 		return err
 	}
-	if err := s.emitWorkgroupZeroInitialization(); err != nil {
-		return err
-	}
 	if err := s.emitCoordinates(); err != nil {
 		return err
 	}
@@ -639,6 +737,15 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	}
 	emit(&b.functions, OpFunctionEnd)
 	return nil
+}
+
+func (s *fnEmitter) useGlobal(id uint32) {
+	used := s.b.globalUses[s.f.Name]
+	if used == nil {
+		used = map[uint32]bool{}
+		s.b.globalUses[s.f.Name] = used
+	}
+	used[id] = true
 }
 
 func (s *fnEmitter) emitParameters() error {
@@ -703,6 +810,7 @@ func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int,
 	if variable == 0 {
 		return 0, fmt.Errorf("kernel %s parameter block was not declared", s.f.Name)
 	}
+	s.useGlobal(variable)
 	emit(&s.b.functions, OpAccessChain, pointer, address, variable, index)
 	typeID, err := s.b.typeID(field.Physical, typeLogical)
 	if err != nil {
@@ -750,6 +858,7 @@ func (s *fnEmitter) emitCoordinates() error {
 			if variable == 0 {
 				return fmt.Errorf("coordinate input %d was not declared", input)
 			}
+			s.useGlobal(variable)
 			t := types.TU32
 			if input != inputLocalLinear {
 				t = types.Vec(types.TU32, 3)
@@ -771,63 +880,6 @@ func (s *fnEmitter) emitCoordinates() error {
 		s.def(value, id, types.TU32)
 	}
 	return nil
-}
-
-func (s *fnEmitter) emitWorkgroupZeroInitialization() error {
-	if len(s.f.WorkgroupVars) == 0 {
-		return nil
-	}
-	vars := s.b.workgroupIDs[s.f.Name]
-	if len(vars) != len(s.f.WorkgroupVars) {
-		return fmt.Errorf("workgroup variables for %s were not declared", s.f.Name)
-	}
-	localIndexVar := s.b.inputIDs[inputLocalLinear]
-	if localIndexVar == 0 {
-		return fmt.Errorf("workgroup initialization requires localIndex builtin")
-	}
-	u32Type, err := s.b.typeID(types.TU32, typeLogical)
-	if err != nil {
-		return err
-	}
-	localIndex := s.b.id()
-	emit(&s.b.functions, OpLoad, u32Type, localIndex, localIndexVar)
-	s.inputs[inputLocalLinear] = localIndex
-	zero, err := s.b.u32Constant(0)
-	if err != nil {
-		return err
-	}
-	boolType, err := s.b.typeID(types.TBool, typeLogical)
-	if err != nil {
-		return err
-	}
-	isFirst := s.b.id()
-	emit(&s.b.functions, OpIEqual, boolType, isFirst, localIndex, zero)
-
-	initialize, skip, merge := s.b.id(), s.b.id(), s.b.id()
-	emit(&s.b.functions, OpSelectionMerge, merge, SelectionControlNone)
-	emit(&s.b.functions, OpBranchConditional, isFirst, initialize, skip)
-	s.terminated = true
-
-	emit(&s.b.functions, OpLabel, initialize)
-	s.currentLabel, s.terminated = initialize, false
-	for i, w := range s.f.WorkgroupVars {
-		null, err := s.b.nullConstant(w.Type)
-		if err != nil {
-			return fmt.Errorf("zero-initialize workgroup %s: %w", w.Name, err)
-		}
-		emit(&s.b.functions, OpStore, vars[i], null)
-	}
-	emit(&s.b.functions, OpBranch, merge)
-	s.terminated = true
-
-	emit(&s.b.functions, OpLabel, skip)
-	s.currentLabel, s.terminated = skip, false
-	emit(&s.b.functions, OpBranch, merge)
-	s.terminated = true
-
-	emit(&s.b.functions, OpLabel, merge)
-	s.currentLabel, s.terminated = merge, false
-	return s.emitBarrier(&ir.Barrier{Kind: ir.BarrierWorkgroup})
 }
 
 type blockMode uint8
@@ -1129,6 +1181,12 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 			ops = append(ops, v)
 		}
 		emit(&s.b.functions, OpFunctionCall, ops...)
+		calls := s.b.calls[s.f.Name]
+		if calls == nil {
+			calls = map[string]bool{}
+			s.b.calls[s.f.Name] = calls
+		}
+		calls[x.Function] = true
 		s.def(x.Result, result, x.Type)
 	case *ir.PlaceRoot:
 		return s.emitPlaceRoot(x)
@@ -1137,6 +1195,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 		if x.Workgroup < 0 || x.Workgroup >= len(ids) {
 			return fmt.Errorf("workgroup index %d out of bounds", x.Workgroup)
 		}
+		s.useGlobal(ids[x.Workgroup])
 		s.places[x.Result] = spvPlace{ptr: ids[x.Workgroup], ty: x.Type, storage: StorageWorkgroup}
 	case *ir.PlaceField:
 		return s.emitPlaceField(x)
@@ -1419,6 +1478,7 @@ func (s *fnEmitter) emitPlaceRoot(x *ir.PlaceRoot) error {
 	if x.Buffer < 0 || x.Buffer >= len(resources) {
 		return fmt.Errorf("buffer index %d out of bounds", x.Buffer)
 	}
+	s.useGlobal(resources[x.Buffer])
 	storage := uint32(StorageStorageBuffer)
 	ptrType, err := s.b.pointerID(storage, x.Type)
 	if err != nil {

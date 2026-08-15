@@ -2,7 +2,8 @@
 
 Tach has one project compiler, two target-independent IRs, two target
 executable plans, two shader emitters, one canonical host layout, and one
-managed WebGPU runtime. The split keeps baseline syntax small while giving
+managed runtime with WebGPU and Tach-owned Vulkan drivers. The split keeps
+baseline syntax small while giving
 imports and explicit multi-dispatch programs real representations instead of
 hiding orchestration in generated glue.
 
@@ -36,7 +37,7 @@ Tach is organized around these rules:
 9. Every emitted artifact is validated at its owning boundary.
 10. Flow dispatch order and boundaries are explicit inputs to target planning.
 11. One project-global declaration namespace feeds one merged IR and one
-    cohesive target artifact set.
+    cohesive dual-host artifact set.
 12. Parallel scheduling may change elapsed time, never diagnostics or bytes.
 
 These rules let `export function scale[i]` stay a one-screen beginner feature
@@ -74,36 +75,38 @@ helpers + stages      programs + resources
        +---------+---------+
        |                   |
        v                   v
- Web target planning   SPIR-V target planning
+ WebGPU planning       Vulkan/SPIR-V planning
  + physical kernels    + physical kernels
  + transients          + transients/barriers
  + coordinate pass     + coordinate pass
        |                   |
        v                   v
- one WGSL module        one SPIR-V module
+ one WGSL module        one SPIR-V 1.6 module
  + validation           + binary validation
-       |
-       v
- one JS module + one declaration module
- + embedded Web metadata + contract validation
+       +---------+---------+
+                 v
+ schema-1 runtime metadata + schema-2 project description
                  |
                  v
- target-neutral project-description JSON
+ TypeScript JS/declaration/Markdown/package rendering
+ + sibling shader URLs + contract validation
                  |
                  v
- TypeScript Markdown/package rendering and atomic build replacement
+ atomic build replacement
 ```
 
 `src/compiler.Build`, `Check`, and `Describe` are the three internal Go entry
 points used by the private native engine. They share project discovery and the
-same semantic pipeline. `Build` lowers one requested target; `Check` lowers
-and validates both targets in memory; `Describe` stops before optimization and
-backend/binding emission after producing a trustworthy documentation model.
+same semantic pipeline. `Build` and `Check` lower and validate both targets;
+only `Build` stages their artifacts. `Describe` stops before optimization,
+target lowering, and execution-metadata emission after producing a trustworthy
+documentation model.
 
 No consumer reparses another artifact to recover meaning. Bindings consume IR
 and executable plans, not WGSL. The SPIR-V validator and diagnostic decoder
-consume emitted bytes, never private emitter state. Contributor diagnostics
-are not part of the public command or build surface.
+consume emitted bytes, never private emitter state. Ordinary builds discard
+the two private JSON descriptions; `tach build --verbose` relocates them and
+the IR/plan/disassembly views under `build/diagnostics/`.
 
 ## 3. Front end
 
@@ -341,7 +344,7 @@ The plan drives:
 - SPIR-V offsets, strides, descriptors, and physical aggregate types;
 - generated target metadata;
 - TypeScript buffer codecs and parameter packing; and
-- the native Vulkan harness.
+- the Tach-owned Vulkan runtime.
 
 No target independently recalculates ABI offsets.
 
@@ -364,8 +367,9 @@ harness provides the independent implementation check.
 
 ## 11. SPIR-V backend
 
-`src/spirv` emits SPIR-V 1.3 with Logical addressing, Shader capability, and
-GLSL.std.450 where required. It owns result IDs, logical/physical types,
+`src/spirv` emits SPIR-V 1.6 for the Vulkan 1.3 floor with Logical addressing,
+Shader capability, and GLSL.std.450 where required. It owns result IDs,
+logical/physical types,
 interface variables, decorations, structured CFG construction, phi nodes,
 access chains, atomics, barriers, and extended instructions.
 
@@ -374,9 +378,10 @@ SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
 conversion prevents padding and physical bool words from entering value
 semantics.
 
-WGSL guarantees zeroed workgroup variables; native SPIR-V does not. The
-SPIR-V emitter therefore generates a first-local-invocation zeroing prologue
-and synchronization before source instructions.
+Tach requires Vulkan's `shaderZeroInitializeWorkgroupMemory` feature. The
+SPIR-V emitter gives every Workgroup variable an `OpConstantNull` initializer,
+so no synthetic invocation, store loop, or barrier alters the source program.
+Synchronization2 is the corresponding inter-dispatch synchronization floor.
 
 The validator independently decodes the binary and checks header/sections,
 IDs, capabilities, types, layouts, decorations, CFG, predecessors, dominance,
@@ -386,17 +391,20 @@ checks.
 
 ## 12. Bindings and documentation
 
-`src/bindings.Generate` consumes the optimized project-wide `flow.Module`, requested target
-executables, and WGSL text. It creates:
+`src/bindings.Generate` consumes the optimized project-wide `flow.Module` and
+both executable plans. It creates schema-1 metadata with public programs and
+both target plans.
 
-- schema-1 metadata with public programs and target plans;
-- an ES module embedding WGSL and the Web plan; and
-- declarations for source types and exported programs.
+The Deno-first TypeScript layer consumes that checked metadata plus the project
+description and creates one ES module, one declaration module, and one package
+manifest. The ES module embeds metadata and sibling URLs for both `kernel.wgsl`
+and `kernel.spv`; it does not embed or parse shader source.
 
 Generated JavaScript imports only `defineModule` from
 `@depths/tach/internal`. Public applications import `tach` and `TachError` from
-`@depths/tach`. `ValidateGenerated` checks exports, declarations, metadata,
-layouts, references, and imports before compilation succeeds.
+`@depths/tach`. Metadata validation in Go and generation-time validation in
+TypeScript check program counts, exports, declarations, layouts, plan
+references, profile facts, and the exact package inventory before installation.
 
 Documentation follows a deliberately acyclic path:
 
@@ -409,17 +417,18 @@ Documentation follows a deliberately acyclic path:
 
 The Go compiler's schema-2 project description groups canonical kernels by
 module and describes Tach types, function roles, coordinates, buffers, access,
-returns, documentation, project identity, and web-package identity without
-importing or spelling TypeScript. `tach-ts` owns JSDoc/Markdown presentation,
+returns, documentation, project identity, and JavaScript-package identity
+without importing or spelling TypeScript. `tach-ts` owns JSDoc/Markdown presentation,
 the generated usage sample, module-document filenames, and npm metadata.
 
 ### Artifact transaction
 
 The public TypeScript CLI owns a uniquely named staging directory beside the
-project's fixed `build/` child. The native engine writes only target artifacts
-into the already-created empty stage. TypeScript adds documentation and, for a
-web target, `package.json`; it then checks the exact inventory before any final
-path changes.
+project's fixed `build/` child. The native engine writes both shader artifacts
+and private project/runtime descriptions into the already-created empty stage.
+TypeScript consumes those descriptions, adds the singular JS/declaration
+facade, package manifest, and documentation, removes or relocates private
+metadata, then checks the exact inventory before any final path changes.
 
 Replacement renames the prior build to a sibling backup, renames the complete
 stage into place, and removes the backup only after success. A failed compiler,
@@ -428,7 +437,7 @@ leaves the previous complete build untouched. The docs-only route copies the
 current build into a stage, replaces only README/module documentation, and
 commits through the same boundary.
 
-## 13. WebGPU runtime
+## 13. Unified runtime and host drivers
 
 The runtime in `tach-ts/src` has one `Session` and two ownership forms:
 
@@ -437,25 +446,33 @@ tach(callback)       scoped: wait and close on exit
 tach(options?)       persistent: caller invokes idle/close
 ```
 
-Generated `defineModule` consumes the embedded shader, public-program table,
-and Web plan. A generated function validates public buffers and options, then
+Generated `defineModule` consumes public programs, host layouts, two plans, and
+two shader URLs. A generated function validates public buffers and options, then
 creates an opaque `ComputeCommand`. Preparation materializes buffers,
 evaluates shapes, sizes transients, compiles referenced pipelines, and packs
 parameter blocks.
 
-`submit(first, ...rest)` serializes submission calls, prepares commands,
-records every program step in argument order into one compute pass and command
-buffer, and queues once. It does not wait for device completion.
+`submit(first, ...rest)` serializes submission calls, prepares commands, and
+passes host-neutral prepared commands to the selected driver in argument order.
+It does not wait for device completion.
 
-The session owns:
+The shared session owns:
 
-- resident `ComputeBuffer` state and codecs;
-- per-device generated shader modules and pipelines;
-- cached bind groups by layout and resource range;
-- a geometrically growing aligned uniform arena;
-- geometrically growing scratch buffers by transient color;
-- retired buffers awaiting a safe `idle()` boundary; and
-- error scopes, uncaptured errors, and device-loss state.
+- host values and generated codecs;
+- resident opaque driver-buffer handles;
+- buffer/command ownership and lifecycle state; and
+- serialized submission order and deferred failures.
+
+The WebGPU driver owns its adapter/device, WGSL fetch, shader modules,
+pipelines, bind groups, aligned uniform arena, scratch by transient color,
+retired buffers, error scopes, uncaptured errors, and device-loss state. The
+Vulkan driver owns the packaged FFI library/session, SPIR-V modules, native
+buffers/submissions, and error translation. Native code owns Vulkan 1.3 device
+selection, device-local storage, staging transfers, lazy pipelines,
+descriptor/command/fence pools, a mapped parameter arena, scratch, and
+Synchronization2 barriers. Deno retains one process-wide native-library
+handle because unloading a Go shared runtime is unsafe; logical Tach sessions
+and all their GPU objects still close independently.
 
 `idle()`, materialized readback, and scoped-session exit wait for completion.
 `close()` and buffer `destroy()` are idempotent.
@@ -496,19 +513,21 @@ src/sema         language checking and both IR lowerings
 src/opt          target-neutral Kernel IR optimization
 src/layout       canonical host-visible layout
 src/abi          private names and parameter blocks
-src/backend      target executable planning and coordinate lowering
+src/backend      target executable planning, coordinate lowering, target profile
 src/wgsl         WGSL emission and validation
 src/spirv        SPIR-V emission, decoding, validation, and summaries
-src/bindings     metadata, generated modules/declarations, descriptions
+src/bindings     target metadata and target-neutral project descriptions
 src/compiler     project discovery, DAGs, formatting, pipeline, native staging
 main.go          private native machine-operation dispatcher
-tach-ts/src      public CLI orchestration, output transaction, docs, WebGPU runtime
+tach-ts/src      public API, shared session, WebGPU/Vulkan drivers,
+                 compiler orchestration, output transaction, and docs
+native           Tach-owned Vulkan 1.3 FFI implementation
 ```
 
 The dependency graph points from primitive semantics toward orchestration.
 The front end never imports a backend; Go never imports the TypeScript renderer;
-the runtime never reverse-engineers a shader. `go list -deps ./...` is part of
-the repository's cycle check.
+the runtime never reverse-engineers a shader. `go list ./...` resolves the
+complete repository package graph as part of the cycle check.
 
 ## 16. Test architecture
 
@@ -517,7 +536,7 @@ Tests mirror ownership:
 - lexer, parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
   binding, and emitter tests cover local contracts and rejection cases;
 - compiler tests check strict manifests, one-tier discovery, import visibility,
-  both DAGs, global names, error recovery, formatter transactions, exact target
+  both DAGs, global names, error recovery, formatter transactions, exact unified
   artifact sets, wide one/many-worker determinism, complete multi-file error
   aggregation, all four function forms, documentation descriptions, and all
   maintained projects in canonical format;
@@ -528,11 +547,13 @@ Tests mirror ownership:
   challenge exact package shape and build/docs transaction rollback;
 - SPIR-V mutation tests corrupt valid modules and require rejection;
 - `browser-test` builds the example project once and checks every generated
-  endpoint plus the standalone WGSL through WebGPU;
-- `spirv-test` builds one SPIR-V project module and runs every exported program
-  through external validation and Vulkan;
-- `showcase-ts` builds one six-kernel project and measures two
-  renderers, two mathematical workloads, and two physics simulations on GPU;
+  endpoint through its exact generated WGSL in WebGPU;
+- `deno-test` independently builds the same example project, validates its
+  SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
+  including repeated logical sessions;
+- `showcase-ts` builds one six-kernel project and runs the same host-neutral
+  renderers, mathematical workloads, and physics simulations through both
+  WebGPU and Vulkan;
   and
 - `dupl`, `deadcode`, and `staticcheck` provide structural duplication,
   whole-program reachability, and correctness audits beyond behavioral tests.

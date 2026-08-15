@@ -2,6 +2,7 @@ package spirv
 
 import (
 	"encoding/binary"
+	"sort"
 	"strings"
 	"testing"
 
@@ -77,6 +78,117 @@ func removeInstruction(bin []byte, in Instruction) []byte {
 	out = append(out, bin[:start]...)
 	out = append(out, bin[end:]...)
 	return out
+}
+
+func replaceInstruction(bin []byte, in Instruction, operands []uint32) []byte {
+	words := append([]uint32{uint32(len(operands)+1)<<16 | uint32(in.Op)}, operands...)
+	replacement := make([]byte, len(words)*4)
+	for index, word := range words {
+		binary.LittleEndian.PutUint32(replacement[index*4:], word)
+	}
+	start := in.Offset * 4
+	end := start + (len(in.Operands)+1)*4
+	out := make([]byte, 0, len(bin)+len(replacement)-(end-start))
+	out = append(out, bin[:start]...)
+	out = append(out, replacement...)
+	return append(out, bin[end:]...)
+}
+
+func entryInterfaces(t *testing.T, bin []byte) []struct {
+	in           Instruction
+	interfaceIDs []uint32
+} {
+	t.Helper()
+	m, err := Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []struct {
+		in           Instruction
+		interfaceIDs []uint32
+	}
+	for _, in := range m.Instructions {
+		if in.Op != OpEntryPoint {
+			continue
+		}
+		_, next, err := literalString(in.Operands, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, struct {
+			in           Instruction
+			interfaceIDs []uint32
+		}{in, append([]uint32(nil), in.Operands[next:]...)})
+	}
+	return entries
+}
+
+func TestValidatorRequiresSPIRV16(t *testing.T) {
+	bin := compileSPVForMutation(t)
+	binary.LittleEndian.PutUint32(bin[4:], 0x00010300)
+	if err := Validate(bin); err == nil || !strings.Contains(err.Error(), "requires version 1.6") {
+		t.Fatalf("Validate error = %v, want SPIR-V 1.6 rejection", err)
+	}
+}
+
+func TestValidatorRejectsInvalidEntryInterfaces(t *testing.T) {
+	base := compileSourceForMutation(t, `
+@workgroup(1)
+export function first[i](out: buffer<uint32[]>) { if (i < out.length) { out[i] = i; } }
+@workgroup(1)
+export function second[i](out: buffer<uint32[]>) { if (i < out.length) { out[i] = i + 1; } }
+`)
+	entries := entryInterfaces(t, base)
+	if len(entries) != 2 || len(entries[0].interfaceIDs) < 2 || len(entries[1].interfaceIDs) < 2 {
+		t.Fatalf("test entry interfaces = %#v", entries)
+	}
+	first := entries[0]
+	_, firstInterface, _ := literalString(first.in.Operands, 2)
+	other := uint32(0)
+	firstSet := map[uint32]bool{}
+	for _, id := range first.interfaceIDs {
+		firstSet[id] = true
+	}
+	for _, id := range entries[1].interfaceIDs {
+		if !firstSet[id] {
+			other = id
+			break
+		}
+	}
+	if other == 0 {
+		t.Fatal("entries have no distinct global")
+	}
+	leaked := append(append([]uint32(nil), first.interfaceIDs...), other)
+	sort.Slice(leaked, func(i, j int) bool { return leaked[i] < leaked[j] })
+	tests := map[string]struct {
+		operands []uint32
+		message  string
+	}{
+		"missing": {
+			operands: append([]uint32(nil), first.in.Operands[:len(first.in.Operands)-1]...),
+			message:  "does not exactly match statically used globals",
+		},
+		"duplicate": {
+			operands: append(append([]uint32(nil), first.in.Operands...), first.interfaceIDs[len(first.interfaceIDs)-1]),
+			message:  "duplicate interface id",
+		},
+		"foreign": {
+			operands: append(append([]uint32(nil), first.in.Operands...), entries[1].in.Operands[1]),
+			message:  "is not a global variable",
+		},
+		"unreachable": {
+			operands: append(append([]uint32(nil), first.in.Operands[:firstInterface]...), leaked...),
+			message:  "does not exactly match statically used globals",
+		},
+	}
+	for name, mutation := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := Validate(replaceInstruction(base, first.in, mutation.operands))
+			if err == nil || !strings.Contains(err.Error(), mutation.message) {
+				t.Fatalf("Validate error = %v, want %q", err, mutation.message)
+			}
+		})
+	}
 }
 
 func workgroupRootType(t *testing.T, bin []byte) uint32 {

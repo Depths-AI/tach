@@ -3,3 +3,7 @@
 /node_modules/
 *.test
 /spirv-test/test-report.md
+/native/tach-vulkan.*
+/tach-ts/native/
+/browser-test/generated/
+/deno-test/generated/

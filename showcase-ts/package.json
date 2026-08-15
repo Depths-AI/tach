@@ -3,25 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "license": "AGPL-3.0-only",
-  "description": "Large GPU workload showcase for Tach and WebGPU",
+  "description": "Large dual-host GPU workload showcase for Tach",
   "type": "module",
-  "engines": {
-    "node": ">=22"
+  "imports": {
+    "#kernels": "./build/index.js"
   },
   "scripts": {
-    "kernel": "node scripts/build-kernels.mjs",
-    "check": "npm run kernel && tsc --noEmit",
-    "build": "npm run check && vite build",
-    "install:browser": "playwright install chromium",
-    "benchmark": "npm run build && playwright test",
+    "build": "deno run -A --node-modules-dir=manual scripts/build.ts",
+    "check": "deno lint scripts src benchmark.ts && deno check --node-modules-dir=manual scripts/build.ts src/*.ts benchmark.ts",
+    "benchmark": "npm run build && deno run -A --node-modules-dir=manual benchmark.ts",
     "test": "npm run benchmark"
   },
   "dependencies": {
     "@depths/tach": "0.0.0"
-  },
-  "devDependencies": {
-    "@playwright/test": "1.62.0",
-    "typescript": "7.0.2",
-    "vite": "8.1.5"
   }
 }

@@ -5,20 +5,15 @@
   "license": "AGPL-3.0-only",
   "description": "Private headless-browser and WebGPU harness for Tach-generated modules",
   "type": "module",
-  "engines": {
-    "node": ">=22"
+  "imports": {
+    "#kernels": "./generated/index.js"
   },
   "scripts": {
-    "build:examples": "node scripts/build-examples.mjs",
-    "install:browser": "playwright install --with-deps chromium",
-    "start": "node server.mjs",
-    "test": "playwright test",
-    "test:headed": "playwright test --headed"
+    "build": "deno run -A --node-modules-dir=manual scripts/build.ts",
+    "check": "deno lint scripts src test.ts && deno check --node-modules-dir=manual scripts/build.ts src/main.ts test.ts",
+    "test": "npm run build && deno run -A test.ts"
   },
   "dependencies": {
     "@depths/tach": "0.0.0"
-  },
-  "devDependencies": {
-    "@playwright/test": "1.62.0"
   }
 }

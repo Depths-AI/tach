@@ -15,6 +15,13 @@ type Target string
 const (
 	Web   Target = "web"
 	SPIRV Target = "spirv"
+
+	VulkanVersion             = "1.3"
+	SPIRVVersion              = "1.6"
+	SPIRVBinaryVersion uint32 = 0x00010600
+
+	Synchronization2              = "synchronization2"
+	ZeroInitializeWorkgroupMemory = "shaderZeroInitializeWorkgroupMemory"
 )
 
 type Profile struct {

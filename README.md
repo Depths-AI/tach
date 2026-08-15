@@ -17,14 +17,14 @@ export function scale[i](
 }
 ```
 
-Tach turns it into validated WGSL for WebGPU, validated SPIR-V 1.3 for Vulkan,
-typed JavaScript/TypeScript command constructors, reflection metadata, and
-readable diagnostics. Tach source contains no WGSL builtins, descriptor
+Tach turns it into validated WGSL for WebGPU, validated SPIR-V 1.6 for Vulkan
+1.3, typed JavaScript/TypeScript command constructors, reflection metadata,
+and readable diagnostics. Tach source contains no WGSL builtins, descriptor
 numbers, storage classes, or padding fields.
 
 ## Run the first project
 
-Applications need Node.js 22 or newer. Install Tach and create one project
+Applications need Deno and use npm only to install the package. Install Tach and create one project
 manifest at the source root:
 
 ```sh
@@ -35,7 +35,7 @@ npm install @depths/tach
 {
   "name": "scaling",
   "version": "0.1.0",
-  "web": {
+  "javascript": {
     "package": "@example/scaling"
   },
   "docs": {
@@ -57,9 +57,9 @@ npx tach check
 npx tach build
 ```
 
-`check` validates the complete project through both WebGPU and SPIR-V without
-writing. `build` defaults to WebGPU and atomically replaces `build/` with one
-cohesive generated package:
+`check` validates the complete project through both WebGPU and Vulkan without
+writing. `build` atomically replaces `build/` with one cohesive, host-neutral
+generated package:
 
 ```text
 build/
@@ -67,6 +67,7 @@ build/
   index.js
   index.d.ts
   kernel.wgsl
+  kernel.spv
   README.md
   docs/
     kernels.md
@@ -85,7 +86,10 @@ const result = await tach(async (gpu) => {
 console.log(result); // Float32Array [2, 4, 6, 8]
 ```
 
-The everyday host model has three operations:
+The same import and host model runs in a browser through WebGPU and in Deno
+through Tach's Vulkan 1.3 runtime. Host selection is automatic; generated
+kernels and application code contain no backend branch. The everyday model has
+three operations:
 
 1. `gpu.buffer(value)` creates session-owned GPU state.
 2. A generated function such as `scale(...)` constructs a command.
@@ -346,7 +350,7 @@ The public `tach` command is delivered by `@depths/tach`. Project commands
 operate on the nearest complete project and accept no source-file argument:
 
 ```text
-tach build [--target web|spirv]
+tach build [--verbose]
 tach check
 tach docs
 tach fmt
@@ -363,23 +367,20 @@ guide. Its `§N` references are retrievable without emitting the whole reference
 sections. Both layers ship inside `@depths/tach`; retrieval needs neither a
 Tach project nor the native compiler or network.
 
-`build` defaults to `web`. Target switching replaces the complete generated
-tree, so stale artifacts from another target cannot survive:
+Every build emits `index.js`, `index.d.ts`, `kernel.wgsl`, `kernel.spv`,
+`package.json`, `README.md`, and one `docs/<module>.md` per module. `--verbose`
+adds compiler-owned IR, executable-plan, metadata, and SPIR-V-disassembly files
+under `build/diagnostics/`; it does not change executable semantics.
 
-| Target | Exact compiled artifacts | Target-independent artifacts |
-|---|---|---|
-| `web` | `index.js`, `index.d.ts`, `kernel.wgsl`, `package.json` | `README.md`, one `docs/<module>.md` per module |
-| `spirv` | `kernel.spv` | `README.md`, one `docs/<module>.md` per module |
-
-The web files form one npm package named by `tach.json.web.package`.
-`index.js` imports the managed runtime implementation from
+The files form one npm package named by `tach.json.javascript.package`.
+`index.js` imports the managed host-neutral implementation from
 `@depths/tach/internal`; it neither imports nor re-exports the public `tach`
 function. Consumers install `@depths/tach` directly and import the runtime and
 generated project separately.
 
-The SPIR-V target contains one validated SPIR-V 1.3 module with every physical
-entry required by all exported programs; its remaining files are only the
-target-independent generated documentation.
+`kernel.wgsl` and the validated SPIR-V 1.6 `kernel.spv` contain the same public
+programs and physical stages. The SPIR-V module requires Vulkan 1.3,
+Synchronization2, and zero-initialized workgroup memory.
 
 `check` is deliberately targetless: it runs the recoverable frontend, both DAG
 checks, unified IR verification/optimization, both backends, binding/package
@@ -403,11 +404,11 @@ nearest tach.json -> canonical discovery -> import DAGs
                          v
             one merged Kernel IR + Flow IR
                          |
-              target-independent optimization
+             target-independent optimization
                   /                    \
                  v                      v
-       Web executable plan       SPIR-V executable plan
-         + one WGSL module        + one SPIR-V module
+       WebGPU executable plan     Vulkan executable plan
+         + one WGSL module       + one SPIR-V 1.6 module
                   \                    /
                    v                  v
                bindings, ABI description,
@@ -430,22 +431,24 @@ For deeper detail:
 
 ## Develop the repository
 
-Compiler development requires Go 1.26.5. Runtime and browser work requires
-Node.js 22 or newer.
+Compiler development requires Go 1.26.5. TypeScript tooling and every harness
+run on Deno. npm is the workspace and package-distribution interface, never the
+JavaScript runtime.
 
 ```sh
 npm ci
 npm run check
 go test -count=1 ./...
-go vet ./...
-npm run check:duplicates
+npm test
 ```
 
-`npm run check` runs duplicate analysis, builds the native compiler and
-TypeScript package, generates the unified showcase project, and type-checks the
-showcase. The committed Go tool directive pins `dupl`; no separate global
-installation is required. The full Go gate additionally uses `go test -race`,
-`go vet`, `deadcode -test ./...`, and `staticcheck`.
+`npm run check` runs Go package-cycle resolution, `go vet`, `staticcheck`,
+`deadcode`, duplicate analysis, all Go tests, the native bridge build, package
+generation, Deno lint/type checking, and instruction-bundle validation. The
+committed Go tool directive pins
+`dupl`; no separate installation is required. `npm test` then executes the
+package unit suite, Chromium/WebGPU corpus, Deno/Vulkan corpus, and dual-host
+showcase.
 
 The ordinary Go suite always runs the seed corpus for the recoverable lexer,
 parser, semantic checker, and formatter invariants. Exercise mutation-driven
@@ -463,24 +466,22 @@ deterministic partial ASTs and diagnostics, source-facing semantic failures,
 and formatting that preserves the normalized token/comment/string stream,
 parses again, and reaches an idempotent fixed point.
 
-Install Chromium once and run real WebGPU correctness and benchmark harnesses:
+Install Chrome or Chromium and run every real hardware harness:
 
 ```sh
-npm run install:browser --workspace=@tach/browser-test
-npm run install:browser --workspace=@tach/showcase-ts
 npm test
 ```
 
-Run the native SPIR-V path through Khronos validation and Vulkan:
+Run just the native path through Khronos validation and Vulkan:
 
 ```sh
-npm run test:spirv
+npm test --workspace=@tach/deno-test
 ```
 
 That harness additionally needs CGO, a C compiler, a Vulkan loader and driver,
 Khronos `spirv-val`, and preferably the Vulkan validation layer. Harness details
 live in [browser-test](browser-test/README.md),
-[spirv-test](spirv-test/README.md), and
+[deno-test](deno-test/README.md), and
 [showcase-ts](showcase-ts/README.md).
 
 ## Repository map
@@ -495,18 +496,19 @@ src/sema         checking plus Kernel IR and Flow IR lowering
 src/ir           per-invocation Kernel IR
 src/flow         public-program Flow IR
 src/opt          target-independent Kernel IR optimization
-src/backend      target executable planning
+src/backend      target executable planning and Vulkan/SPIR-V profile
 src/layout       canonical host-visible byte layout
 src/abi          private names and parameter blocks
 src/wgsl         WGSL lowering, emission, and validation
 src/spirv        SPIR-V lowering, emission, decoding, and validation
-src/bindings     metadata, JS/TypeScript, and documentation descriptions
+src/bindings     runtime metadata and target-neutral project descriptions
 src/compiler     project discovery, DAGs, formatting, orchestration, and native staging
-tach-ts          compiler delivery and WebGPU runtime
+tach-ts          Deno-first compiler delivery plus WebGPU and Vulkan runtime
 examples         maintained multi-module Tach project and execution corpus
 browser-test     Chromium WebGPU correctness harness
-spirv-test       native Vulkan correctness harness
-showcase-ts      six-workload large GPU benchmark harness
+deno-test        Deno/Vulkan correctness harness over the same examples
+native           Tach-owned Vulkan 1.3 FFI runtime
+showcase-ts      six-workload dual-host large GPU benchmark harness
 ```
 
 ## Releases and license

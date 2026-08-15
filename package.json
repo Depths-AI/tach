@@ -7,17 +7,18 @@
   "workspaces": [
     "tach-ts",
     "browser-test",
+    "deno-test",
     "showcase-ts"
   ],
   "scripts": {
-    "check:duplicates": "node dupl.mjs",
+    "check:go": "go list ./... && go vet ./... && staticcheck ./... && deadcode -test ./...",
+    "check:tooling": "deno lint native/build.ts dupl.ts && deno check native/build.ts dupl.ts",
+    "check:duplicates": "deno run --allow-run dupl.ts",
     "compiler": "go build -o dist/ .",
-    "build": "npm run compiler && npm run build -w @depths/tach && npm run build -w @tach/showcase-ts",
-    "check": "npm run check:duplicates && npm run compiler && npm run build -w @depths/tach && npm run check -w @tach/showcase-ts",
-    "test:spirv": "go test -count=1 -v ./spirv-test",
-    "test": "npm run compiler && npm test -w @depths/tach && npm test -w @tach/browser-test && npm test -w @tach/showcase-ts"
-  },
-  "engines": {
-    "node": ">=22"
+    "native": "deno run --allow-run --allow-read --allow-write --allow-env native/build.ts",
+    "build": "npm run compiler && npm run native && npm run build -w @depths/tach && npm run build -w @tach/browser-test && npm run build -w @tach/deno-test && npm run build -w @tach/showcase-ts",
+    "check": "npm run check:go && npm run check:tooling && npm run check:duplicates && go test -race ./... && npm run build && npm run check -w @depths/tach && npm run check -w @tach/browser-test && npm run check -w @tach/deno-test && npm run check -w @tach/showcase-ts",
+    "test:deno": "npm test -w @tach/deno-test",
+    "test": "npm run check && npm test -w @depths/tach && npm test -w @tach/browser-test && npm run test:deno && npm test -w @tach/showcase-ts"
   }
 }

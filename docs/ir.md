@@ -9,8 +9,8 @@ Tach has two target-independent intermediate representations:
 
 The project frontend resolves imports and merges every kernel into one
 `flow.Module` containing one `ir.Module`. Target lowering combines those
-representations into a Web or SPIR-V executable plan containing private
-physical kernels. IR dump methods remain contributor diagnostics and test
+representations into parallel WebGPU and Vulkan executable plans containing
+private physical kernels. IR dump methods remain contributor diagnostics and test
 oracles rather than a public command, emitted artifact, or accepted input
 language.
 
@@ -169,10 +169,10 @@ Shapes are interned expression DAG nodes with these operations:
 | `add`, `sub`, `mul`, `div`, `rem` | two shapes |
 | `min`, `max`, `ceilDiv` | two shapes |
 
-Identical structural nodes are shared. Shapes remain symbolic until a runtime
-has public values, materialized resource byte lengths, and optional launch
-coordinates. Both TypeScript and native Vulkan evaluators apply checked
-`uint32` semantics.
+Identical structural nodes are shared. Shapes remain symbolic until the shared
+TypeScript runtime has public values, materialized resource byte lengths, and
+optional launch coordinates. Its one checked `uint32` evaluator prepares both
+WebGPU and Vulkan commands.
 
 ### Dispatches
 
@@ -364,8 +364,9 @@ structured control, and loop fixed points. A barrier is legal only when all
 enclosing decisions are uniform across the workgroup.
 
 Zero-initialized workgroup storage is a language invariant rather than a
-Kernel IR instruction. WGSL supplies it natively; SPIR-V emission adds a
-prologue and barrier.
+Kernel IR instruction. WGSL supplies it natively. SPIR-V emits a null
+Workgroup-variable initializer, and the Vulkan host requires the corresponding
+Vulkan 1.3 feature.
 
 ## 9. Kernel verification
 
@@ -482,7 +483,7 @@ deduplicate identical stage clones or fuse adjacent dispatches.
 | intrinsic | WGSL builtin | core or GLSL.std.450 instruction |
 | atomic | WGSL atomic builtin | `OpAtomic*` |
 | source barrier | WGSL barrier | `OpControlBarrier` |
-| plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier` in native plan runtime |
+| plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier2` in Tach's Vulkan 1.3 runtime |
 
 Backend coordinate optimization may map exact modulo/row-major expressions to
 local coordinate inputs and remove dead global inputs. It never changes

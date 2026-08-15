@@ -14,7 +14,8 @@ or a shader preprocessor. Tach owns parallel numerical work, dispatch structure,
 bindings, layout, and target validation. TypeScript owns application control,
 I/O, sessions, command submission, and readback. Generated functions construct
 opaque commands; only `gpu.submit(...)` queues execution. `read()` and `idle()`
-are completion boundaries. See §1: operational model
+are completion boundaries. The identical imports use WebGPU in browsers and
+Tach-owned Vulkan 1.3 in Deno. See §1: operational model
 and §2: complete quick start.
 
 Default to the smallest valid form:
@@ -34,7 +35,7 @@ See §14: function roles,
 A Tach project is the nearest ancestor `tach.json`, not an npm project. Every
 project command processes the whole project; none accepts one `.tach` file. The
 strict manifest requires Tach `name`, shared SemVer `version`, generated npm
-`web.package`, and documentation `title`/`summary`. Do not invent source lists,
+`javascript.package`, and documentation `title`/`summary`. Do not invent source lists,
 output paths, modules, dependencies, or settings. See §3: project identity
 and §4: manifest.
 
@@ -162,7 +163,7 @@ and §64: numerical portability.
 Use only:
 
 ```text
-tach build [--target web|spirv]
+tach build [--verbose]
 tach check
 tach docs
 tach fmt
@@ -171,8 +172,9 @@ tach version
 tach help | --help | -h
 ```
 
-Project commands discover the nearest project. `build` defaults Web and replaces
-`build/`. `check` validates both targets without writes. `docs` preserves
+Project commands discover the nearest project. `build` emits the complete
+browser/Deno package and replaces `build/`; `--verbose` only adds diagnostics.
+`check` validates both hosts without writes. `docs` preserves
 compiled artifacts while refreshing Markdown. `fmt` formats the whole project
 transactionally. `instructions` needs no project and returns this context or
 only the requested canonical sections. Normal order is `fmt -> check -> build`. See
@@ -180,28 +182,28 @@ only the requested canonical sections. Normal order is `fmt -> check -> build`. 
 §47: CLI, and
 §48: validation.
 
-Web output is one package: `package.json`, `index.js`, `index.d.ts`,
-`kernel.wgsl`, README, and module docs. SPIR-V output is one `kernel.spv` plus
-docs and no JS/TS runtime package. Target switching removes the prior target.
-Generated files are one immutable set; never edit or mix them. See
+Output is one package: `package.json`, `index.js`, `index.d.ts`, `kernel.wgsl`,
+SPIR-V 1.6 `kernel.spv`, README, and module docs. The same facade and
+declarations serve both hosts. Generated files are one immutable set; never edit or mix them. See
 §49: artifacts and
-§68: SPIR-V boundary.
+§68: unified host boundary.
 
 Import `tach` from `@depths/tach`; import commands/types separately from local
-`build/index.js` or the package named by `web.package`. Never import
-`@depths/tach/internal` or load WGSL manually. Node build scripts may use
+`build/index.js` or the package named by `javascript.package`. Never import
+`@depths/tach/internal` or load shaders manually. Deno build scripts may use
 `@depths/tach/compiler`; browser code may not. See
 §50: consumption,
-§51: Node tooling,
+§51: Deno tooling,
 §52: generated signatures,
 and §67: distribution.
 
-## 8. Managed WebGPU runtime
+## 8. Unified managed runtime
 
 Choose `tach(work, options?)` for scoped ownership or `tach(options?)` for a
 persistent session. Scoped jobs wait and close automatically; return host data,
 never a session-owned buffer. Persistent sessions require `try/finally`, an
-optional `idle()` before graceful closure, and `close()`. See
+optional `idle()` before graceful closure, and `close()`. Host selection is
+automatic and `gpu.adapter.backend` reports `webgpu` or `vulkan`. See
 §53: sessions and
 §54: API.
 
@@ -248,8 +250,8 @@ groups, and real lifecycle contracts. See
 
 Before coding: locate `tach.json`; inventory global names/import DAG; define one
 invocation, host shapes, ownership, edge guards, races, stages, and completion.
-Then write structured docs, run project-wide `fmt`, run `check`, build Web unless
-SPIR-V is requested, inspect generated declarations, and execute representative
+Then write structured docs, run project-wide `fmt`, run `check`, build the
+complete package, inspect generated declarations, and execute representative
 data. Never start from generated JS, declarations, WGSL, SPIR-V, or Markdown.
 See §80: authoring workflow
 and §81: design checklist.

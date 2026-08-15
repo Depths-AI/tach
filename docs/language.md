@@ -61,14 +61,14 @@ An immediate directory containing `.tach` files is a module; each immediate
 are errors. The filesystem defines the module set—there is no source list,
 glob, or output path in the manifest.
 
-The manifest separates Tach identity from the name of the generated web
+The manifest separates Tach identity from the name of the generated JavaScript
 package:
 
 ```json
 {
   "name": "simulation",
   "version": "0.1.0",
-  "web": {
+  "javascript": {
     "package": "@studio/simulation"
   },
   "docs": {
@@ -79,7 +79,7 @@ package:
 ```
 
 Every field is required and non-empty. `version` is Semantic Versioning and
-is shared by all targets; `web.package` is only the generated npm package
+is shared by both hosts; `javascript.package` is only the generated npm package
 identity and never appears in Tach imports. `docs.title` and `docs.summary`
 form the generated package README. Unknown fields, duplicate JSON keys,
 multiple JSON values, invalid versions, and invalid npm package names are
@@ -275,7 +275,8 @@ function supplies both roles through one declaration.
 Generated `index.d.ts` output carries summaries, member descriptions,
 coordinates, and inferred buffer access as JSDoc. `tach docs` validates the
 project and atomically refreshes `build/README.md` plus one
-`build/docs/<module>.md` file per module without recompiling either GPU target.
+`build/docs/<module>.md` file per module without recompiling either GPU
+artifact.
 The README's TypeScript usage is derived from the same target-neutral checked
 ABI and is compiled under strict TypeScript settings in the repository suite.
 Every successful `tach build` refreshes the same documentation.

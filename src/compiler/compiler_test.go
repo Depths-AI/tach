@@ -22,7 +22,7 @@ const baselineSource = `export function scale[i](values: buffer<float32[]>, fact
 func projectFixture(t *testing.T, files map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	manifest := `{"name":"fixture","version":"0.1.0","web":{"package":"@test/fixture"},"docs":{"title":"Fixture","summary":"Fixture project."}}`
+	manifest := `{"name":"fixture","version":"0.1.0","javascript":{"package":"@test/fixture"},"docs":{"title":"Fixture","summary":"Fixture project."}}`
 	if value, ok := files["tach.json"]; ok {
 		manifest = value
 		delete(files, "tach.json")
@@ -45,18 +45,15 @@ func writeFixture(t *testing.T, root, name, content string) {
 	}
 }
 
-func TestProjectBuildTargetsWriteExactNativeArtifacts(t *testing.T) {
+func TestProjectBuildWritesCompleteNativeArtifacts(t *testing.T) {
 	root := projectFixture(t, map[string]string{"kernels/scale.tach": baselineSource})
-	for _, test := range []struct {
-		target BuildTarget
-		files  string
-	}{{TargetWeb, "index.d.ts,index.js,kernel.wgsl"}, {TargetSPIRV, "kernel.spv"}} {
-		result, err := Build(root, test.target, 1)
+	for _, verbose := range []bool{false, true} {
+		result, err := Build(root, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 		output := t.TempDir()
-		if err := WriteNativeArtifacts(result, test.target, output); err != nil {
+		if err := WriteNativeArtifacts(result, output, verbose); err != nil {
 			t.Fatal(err)
 		}
 		entries, err := os.ReadDir(output)
@@ -67,8 +64,25 @@ func TestProjectBuildTargetsWriteExactNativeArtifacts(t *testing.T) {
 		for i := range entries {
 			names[i] = entries[i].Name()
 		}
-		if got := strings.Join(names, ","); got != test.files {
-			t.Fatalf("%s files = %s, want %s", test.target, got, test.files)
+		want := "kernel.spv,kernel.wgsl,project.json,runtime.json"
+		if verbose {
+			want = "diagnostics,kernel.spv,kernel.wgsl,project.json,runtime.json"
+		}
+		if got := strings.Join(names, ","); got != want {
+			t.Fatalf("verbose=%v files = %s, want %s", verbose, got, want)
+		}
+		if verbose {
+			entries, err := os.ReadDir(filepath.Join(output, "diagnostics"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var diagnosticNames []string
+			for _, entry := range entries {
+				diagnosticNames = append(diagnosticNames, entry.Name())
+			}
+			if got, want := strings.Join(diagnosticNames, ","), "flow.ir,kernel.ir,kernel.spvasm,spirv.kernel.ir,spirv.plan.json,web.kernel.ir,web.plan.json"; got != want {
+				t.Fatalf("diagnostics = %s, want %s", got, want)
+			}
 		}
 	}
 }
@@ -98,10 +112,10 @@ func TestProjectDescriptionOwnsKernelsAndTargetNeutralABI(t *testing.T) {
 }
 
 func TestManifestIsStrict(t *testing.T) {
-	valid := `{"name":"fixture","version":"0.1.0","web":{"package":"@test/fixture"},"docs":{"title":"Fixture","summary":"Fixture project."}}`
+	valid := `{"name":"fixture","version":"0.1.0","javascript":{"package":"@test/fixture"},"docs":{"title":"Fixture","summary":"Fixture project."}}`
 	for name, manifest := range map[string]string{
 		"missing":    `{"name":"fixture"}`,
-		"duplicate":  `{"name":"a","name":"b","version":"0.1.0","web":{"package":"x"},"docs":{"title":"x","summary":"x"}}`,
+		"duplicate":  `{"name":"a","name":"b","version":"0.1.0","javascript":{"package":"x"},"docs":{"title":"x","summary":"x"}}`,
 		"unknown":    strings.Replace(valid, `"name":"fixture"`, `"name":"fixture","modules":[]`, 1),
 		"version":    strings.Replace(valid, "0.1.0", "v1", 1),
 		"prerelease": strings.Replace(valid, "0.1.0", "1.0.0-01", 1),
@@ -280,22 +294,12 @@ function privateStage[i](out: buffer<float32[]>) { if (i < out.length) { out[i] 
 export function publicKernel[i](out: buffer<float32[]>) { if (i < out.length) { out[i] = helper(out[i]); } }
 export function orchestrate(out: buffer<float32[]>, count: uint32) { run privateStage(out) over count; }`,
 	})
-	result, err := Build(root, TargetWeb, 2)
+	result, err := Build(root, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := result.Module.Programs; len(got) != 2 || got[0].Name != "publicKernel" || got[1].Name != "orchestrate" {
 		t.Fatalf("public programs = %v", got)
-	}
-	for _, declaration := range []string{"export type Value", "export function publicKernel", "export function orchestrate"} {
-		if !strings.Contains(result.TypeScript, declaration) {
-			t.Errorf("declarations omit %s:\n%s", declaration, result.TypeScript)
-		}
-	}
-	for _, name := range []string{"helper", "privateStage"} {
-		if strings.Contains(result.TypeScript, "export function "+name) {
-			t.Errorf("private function %s was exported", name)
-		}
 	}
 	for _, role := range []string{`"role": "helper"`, `"role": "stage"`, `"role": "kernel"`, `"role": "program"`} {
 		if !bytes.Contains(result.Description, []byte(role)) {
@@ -413,7 +417,7 @@ func TestOneAndManyWorkerBuildsAreByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one.WGSL != many.WGSL || one.JavaScript != many.JavaScript || one.TypeScript != many.TypeScript || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.Metadata, many.Metadata) || !bytes.Equal(one.Description, many.Description) {
+	if one.WGSL != many.WGSL || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.MetadataJSON, many.MetadataJSON) || !bytes.Equal(one.Description, many.Description) {
 		t.Fatal("worker count changed artifacts")
 	}
 }
@@ -439,12 +443,12 @@ func TestWideProjectBuildIsCompleteAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one.WGSL != many.WGSL || one.JavaScript != many.JavaScript || one.TypeScript != many.TypeScript || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.Description, many.Description) {
+	if one.WGSL != many.WGSL || !bytes.Equal(one.SPIRV, many.SPIRV) || !bytes.Equal(one.MetadataJSON, many.MetadataJSON) || !bytes.Equal(one.Description, many.Description) {
 		t.Fatal("wide-project artifacts changed with worker count")
 	}
 	for i := range 32 {
-		if name := fmt.Sprintf("export type Value%02d", i); !strings.Contains(one.TypeScript, name) {
-			t.Fatalf("generated declarations omit %s", name)
+		if name := fmt.Sprintf(`"name": "Value%02d"`, i); !strings.Contains(string(one.Description), name) {
+			t.Fatalf("project description omits %s", name)
 		}
 	}
 }

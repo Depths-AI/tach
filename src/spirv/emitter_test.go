@@ -1,6 +1,7 @@
 package spirv_test
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -321,12 +322,14 @@ export function zeroWorkgroup[i](out: buffer<uint32>) {
 	nulls := map[uint32]bool{}
 	hasBarrier := false
 	hasLocalIndex := false
+	hasInitializer := false
 	for _, in := range m.Instructions {
 		a := in.Operands
 		switch in.Op {
 		case spirv.OpVariable:
 			if a[2] == spirv.StorageWorkgroup {
 				workgroupVars[a[1]] = true
+				hasInitializer = len(a) == 4 && nulls[a[3]]
 			}
 		case spirv.OpConstantNull:
 			nulls[a[1]] = true
@@ -336,16 +339,68 @@ export function zeroWorkgroup[i](out: buffer<uint32>) {
 			hasLocalIndex = hasLocalIndex || a[1] == spirv.DecorationBuiltIn && a[2] == spirv.BuiltInLocalInvocationIndex
 		}
 	}
-	hasZeroStore := false
+	hasWorkgroupStore := false
 	for _, in := range m.Instructions {
-		if in.Op == spirv.OpStore && workgroupVars[in.Operands[0]] && nulls[in.Operands[1]] {
-			hasZeroStore = true
+		if in.Op == spirv.OpStore && workgroupVars[in.Operands[0]] {
+			hasWorkgroupStore = true
 			break
 		}
 	}
-	if len(workgroupVars) != 1 || !hasZeroStore || !hasBarrier || !hasLocalIndex {
-		t.Fatalf("zero prologue: WorkgroupVars=%d nullStore=%v barrier=%v localIndex=%v", len(workgroupVars), hasZeroStore, hasBarrier, hasLocalIndex)
+	if len(workgroupVars) != 1 || !hasInitializer || hasWorkgroupStore || hasBarrier || hasLocalIndex {
+		t.Fatalf("native Workgroup initialization: variables=%d initializer=%v store=%v barrier=%v localIndex=%v", len(workgroupVars), hasInitializer, hasWorkgroupStore, hasBarrier, hasLocalIndex)
 	}
+}
+
+func TestEntryPointInterfaceIncludesEveryUsedGlobalStorageClass(t *testing.T) {
+	bin := emitSource(t, "interface.tach", `
+@workgroup(1)
+export function interfaceGlobals[i](out: buffer<uint32[]>, add: uint32) {
+  let scratch: shared<uint32>;
+  scratch = add;
+  workgroupBarrier();
+  if (i < out.length) { out[i] = scratch; }
+}`)
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := map[uint32]uint32{}
+	var declared []uint32
+	for _, in := range m.Instructions {
+		switch in.Op {
+		case spirv.OpVariable:
+			storage[in.Operands[1]] = in.Operands[2]
+		case spirv.OpEntryPoint:
+			_, next, _ := entryName(in.Operands)
+			declared = append(declared, in.Operands[next:]...)
+		}
+	}
+	classes := map[uint32]bool{}
+	for index, id := range declared {
+		if index > 0 && id <= declared[index-1] {
+			t.Fatalf("interface is not strictly ascending: %v", declared)
+		}
+		classes[storage[id]] = true
+	}
+	for _, class := range []uint32{spirv.StorageInput, spirv.StorageUniform, spirv.StorageWorkgroup, spirv.StorageStorageBuffer} {
+		if !classes[class] {
+			t.Errorf("entry interface omits storage class %d: ids=%v classes=%v", class, declared, classes)
+		}
+	}
+}
+
+func entryName(operands []uint32) (string, int, error) {
+	bytes := make([]byte, 0, 16)
+	for index, word := range operands[2:] {
+		for shift := range 4 {
+			value := byte(word >> (8 * shift))
+			if value == 0 {
+				return string(bytes), index + 3, nil
+			}
+			bytes = append(bytes, value)
+		}
+	}
+	return "", 0, fmt.Errorf("unterminated entry name")
 }
 
 func TestHelpersRequestConstInlining(t *testing.T) {
