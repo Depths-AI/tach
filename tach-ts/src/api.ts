@@ -30,6 +30,11 @@ export interface TachAdapterInfo {
   readonly architecture?: string;
   readonly type?: "integrated" | "discrete" | "virtual" | "cpu" | "unknown";
 }
+export interface PresentationCanvas {
+  readonly width: number;
+  readonly height: number;
+  getContext(context: "webgpu"): unknown;
+}
 export interface Tach {
   readonly adapter: TachAdapterInfo;
   buffer<T>(value: T): ComputeBuffer<T>;
@@ -38,6 +43,12 @@ export interface Tach {
     ...rest: readonly ComputeCommand[]
   ): Promise<void>;
   submit(
+    first: ComputeCommand,
+    ...rest: readonly ComputeCommand[]
+  ): Promise<void>;
+  present(
+    canvas: PresentationCanvas,
+    pixels: ComputeBuffer<Uint32Array | readonly number[]>,
     first: ComputeCommand,
     ...rest: readonly ComputeCommand[]
   ): Promise<void>;

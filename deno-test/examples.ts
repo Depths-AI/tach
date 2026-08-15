@@ -1,4 +1,4 @@
-import { tach } from "@depths/tach";
+import { type PresentationCanvas, tach, TachError } from "@depths/tach";
 import * as programs from "#kernels";
 
 function equal(actual: unknown, expected: unknown, label: string): void {
@@ -55,6 +55,20 @@ function execute(): Promise<string> {
       Array<number>(8).fill(expectedBitwise()),
       "bitwise",
     );
+    try {
+      gpu.present(
+        { width: 1, height: 8, getContext: () => null } as PresentationCanvas,
+        bits,
+        programs.bitwise(bits),
+      );
+      throw new Error("Vulkan presentation was accepted");
+    } catch (error) {
+      if (
+        !(error instanceof TachError) || error.code !== "webgpu-unavailable" ||
+        error.operation !== "present"
+      ) throw error;
+    }
+    await gpu.submit(programs.bitwise(bits));
 
     const transformed = gpu.buffer(control);
     await gpu.submit(

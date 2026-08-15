@@ -1,4 +1,9 @@
-import type { ComputeBuffer, ComputeCommand, Tach } from "@depths/tach";
+import type {
+  ComputeBuffer,
+  ComputeCommand,
+  PresentationCanvas,
+  Tach,
+} from "@depths/tach";
 import {
   denseMatrixProduct,
   type MeshParams,
@@ -518,6 +523,58 @@ function meshWorkload(gpu: Tach): Workload {
       };
     },
   };
+}
+
+export async function stressPresentations(
+  gpu: Tach,
+  canvas: PresentationCanvas,
+): Promise<void> {
+  const scene = createScene(), pixelCount = frameWidth * frameHeight;
+  const vertices = gpu.buffer(scene.vertices),
+    normals = gpu.buffer(scene.normals),
+    indices = gpu.buffer(scene.indices),
+    visibility = gpu.buffer(new Uint32Array(pixelCount)),
+    coverage = gpu.buffer(new Uint32Array(scene.indices.length / 3)),
+    pixels = gpu.buffer(new Uint32Array(pixelCount));
+  const buffers = [
+    vertices,
+    normals,
+    indices,
+    visibility,
+    coverage,
+    pixels,
+  ] as const;
+  const procedural = (time: number) =>
+    proceduralWorld(pixels, {
+      width: frameWidth,
+      height: frameHeight,
+      time,
+    });
+  const mesh = (time: number) =>
+    meshWorld(
+      vertices,
+      normals,
+      indices,
+      visibility,
+      coverage,
+      pixels,
+      { width: frameWidth, height: frameHeight, time },
+    );
+  try {
+    await gpu.prepare(procedural(0), mesh(0));
+    for (let frame = 0; frame < 60; frame++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const time = performance.now() / 1000;
+      await gpu.present(
+        canvas,
+        pixels,
+        frame % 2 === 0 ? procedural(time) : mesh(time),
+      );
+    }
+    await gpu.idle();
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
+  }
 }
 
 function matrixValue(row: number, column: number, salt: number): number {

@@ -155,6 +155,7 @@ try {
         readonly result: {
           readonly value?: {
             readonly adapter: { readonly name: string };
+            readonly presentations: number;
             readonly programs: number;
           };
         };
@@ -172,7 +173,7 @@ try {
     }
     if (evaluation.result.value) {
       console.log(
-        `WebGPU execution: ${evaluation.result.value.adapter.name}; ${evaluation.result.value.programs} programs`,
+        `WebGPU execution: ${evaluation.result.value.adapter.name}; ${evaluation.result.value.programs} programs; ${evaluation.result.value.presentations} presented frames`,
       );
       break;
     }

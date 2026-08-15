@@ -3,6 +3,7 @@ import { normalizeError, TachError } from "./api.ts";
 import type {
   ComputeBuffer,
   ComputeCommand,
+  PresentationCanvas,
   Tach,
   TachAdapterInfo,
   TachFunction,
@@ -55,6 +56,7 @@ class Session implements Tach, RuntimeOwner {
   readonly #buffers = new Set<BufferState<unknown>>();
   #submissionTail: Promise<void> = Promise.resolve();
   #deferredFailure?: TachError;
+  #presenting = false;
   #closed = false;
 
   constructor(readonly driver: Driver) {
@@ -67,9 +69,13 @@ class Session implements Tach, RuntimeOwner {
   }
 
   #execute(
-    operation: "prepare" | "submit",
+    operation: "prepare" | "submit" | "present",
     first: ComputeCommand,
     rest: readonly ComputeCommand[],
+    presentation?: {
+      readonly canvas: PresentationCanvas;
+      readonly pixels: BufferState<Uint32Array | readonly number[]>;
+    },
   ): Promise<void> {
     this.assertHealthy(operation);
     const states = [first, ...rest].map((value, index) =>
@@ -84,9 +90,34 @@ class Session implements Tach, RuntimeOwner {
         );
       }
     }
+    if (presentation && presentation.pixels.owner !== this) {
+      throw new TachError(
+        "lifecycle",
+        "presentation buffer belongs to a different Tach session",
+        { operation },
+      );
+    }
     const pending = this.#submissionTail.then(async () => {
       this.assertHealthy(operation);
-      await this.driver[operation](states.map((state) => state.prepare()));
+      const commands = states.map((state) => state.prepare());
+      if (operation === "present") {
+        const pixels = presentation!.pixels;
+        if (pixels.driverBuffer === undefined || !pixels.codec) {
+          throw new TachError(
+            "buffer",
+            "presentation buffer must be materialized by a submitted command",
+            { operation },
+          );
+        }
+        await this.driver.present!(
+          commands,
+          presentation!.canvas,
+          pixels.driverBuffer,
+          pixels.byteLength,
+        );
+      } else {
+        await this.driver[operation](commands);
+      }
       this.assertHealthy(operation);
     });
     this.#submissionTail = pending.catch((cause) => {
@@ -107,6 +138,37 @@ class Session implements Tach, RuntimeOwner {
     ...rest: readonly ComputeCommand[]
   ): Promise<void> {
     return this.#execute("submit", first, rest);
+  }
+
+  present(
+    canvas: PresentationCanvas,
+    pixels: ComputeBuffer<Uint32Array | readonly number[]>,
+    first: ComputeCommand,
+    ...rest: readonly ComputeCommand[]
+  ): Promise<void> {
+    this.assertHealthy("present");
+    if (!this.driver.present) {
+      throw new TachError(
+        "webgpu-unavailable",
+        "GPU presentation is available only in browsers",
+        { operation: "present" },
+      );
+    }
+    if (this.#presenting) {
+      throw new TachError(
+        "lifecycle",
+        "another presentation is already pending",
+        { operation: "present" },
+      );
+    }
+    const pending = this.#execute("present", first, rest, {
+      canvas,
+      pixels: getBufferState(pixels, "present.pixels"),
+    });
+    this.#presenting = true;
+    return pending.finally(() => {
+      this.#presenting = false;
+    });
   }
 
   async idle(): Promise<void> {

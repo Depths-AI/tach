@@ -1,7 +1,14 @@
+/// <reference lib="dom" />
+
 import { tach } from "@depths/tach";
-import { runBenchmarks } from "./benchmarks.ts";
+import { runBenchmarks, stressPresentations } from "./benchmarks.ts";
 
 const run = tach(async (gpu) => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1920;
+  canvas.height = 1080;
+  document.body.append(canvas);
+  await stressPresentations(gpu, canvas);
   const result = await runBenchmarks(gpu);
   await fetch("/result", {
     method: "POST",
