@@ -191,6 +191,28 @@ type Dispatch struct {
 	Span    source.Span
 }
 
+type ViewFormat uint8
+
+const (
+	SRGB8 ViewFormat = iota + 1
+)
+
+func (f ViewFormat) String() string {
+	if f == SRGB8 {
+		return "srgb8"
+	}
+	return fmt.Sprintf("viewFormat(%d)", f)
+}
+
+type View struct {
+	Format ViewFormat
+	Source ResourceID
+	Input  VersionID
+	Width  ShapeID
+	Height ShapeID
+	Span   source.Span
+}
+
 type Program struct {
 	Name       string
 	Span       source.Span
@@ -201,6 +223,7 @@ type Program struct {
 	Versions   []Version
 	Shapes     []Shape
 	Dispatches []Dispatch
+	View       *View
 	nextRes    ResourceID
 	nextVer    VersionID
 	nextShape  ShapeID
@@ -284,6 +307,10 @@ func Clone(m *Module) *Module {
 				q.Dispatches[j].Values[k].Path = append([]string(nil), p.Dispatches[j].Values[k].Path...)
 			}
 		}
+		if p.View != nil {
+			view := *p.View
+			q.View = &view
+		}
 		out.Programs[i] = &q
 	}
 	return out
@@ -326,6 +353,9 @@ func Dump(m *Module) string {
 				fmt.Fprintf(&b, "%%s%d", axis)
 			}
 			b.WriteString("]\n")
+		}
+		if p.View != nil {
+			fmt.Fprintf(&b, "  view %s %%r%d version=%%v%d extent=[%%s%d, %%s%d]\n", p.View.Format, p.View.Source, p.View.Input, p.View.Width, p.View.Height)
 		}
 		b.WriteString("}\n\n")
 	}

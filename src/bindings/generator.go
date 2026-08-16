@@ -35,6 +35,7 @@ type PublicProgramMeta struct {
 	Parameters []PublicParameterMeta  `json:"parameters"`
 	Resources  []ExternalResourceMeta `json:"resources"`
 	Launch     *LaunchMeta            `json:"launch,omitempty"`
+	View       bool                   `json:"view,omitempty"`
 }
 type PublicParameterMeta struct {
 	Name     string `json:"name"`
@@ -80,6 +81,7 @@ type BindingMeta struct {
 	Access          string `json:"access"`
 	Type            string `json:"type"`
 	MinimumByteSize uint32 `json:"minimumByteSize"`
+	Kind            string `json:"kind"`
 }
 type ParameterBlockMeta struct {
 	Group    uint32               `json:"group"`
@@ -98,6 +100,16 @@ type ProgramPlanMeta struct {
 	Steps         []StepMeta      `json:"steps"`
 	RepeatBarrier *StepMeta       `json:"repeatBarrier,omitempty"`
 	Repeat        string          `json:"repeat"`
+	View          *ViewMeta       `json:"view,omitempty"`
+}
+type ViewMeta struct {
+	Format      string          `json:"format"`
+	Step        StepMeta        `json:"step"`
+	Width       ShapeExpression `json:"width"`
+	Height      ShapeExpression `json:"height"`
+	OutputColor int             `json:"outputColor"`
+	Output      uint32          `json:"output"`
+	Fused       bool            `json:"fused"`
 }
 type TransientMeta struct {
 	Type            string          `json:"type"`
@@ -171,7 +183,7 @@ func Generate(logical *flow.Module, web, spirv *backend.Executable) (*Artifacts,
 }
 
 func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metadata, error) {
-	metadata := &Metadata{Schema: 1, Types: []TypeMetadata{}, Programs: []PublicProgramMeta{}}
+	metadata := &Metadata{Schema: 2, Types: []TypeMetadata{}, Programs: []PublicProgramMeta{}}
 	for _, t := range logical.Kernel.Structs {
 		item := TypeMetadata{Name: t.Name, Fields: []FieldMeta{}}
 		for _, field := range t.Fields {
@@ -180,7 +192,7 @@ func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metad
 		metadata.Types = append(metadata.Types, item)
 	}
 	for _, program := range logical.Programs {
-		item := PublicProgramMeta{Name: program.Name, Parameters: []PublicParameterMeta{}, Resources: []ExternalResourceMeta{}}
+		item := PublicProgramMeta{Name: program.Name, Parameters: []PublicParameterMeta{}, Resources: []ExternalResourceMeta{}, View: program.View != nil}
 		external := map[flow.ResourceID]int{}
 		for _, resource := range program.Resources {
 			if resource.Kind != flow.External {
@@ -275,7 +287,11 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 			if binding.Access == ir.Mutable || types.ContainsAtomic(binding.Type) {
 				access = "read_write"
 			}
-			item.Bindings = append(item.Bindings, BindingMeta{Group: 0, Binding: binding.Binding, Access: access, Type: binding.Type.String(), MinimumByteSize: binding.MinimumByteSize})
+			kind, name := "buffer", binding.Type.String()
+			if binding.Texture {
+				kind, name = "texture", "rgba8unorm"
+			}
+			item.Bindings = append(item.Bindings, BindingMeta{Group: 0, Binding: binding.Binding, Access: access, Type: name, MinimumByteSize: binding.MinimumByteSize, Kind: kind})
 		}
 		if block := kernel.Parameters; block != nil {
 			item.ParameterBlock = &ParameterBlockMeta{Group: 0, Binding: block.Binding, ByteSize: block.Layout.Size, Fields: []ParameterFieldMeta{}}
@@ -312,6 +328,22 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 		if len(plan.RepeatBarrier) > 0 {
 			description := barrierMetadata(plan.RepeatBarrier)
 			item.RepeatBarrier = &description
+		}
+		if plan.View != nil {
+			width, err := shapeExpression(program, plan.View.Width)
+			if err != nil {
+				return nil, err
+			}
+			height, err := shapeExpression(program, plan.View.Height)
+			if err != nil {
+				return nil, err
+			}
+			step, err := stepMetadata(program, executable.PhysicalKernels, plan.View.Step)
+			if err != nil {
+				return nil, err
+			}
+			view := &ViewMeta{Format: "srgb8", Step: step, Width: width, Height: height, OutputColor: plan.View.OutputColor, Output: plan.View.Output, Fused: plan.View.Fused}
+			item.View = view
 		}
 		target.Programs = append(target.Programs, item)
 	}
@@ -431,7 +463,7 @@ func valueSource(program *flow.Program, argument flow.ValueArgument, fieldPath [
 }
 
 func ValidateMetadata(metadata *Metadata) error {
-	if metadata == nil || metadata.Schema != 1 {
+	if metadata == nil || metadata.Schema != 2 {
 		return fmt.Errorf("metadata schema/programs are invalid")
 	}
 	if metadata.Targets.Web == nil || metadata.Targets.SPIRV == nil {
@@ -444,7 +476,7 @@ func ValidateMetadata(metadata *Metadata) error {
 	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 2 || spv.Features[0] != backend.Synchronization2 || spv.Features[1] != backend.ZeroInitializeWorkgroupMemory {
 		return fmt.Errorf("SPIR-V target profile is invalid")
 	}
-	for _, target := range []*TargetPlanMeta{metadata.Targets.Web, metadata.Targets.SPIRV} {
+	for targetIndex, target := range []*TargetPlanMeta{metadata.Targets.Web, metadata.Targets.SPIRV} {
 		if target == nil {
 			continue
 		}
@@ -464,13 +496,38 @@ func ValidateMetadata(metadata *Metadata) error {
 					return fmt.Errorf("invalid step kind")
 				}
 			}
+			if (program.View != nil) != metadata.Programs[i].View {
+				return fmt.Errorf("public and target view contracts differ")
+			}
+			if program.View != nil {
+				view := program.View
+				if view.Format != "srgb8" || view.Step.Kind != "dispatch" || view.Step.Kernel < 0 || view.Step.Kernel >= len(target.Kernels) || view.OutputColor < 0 || view.Width.Op == "" || view.Height.Op == "" {
+					return fmt.Errorf("invalid view plan")
+				}
+				kernel := target.Kernels[view.Step.Kernel]
+				outputKind := "buffer"
+				if targetIndex == 0 {
+					outputKind = "texture"
+				}
+				if view.Output >= uint32(len(kernel.Bindings)) || kernel.Bindings[view.Output].Kind != outputKind {
+					return fmt.Errorf("invalid view projection kernel")
+				}
+				for _, resource := range view.Step.Resources {
+					if resource.Binding == view.Output {
+						return fmt.Errorf("view output is also an input")
+					}
+				}
+				if !view.Fused && (len(kernel.Bindings) != 2 || len(view.Step.Resources) != 1 || kernel.ParameterBlock == nil || len(kernel.ParameterBlock.Fields) != 2) {
+					return fmt.Errorf("invalid standalone view projection")
+				}
+			}
 		}
 		for i, kernel := range target.Kernels {
 			if kernel.EntryPoint != fmt.Sprintf("_tach_k%d", i) || kernel.WorkgroupSize[0] == 0 || kernel.WorkgroupSize[1] == 0 || kernel.WorkgroupSize[2] == 0 {
 				return fmt.Errorf("invalid physical kernel %d", i)
 			}
 			for j, binding := range kernel.Bindings {
-				if binding.Group != 0 || binding.Binding != uint32(j) {
+				if binding.Group != 0 || binding.Binding != uint32(j) || binding.Kind != "buffer" && binding.Kind != "texture" {
 					return fmt.Errorf("kernel %d bindings are not dense", i)
 				}
 			}

@@ -100,13 +100,29 @@ func Emit(executable *backend.Executable) (string, error) {
 		e.line("")
 	}
 	for kernelIndex, kernel := range executable.PhysicalKernels {
+		if kernel.Projection {
+			e.emitProjectionResources(kernelIndex, &kernel)
+			e.line("")
+			continue
+		}
 		for bufferIndex, buffer := range kernel.Function.BufferParams {
-			e.emitResource(kernelIndex, bufferIndex, buffer)
+			if kernel.FusedView && bufferIndex == kernel.ViewBinding {
+				e.line("@group(0) @binding(%d) var %s: texture_storage_2d<rgba8unorm, write>;", bufferIndex, resourceName(kernelIndex, bufferIndex))
+			} else {
+				e.emitResource(kernelIndex, bufferIndex, buffer)
+			}
 			e.line("")
 		}
 		if kernel.Parameters != nil {
 			e.emitParameterBlock(kernel.Parameters)
 			e.line("")
+		}
+	}
+	for _, kernel := range executable.PhysicalKernels {
+		if kernel.Projection || kernel.FusedView {
+			e.emitViewSRGB()
+			e.line("")
+			break
 		}
 	}
 	for _, f := range m.Functions {
@@ -136,11 +152,55 @@ func Emit(executable *backend.Executable) (string, error) {
 			e.line("")
 		}
 	}
+	for kernelIndex := range executable.PhysicalKernels {
+		kernel := &executable.PhysicalKernels[kernelIndex]
+		if kernel.Projection {
+			e.emitProjection(kernelIndex, kernel)
+			e.line("")
+		}
+	}
 	out := e.b.String()
 	if err := Validate(out); err != nil {
 		return "", fmt.Errorf("tach WGSL self-validation failed: %w", err)
 	}
 	return out, nil
+}
+
+func (e *emitter) emitProjectionResources(kernel int, physical *backend.PhysicalKernel) {
+	e.line("struct _tach_view_source_%d {", kernel)
+	e.indent++
+	e.line("data: array<vec4<f32>>,")
+	e.indent--
+	e.line("}")
+	e.line("@group(0) @binding(0) var<storage, read> _tach_view_source_%d_data: _tach_view_source_%d;", kernel, kernel)
+	e.line("@group(0) @binding(1) var _tach_view_target_%d: texture_storage_2d<rgba8unorm, write>;", kernel)
+	e.emitParameterBlock(physical.Parameters)
+}
+
+func (e *emitter) emitProjection(kernel int, physical *backend.PhysicalKernel) {
+	parameters := parameterResourceName(physical.Parameters)
+	e.line("@compute @workgroup_size(%d, %d, %d)", physical.Workgroup[0], physical.Workgroup[1], physical.Workgroup[2])
+	e.line("fn %s(@builtin(global_invocation_id) index: vec3<u32>) {", physical.Entry)
+	e.indent++
+	e.line("let width = %s.f0;", parameters)
+	e.line("let height = %s.f1;", parameters)
+	e.line("if (index.x < width && index.y < height) {")
+	e.indent++
+	e.line("let pixel = _tach_view_source_%d_data.data[index.y * width + index.x];", kernel)
+	e.line("textureStore(_tach_view_target_%d, vec2<u32>(index.xy), vec4<f32>(_tach_view_srgb(pixel.r), _tach_view_srgb(pixel.g), _tach_view_srgb(pixel.b), clamp(pixel.a, 0.0, 1.0)));", kernel)
+	e.indent--
+	e.line("}")
+	e.indent--
+	e.line("}")
+}
+
+func (e *emitter) emitViewSRGB() {
+	e.line("fn _tach_view_srgb(value: f32) -> f32 {")
+	e.indent++
+	e.line("let bounded = clamp(value, 0.0, 1.0);")
+	e.line("return select(1.055 * pow(bounded, 0.416666667) - 0.055, 12.92 * bounded, bounded <= 0.0031308);")
+	e.indent--
+	e.line("}")
 }
 
 func (e *emitter) line(s string, args ...any) {
@@ -354,6 +414,7 @@ type placeExpr struct {
 	expr     string
 	ty       *types.Type
 	resource int
+	index    string
 }
 type fnState struct {
 	e       *emitter
@@ -497,13 +558,13 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 			return fmt.Errorf("unknown place &p%d", x.Base)
 		}
 		name := fieldName(x.Field, p.ty.Fields[x.Field].Name)
-		s.places[x.Result] = placeExpr{expr: p.expr + "." + name, ty: x.Type, resource: p.resource}
+		s.places[x.Result] = placeExpr{expr: p.expr + "." + name, ty: x.Type, resource: p.resource, index: p.index}
 	case *ir.PlaceIndex:
 		p := s.places[x.Base]
 		if p.ty == nil {
 			return fmt.Errorf("unknown place &p%d", x.Base)
 		}
-		s.places[x.Result] = placeExpr{expr: fmt.Sprintf("%s[%s]", p.expr, v(x.Index)), ty: x.Type, resource: p.resource}
+		s.places[x.Result] = placeExpr{expr: fmt.Sprintf("%s[%s]", p.expr, v(x.Index)), ty: x.Type, resource: p.resource, index: v(x.Index)}
 	case *ir.Load:
 		p := s.places[x.Place]
 		if p.ty == nil {
@@ -516,7 +577,16 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		if p.ty == nil {
 			return fmt.Errorf("unknown store place &p%d", x.Place)
 		}
-		e.line("%s = %s;", p.expr, v(x.Value))
+		physical := s.e.p.kernels[s.f]
+		if physical.FusedView && p.resource == physical.ViewBinding {
+			if p.index == "" {
+				return fmt.Errorf("fused view store has no pixel index")
+			}
+			pixel, width := v(x.Value), v(physical.ViewWidth)
+			e.line("textureStore(%s, vec2<u32>(%s %% %s, %s / %s), vec4<f32>(_tach_view_srgb(%s.r), _tach_view_srgb(%s.g), _tach_view_srgb(%s.b), clamp(%s.a, 0.0, 1.0)));", resourceName(s.e.kernelIndex[s.f], p.resource), p.index, width, p.index, width, pixel, pixel, pixel, pixel)
+		} else {
+			e.line("%s = %s;", p.expr, v(x.Value))
+		}
 	case *ir.Atomic:
 		p := s.places[x.Place]
 		if p.ty == nil {
@@ -570,7 +640,12 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		if p.ty == nil {
 			return fmt.Errorf("unknown array length place &p%d", x.Place)
 		}
-		e.line("let %s: u32 = arrayLength(&%s);", v(x.Result), p.expr)
+		physical := s.e.p.kernels[s.f]
+		if physical.FusedView && p.resource == physical.ViewBinding {
+			e.line("let %s: u32 = %s * %s;", v(x.Result), v(physical.ViewWidth), v(physical.ViewHeight))
+		} else {
+			e.line("let %s: u32 = arrayLength(&%s);", v(x.Result), p.expr)
+		}
 		s.def(x.Result, types.TU32)
 	case *ir.If:
 		for _, r := range x.Results {

@@ -82,6 +82,41 @@ func TestParticlesSPIRV(t *testing.T) {
 	}
 }
 
+func TestViewProjectionIsValidSPIRV16(t *testing.T) {
+	bin := emitSource(t, "view.tach", `
+function paint[i](pixels: buffer<float32x4[]>) {
+  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+}
+export function image(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels) over pixels.length;
+  return view(pixels, width, height);
+}`)
+	summary, err := spirv.Summary(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary, "SPIR-V 1.6") || !strings.Contains(summary, "entries [_tach_k0]") {
+		t.Fatalf("projection summary = %s", summary)
+	}
+}
+
+func TestExternalViewUsesStandaloneSPIRVProjection(t *testing.T) {
+	bin := emitSource(t, "view.tach", `
+function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32): view<srgb8> {
+  run paint(pixels) over width * height;
+  return view(pixels, width, height);
+}`)
+	summary, err := spirv.Summary(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary, "entries [_tach_k0, _tach_k1]") {
+		t.Fatalf("projection summary = %s", summary)
+	}
+}
+
 func TestLogicalIndicesAreOptimizedAfterSPIRVBackendLowering(t *testing.T) {
 	bin := emitSource(t, "coordinates.tach", `
 @workgroup(16, 8)

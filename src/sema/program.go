@@ -85,10 +85,10 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 	if err != nil {
 		return nil, err
 	}
-	if len(current) == 0 {
+	if len(current) == 0 && c.funcs[declaration.Name].view == 0 {
 		return nil, diag(declaration.Span, "public program %s requires at least one buffer parameter", declaration.Name)
 	}
-	for _, statement := range declaration.Body.Stmts {
+	for index, statement := range declaration.Body.Stmts {
 		switch x := statement.(type) {
 		case *ast.VarStmt:
 			if x.Mutable || x.Type != nil {
@@ -155,15 +155,62 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 			}
 			id := program.AddDispatch(dispatch)
 			c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current)
+		case *ast.ReturnStmt:
+			if c.funcs[declaration.Name].view == 0 {
+				return nil, diag(x.Span, "public program %s does not return a view", declaration.Name)
+			}
+			if index != len(declaration.Body.Stmts)-1 {
+				return nil, diag(x.Span, "view return must be the final program statement")
+			}
+			view, err := c.lowerView(program, x.Value, symbols, current)
+			if err != nil {
+				return nil, err
+			}
+			view.Format = c.funcs[declaration.Name].view
+			program.View = view
 		default:
-			return nil, diag(statement.GetSpan(), "public program bodies permit only const declarations and run statements")
+			return nil, diag(statement.GetSpan(), "public program bodies permit only const declarations, run statements, and a final view return")
 		}
 	}
 	if len(program.Dispatches) == 0 {
 		return nil, diag(declaration.Body.Span, "public program %s requires at least one run", declaration.Name)
 	}
+	if c.funcs[declaration.Name].view != 0 && program.View == nil {
+		return nil, diag(declaration.Body.Span, "public program %s must return its view", declaration.Name)
+	}
 	finishResources(program, current)
 	return program, nil
+}
+
+func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) (*flow.View, error) {
+	call, ok := expression.(*ast.CallExpr)
+	name, named := callName(call)
+	if !ok || !named || name != "view" || len(call.Args) != 3 {
+		return nil, diag(expression.GetSpan(), "view return must be view(pixels, width, height)")
+	}
+	identifier, ok := call.Args[0].(*ast.IdentExpr)
+	symbol, exists := symbols[identifierName(identifier)]
+	pixel := types.Vec(types.TF32, 4)
+	if !ok || !exists || symbol.resource == 0 || symbol.type_.Kind != types.RuntimeArray || !types.Equal(symbol.type_.Elem, pixel) {
+		return nil, diag(call.Args[0].GetSpan(), "view pixels must be a float32x4 buffer or transient")
+	}
+	width, err := c.lowerShape(program, call.Args[1], symbols)
+	if err != nil {
+		return nil, err
+	}
+	height, err := c.lowerShape(program, call.Args[2], symbols)
+	if err != nil {
+		return nil, err
+	}
+	return &flow.View{Source: symbol.resource, Input: current[symbol.resource], Width: width, Height: height, Span: expression.GetSpan()}, nil
+}
+
+func callName(call *ast.CallExpr) (string, bool) {
+	if call == nil {
+		return "", false
+	}
+	identifier, ok := call.Callee.(*ast.IdentExpr)
+	return identifierName(identifier), ok
 }
 
 func (c *Checker) addProgramParameters(program *flow.Program, declaration *ast.FunctionDecl) (map[string]programSymbol, map[flow.ResourceID]flow.VersionID, error) {
@@ -329,6 +376,9 @@ func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols
 	case *ast.MemberExpr:
 		if x.Name == "length" {
 			if symbol, path, final, ok := programPath(x.Base, symbols); ok && symbol.resource != 0 && final.Kind == types.RuntimeArray {
+				if resource := program.Resource(symbol.resource); resource != nil && resource.Kind == flow.Transient && len(path) == 0 {
+					return resource.Length, nil
+				}
 				return program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: symbol.resource, Path: path, Span: x.Span}), nil
 			}
 		}

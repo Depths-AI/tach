@@ -3,6 +3,8 @@ import { normalizeError, TachError } from "./api.ts";
 import type {
   ComputeBuffer,
   ComputeCommand,
+  ComputeView,
+  PresentationCanvas,
   Tach,
   TachAdapterInfo,
   TachFunction,
@@ -25,8 +27,9 @@ export interface BufferState<T> {
   driverBuffer?: DriverBuffer;
 }
 export interface CommandState {
-  readonly owner: RuntimeOwner;
-  prepare(): PreparedCommand;
+  readonly buffers: readonly BufferState<unknown>[];
+  readonly view: boolean;
+  prepare(owner: RuntimeOwner): PreparedCommand;
 }
 export interface RuntimeOwner {
   readonly driver: Driver;
@@ -76,17 +79,11 @@ class Session implements Tach, RuntimeOwner {
       getCommandState(value, `${operation}[${index}]`)
     );
     for (const state of states) {
-      if (state.owner !== this) {
-        throw new TachError(
-          "lifecycle",
-          "compute command belongs to a different Tach session",
-          { operation },
-        );
-      }
+      this.#assertBuffers(state, operation);
     }
     const pending = this.#submissionTail.then(async () => {
       this.assertHealthy(operation);
-      await this.driver[operation](states.map((state) => state.prepare()));
+      await this.driver[operation](states.map((state) => state.prepare(this)));
       this.assertHealthy(operation);
     });
     this.#submissionTail = pending.catch((cause) => {
@@ -107,6 +104,38 @@ class Session implements Tach, RuntimeOwner {
     ...rest: readonly ComputeCommand[]
   ): Promise<void> {
     return this.#execute("submit", first, rest);
+  }
+
+  present(canvas: PresentationCanvas, view: ComputeView): Promise<void> {
+    this.assertHealthy("present");
+    const state = getCommandState(view, "present");
+    if (!state.view) {
+      throw new TachError("kernel", "present requires a generated Tach view", {
+        operation: "present",
+      });
+    }
+    this.#assertBuffers(state, "present");
+    const pending = this.#submissionTail.then(async () => {
+      this.assertHealthy("present");
+      await this.driver.present(canvas, state.prepare(this));
+      this.assertHealthy("present");
+    });
+    this.#submissionTail = pending.catch((cause) => {
+      this.#deferredFailure ??= normalizeError(cause, "kernel", "present");
+    });
+    return pending;
+  }
+
+  #assertBuffers(state: CommandState, operation: string): void {
+    for (const buffer of state.buffers) {
+      if (buffer.owner !== this) {
+        throw new TachError(
+          "lifecycle",
+          "compute command uses a buffer from a different Tach session",
+          { operation },
+        );
+      }
+    }
   }
 
   async idle(): Promise<void> {
@@ -243,7 +272,7 @@ export function createComputeCommand(state: CommandState): ComputeCommand {
     then(): never {
       throw new TachError(
         "kernel",
-        "compute commands must be passed to Tach.submit()",
+        "compute commands must be passed to Tach.submit() or Tach.present()",
         { operation: "command" },
       );
     },

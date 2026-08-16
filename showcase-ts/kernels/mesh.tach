@@ -292,18 +292,18 @@ function shade[i](
 }
 
 @docs(
-  summary("Applies neighborhood bloom, tone mapping, gamma, and vignette."),
+  summary("Applies neighborhood bloom, tone mapping, and vignette."),
   coordinate(i, "Pixel index."),
   param(hdr, "Linear lit frame."),
-  param(pixels, "Packed display frame."),
+  param(frame, "Linear display frame."),
   param(params, "Frame dimensions."),
 )
 function meshPost[i](
   hdr: buffer<float32x4[]>,
-  pixels: buffer<uint32[]>,
+  frame: buffer<float32x4[]>,
   params: MeshParams,
 ) {
-  if (i < pixels.length) {
+  if (i < frame.length) {
     const x = i % params.width;
     const y = i / params.width;
     const center = hdr[i].xyz;
@@ -317,7 +317,7 @@ function meshPost[i](
     color = color / (color + 1.0);
     const nx = float32(x) / float32(params.width) * 2.0 - 1.0;
     const ny = float32(y) / float32(params.height) * 2.0 - 1.0;
-    pixels[i] = packColor(sqrt(color) * saturate(1.08 - (nx * nx + ny * ny) * 0.20));
+    frame[i] = float32x4(color * saturate(1.08 - (nx * nx + ny * ny) * 0.20), 1.0);
   }
 }
 
@@ -328,8 +328,8 @@ function meshPost[i](
   param(indices, "Three vertex indices per triangle."),
   param(visibility, "Atomic depth and triangle ownership storage."),
   param(coverage, "Covered-fragment count per triangle."),
-  param(pixels, "Packed 1080p output frame."),
   param(params, "Viewport, camera, and lighting parameters."),
+  returns("The complete sRGB display view."),
 )
 export function meshWorld(
   vertices: buffer<float32x4[]>,
@@ -337,14 +337,16 @@ export function meshWorld(
   indices: buffer<uint32[]>,
   visibility: buffer<atomic<uint32>[]>,
   coverage: buffer<uint32[]>,
-  pixels: buffer<uint32[]>,
   params: MeshParams,
-) {
+): view<srgb8> {
+  const count = params.width * params.height;
   const screen = transient<float32x4>(vertices.length);
-  const hdr = transient<float32x4>(pixels.length);
+  const hdr = transient<float32x4>(count);
+  const frame = transient<float32x4>(count);
   run transform(vertices, screen, params) over vertices.length;
   run clear(visibility) over visibility.length;
   run rasterize(screen, indices, visibility, coverage, params) over indices.length / 3;
-  run shade(vertices, normals, screen, indices, visibility, hdr, params) over pixels.length;
-  run meshPost(hdr, pixels, params) over pixels.length;
+  run shade(vertices, normals, screen, indices, visibility, hdr, params) over count;
+  run meshPost(hdr, frame, params) over count;
+  return view(frame, params.width, params.height);
 }

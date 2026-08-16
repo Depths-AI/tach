@@ -1336,19 +1336,25 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 	case ir.IntrinsicPow:
 		inst = GLSL450Pow
 	case ir.IntrinsicMin:
-		if scalarKind(x.Type) == types.I32 {
+		if scalarKind(x.Type) == types.F32 {
+			inst = GLSL450FMin
+		} else if scalarKind(x.Type) == types.I32 {
 			inst = GLSL450SMin
 		} else {
 			inst = GLSL450UMin
 		}
 	case ir.IntrinsicMax:
-		if scalarKind(x.Type) == types.I32 {
+		if scalarKind(x.Type) == types.F32 {
+			inst = GLSL450FMax
+		} else if scalarKind(x.Type) == types.I32 {
 			inst = GLSL450SMax
 		} else {
 			inst = GLSL450UMax
 		}
 	case ir.IntrinsicClamp:
-		if scalarKind(x.Type) == types.I32 {
+		if scalarKind(x.Type) == types.F32 {
+			inst = GLSL450FClamp
+		} else if scalarKind(x.Type) == types.I32 {
 			inst = GLSL450SClamp
 		} else {
 			inst = GLSL450UClamp

@@ -10,7 +10,8 @@ export interface TypeRef {
     | "struct"
     | "atomic"
     | "fixedArray"
-    | "runtimeArray";
+    | "runtimeArray"
+    | "view";
   readonly name?: string;
   readonly elem?: TypeRef;
   readonly count?: number;

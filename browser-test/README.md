@@ -1,47 +1,72 @@
 # Tach browser correctness harness
 
 This private npm workspace proves that the canonical `examples/` Tach project
-works through the published `@depths/tach` surface in Chromium WebGPU. The
-harness is Deno-native, standalone, and owns its project build, static server,
-Chrome launch, DevTools Protocol client, and semantic assertions. It shares no
-runner helper or handwritten shader fixture with another workspace.
+works through the public `@depths/tach` API in Chromium WebGPU. It is a
+self-contained Deno harness: it owns project generation, bundling, its
+loopback-only server, Chrome launch, DevTools Protocol client, GPU assertions,
+canvas capture, and cleanup. It shares no runner or shader fixture with the
+native harness.
 
-## What it exercises
+## Build boundary
 
 `scripts/build.ts` calls `@depths/tach/compiler` on `examples/`, copies the
-complete generated package into local ignored `generated/`, bundles
-`src/main.ts`, and places the exact generated WGSL beside the browser module.
-The browser imports all public commands through one generated `index.js`.
+complete generated package into ignored `generated/`, bundles `src/main.ts`,
+and places the exact `kernel.wgsl.gz` beside the browser module. The browser
+imports every public endpoint through the generated project `index.js` and the
+runtime through `@depths/tach`; it never imports compiler internals or
+handwritten WGSL.
 
-The seven canonical programs cover:
+The local server exposes only the page module and compressed generated shader.
+The WebGPU driver decompresses WGSL, validates schema-2 execution metadata,
+creates pipelines, and executes the same recipe facade used by Deno/Vulkan.
 
-- shared-memory atomics;
-- shifts, masks, complements, and unsigned integer behavior;
-- structured branches and compound assignment;
-- bounded `for` lowering;
-- vectors and the complete scalar math intrinsic set;
-- imported struct types and particle integration; and
-- scalar runtime arrays, repeated commands, and parameter isolation.
+## What it proves
 
-One scoped Tach session submits the complete corpus. Assertions use decoded
-GPU results, including exact integer outcomes and tolerance-checked floating
-point results. Batched commands with different uniform values and later
-submissions verify ordering and parameter-arena separation. Success therefore
-proves project discovery/imports, the global facade, multi-entry WGSL,
-generated codecs, public command construction, execution, readback, and
-cleanup together.
+The nine canonical programs cover:
+
+- shared workgroup memory and integer atomics;
+- shifts, masks, complements, and unsigned behavior;
+- branches, loops, compound assignment, vectors, and math intrinsics;
+- direct imports, project-global types, structs, and orchestration;
+- runtime-array launch inference, batching, repeat, and parameter isolation;
+- explicit `prepare` followed by submission;
+- a scalar-only `view<srgb8>` whose final transient writer is fused with
+  texture projection; and
+- a caller-owned pixel-buffer view using standalone projection.
+
+One scoped session first checks exact integer results and tolerance-bounded
+floating results through decoded buffer readback. It then prepares and submits
+the owner-neutral scalar view offscreen, presents the caller-owned fallback,
+and verifies that its linear float buffer was actually written.
+
+The sustained display seam constructs 32 CPU-selected recipes, alternating
+the scalar/transient and caller-owned forms, and invokes `present` concurrently
+on one 128 x 72 canvas. Session serialization preserves call order;
+completion-backed presentation prevents unbounded GPU queueing. The final
+canvas is captured as PNG and must be non-empty. Together with the initial
+fallback presentation, success reports 33 displayed frames and nine public
+programs.
+
+This distinguishes three contracts that are easy to conflate:
+
+```text
+generated call       opaque recipe, no execution
+submit(view)          offscreen GPU projection, no CPU readback
+present(canvas, view) full GPU recipe, direct canvas output, frame completion
+```
 
 ## Browser runner
 
-`test.ts` starts a loopback-only Deno server and launches an installed Chrome
-or Chromium with WebGPU enabled. It uses the browser's DevTools Protocol
-directly and has no external runner or bundler dependency.
-Set `CHROME_BIN` only when Chrome is outside the standard platform locations.
+`test.ts` launches an installed Chrome or Chromium with WebGPU enabled, opens
+the local page, and polls one promise through the DevTools Protocol. It has no
+browser-test framework or bundler dependency. Set `CHROME_BIN` only when the
+browser is outside the standard platform locations.
 
-The server exposes only its local app bundle and `kernel.wgsl`. The runner
-waits for a single browser result, prints the selected adapter and number of
-programs, then closes Chrome, aborts the server, and removes its temporary
-profile even after failure.
+The runner requires exactly nine programs, 33 presented frames, and a
+non-trivial PNG. It prints the selected adapter and those counts, then closes
+Chrome, aborts the server, and removes its temporary profile even after
+failure. Process status and assertion diagnostics are the test contract; the
+harness writes no report Markdown.
 
 ## Run
 
@@ -52,11 +77,11 @@ npm ci --ignore-scripts
 npm test --workspace=@tach/browser-test
 ```
 
-The workspace depends on local `@depths/tach` through the root npm workspace.
-`npm run build` must have produced `dist/tach.exe` or `dist/tach`; alternatively
-`TACH_BIN` may identify the exactly matching compiler.
+The workspace consumes local `@depths/tach` through the root npm workspace.
+`npm run build` must have produced `dist/tach.exe` or `dist/tach`;
+alternatively `TACH_BIN` may identify the exactly matching compiler.
 
-Useful individual commands:
+Useful narrower commands are:
 
 ```sh
 npm run build --workspace=@tach/browser-test
@@ -64,6 +89,4 @@ npm run check --workspace=@tach/browser-test
 ```
 
 `check` lints and type-checks the standalone harness. `test` rebuilds the
-canonical project and performs real browser execution. It writes no custom
-report or pass/fail Markdown; process status and assertion diagnostics are the
-test contract.
+canonical example project and performs real WebGPU execution and presentation.

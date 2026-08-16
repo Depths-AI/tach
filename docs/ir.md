@@ -3,7 +3,7 @@
 Tach has two target-independent intermediate representations:
 
 - **Flow IR** describes host-callable programs, resources, shapes, versions,
-  and ordered dispatches.
+  ordered dispatches, and optional terminal views.
 - **Kernel IR** describes the portable work performed by one invocation of an
   indexed stage or helper.
 
@@ -19,6 +19,7 @@ identity boundary:
 
 ```text
 public program -> Flow dispatch -> logical stage -> physical target kernel
+               -> optional Flow view -> target projection
 ```
 
 Source-file identity is deliberately absent from symbol names after checking.
@@ -99,6 +100,7 @@ Resources
 Versions
 Shapes
 Dispatches
+View              optional format/source/version/extent
 ```
 
 IDs for resources, versions, shapes, and dispatches are dense, nonzero, and
@@ -192,12 +194,39 @@ shape, or backend-added repeat count.
 Flow IR names a logical stage, not a physical kernel index. Target planning
 creates the latter.
 
+### Views
+
+A view is a terminal program result, not a Kernel IR value:
+
+```text
+View
+  Format       SRGB8
+  Source       runtime float32x4 resource
+  Input        exact final resource version
+  Width        checked shape
+  Height       checked shape
+  Span
+```
+
+The source must be an external or transient runtime array of linear RGBA
+pixels. `Input` identifies the version produced by the ordered program, so a
+backend cannot accidentally project an earlier write. Width and height reuse
+the same symbolic shape DAG and checked host evaluator as dispatch domains and
+transient lengths.
+
+Views deliberately do not contain a canvas, texture, native surface, byte
+packing rule, or presentation operation. Those are target/runtime concerns.
+This separation lets a scalar-only public program allocate its frame as a
+transient, run ordinary stages, and return a view without inventing a public
+output buffer.
+
 ## 3. Flow verification
 
 `flow.Verify` first verifies the shared Kernel IR, then proves:
 
 - unique public program names and at least one dispatch per program;
-- at least one external buffer and valid constructible value parameters;
+- at least one external buffer for ordinary programs, while view programs may
+  be scalar-only, plus valid constructible value parameters;
 - dense, valid resource/version/shape/dispatch IDs;
 - valid initial/final versions and monotonic version chains;
 - acyclic, well-typed shape expressions;
@@ -205,7 +234,9 @@ creates the latter.
 - buffer/resource type equality and per-dispatch non-aliasing;
 - current-version consumption and correct mutable output versions;
 - definition before every read; and
-- valid public/literal/shape sources for stage value formals.
+- valid public/literal/shape sources for stage value formals; and
+- a supported view format, runtime `float32x4` source, exact defined final
+  source version, and valid width/height shapes when a view is present.
 
 Because definition and version checks live here, neither backend runtime needs
 to rediscover program dataflow from shader text.
@@ -432,7 +463,8 @@ Unused pure values and place paths are removed repeatedly. Stores, atomics,
 barriers, and other effects remain when their result is unused.
 
 Flow IR currently receives verification after this Kernel rewrite but no
-separate optimization pass.
+general rewrite pipeline. Terminal view fusion is a target-planning decision,
+not a logical Flow rewrite.
 
 ## 11. From logical stages to executable plans
 
@@ -459,14 +491,21 @@ Transients[]       size/lifetime/color
 Steps[]            dispatch or target barrier
 RepeatBarrier      optional cross-iteration synchronization
 Repeat             program | invocation-loop
+View               optional terminal projection step and extent
 ```
 
 A dispatch step refers to a physical-kernel index, domain shapes, resource
 sources, and parameter sources. Physical identity is therefore target-specific
 and downstream of logical dispatch identity.
 
-The current planner creates one physical kernel for every dispatch. It does not
-deduplicate identical stage clones or fuse adjacent dispatches.
+The current planner creates one physical kernel for every ordinary dispatch.
+It does not deduplicate identical stage clones or fuse adjacent source
+dispatches. A narrow terminal-view rule is the exception: when the last
+dispatch completely and exclusively writes one transient element at its exact
+1D coordinate, its domain equals `width * height`, and the transient is not
+otherwise needed, planning rewrites that final store directly to target color
+output. Otherwise planning adds one standalone projection kernel. Both plans
+implement the same Flow view.
 
 ## 12. Backend mapping
 
@@ -484,6 +523,8 @@ deduplicate identical stage clones or fuse adjacent dispatches.
 | atomic | WGSL atomic builtin | `OpAtomic*` |
 | source barrier | WGSL barrier | `OpControlBarrier` |
 | plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier2` in Tach's Vulkan 1.3 runtime |
+| view output | `rgba8unorm` storage texture | packed `uint32[]` RGBA8 scratch |
+| terminal view conversion | direct texture store or projection kernel | direct packed store or projection kernel |
 
 Backend coordinate optimization may map exact modulo/row-major expressions to
 local coordinate inputs and remove dead global inputs. It never changes
@@ -494,8 +535,8 @@ logical source/IR names.
 Source sugar belongs in lowering when existing IR already expresses its
 meaning. New per-invocation semantics must earn a Kernel IR instruction/type,
 verification, effects, optimization rules, and both backend mappings. New
-multi-dispatch semantics must earn a Flow node, verifier rule, target-plan
-representation, metadata, and both runtime implementations.
+multi-dispatch or terminal-result semantics must earn a Flow node, verifier
+rule, target-plan representation, metadata, and both runtime implementations.
 
 Target-only instruction selection, physical layout, and dispatch planning
 belong after logical IR. Provider syntax and opcodes never become portable

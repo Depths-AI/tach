@@ -42,12 +42,15 @@ it must not infer a shader entry from the public name.
 The contract has six parts:
 
 1. **Program ABI:** public parameters, resources, and optional launch input.
-2. **Plan ABI:** ordered dispatches, target kernels, transients, and barriers.
+2. **Plan ABI:** ordered dispatches, target kernels, transients, barriers, and
+   optional terminal views.
 3. **Binding ABI:** storage and parameter-block bindings for each physical
    kernel.
 4. **Memory ABI:** canonical host-visible bytes.
 5. **Runtime ABI:** commands, ownership, synchronization, and errors.
-6. **Documentation ABI:** target-neutral descriptions used for JSDoc and
+6. **View ABI:** linear RGBA source, display extent, target projection, and
+   browser presentation.
+7. **Documentation ABI:** target-neutral descriptions used for JSDoc and
    generated Markdown.
 
 ## 2. Public names and generated signatures
@@ -101,11 +104,32 @@ export function transform(
 The final options object is compiler-generated and is not a Tach source
 parameter. Both forms return an opaque command; neither executes immediately.
 
+A view program returns the narrower `ComputeView` recipe:
+
+```ts
+import type {
+  CommandOptions as $CommandOptions,
+  ComputeView as $ComputeView,
+} from "@depths/tach";
+
+export function gradient(
+  width: number,
+  height: number,
+  $options?: $CommandOptions,
+): $ComputeView;
+```
+
+`ComputeView` extends `ComputeCommand`, so it is accepted by `prepare` and
+`submit`; only it is accepted by `present`. View options reject `repeat` at
+runtime because one recipe defines one terminal display result.
+
 ## 3. Public resources and non-aliasing
 
 Each public `buffer<T>` parameter creates one external resource in that
 program. Public parameters retain source order and map buffer parameters to
-resource-table indices. Plain parameters remain typed host values.
+resource-table indices. Plain parameters remain typed host values. An
+ordinary public program has at least one external resource. A view program may
+have none when its stages write a transient frame from plain parameters.
 
 Different public buffer parameters are distinct, non-aliasing objects. The
 shared runtime rejects one `ComputeBuffer` passed in more than one buffer
@@ -227,9 +251,12 @@ dispatch, in target-plan order.
 For each physical kernel:
 
 - the entry point is `_tach_kN` in target-plan order;
-- storage bindings are dense from binding `0` in source-formal order;
+- resource bindings are dense from binding `0`; surviving source inputs retain
+  formal order and an optional terminal color output occupies its planned
+  binding;
 - WebGPU uses group `0` and Vulkan uses descriptor set `0`;
 - each binding records read/read-write access, logical type, and minimum size;
+- each binding records whether it is a buffer or target color texture;
 - the selected workgroup is part of the target plan; and
 - a parameter block, when present, takes the next binding.
 
@@ -264,6 +291,7 @@ external/transient resource sources for each step
 value sources for each parameter-block leaf
 transient lifetimes and allocation colors
 repeat mode and optional repeat barrier
+optional terminal view step, extent, output color, and fusion flag
 ```
 
 Dispatch domains are trees of checked shape operations. Leaves can reference a
@@ -287,8 +315,9 @@ share a color. At preparation time the runtime evaluates byte sizes and gives
 each color one buffer large enough for the largest active requirement.
 
 The WebGPU session retains scratch buffers by color and grows them
-geometrically. Replaced buffers are retired until the next `idle()` so queued
-work cannot observe destroyed storage.
+geometrically. It separately reuses an offscreen view texture when the extent
+matches, retiring replaced textures until completion. Replaced resources are
+not destroyed while queued work can still observe them.
 
 WebGPU records all dispatches of submitted commands into one compute pass in
 program order. The SPIR-V plan inserts explicit compute-to-compute barriers
@@ -320,17 +349,40 @@ values remain in registers, preserving observable behavior and removing
 repeat dispatches. Otherwise the host plan repeats the dispatch literally.
 
 The metadata field `repeat` records `"invocation-loop"` or `"program"`; native
-runtimes must obey it.
+runtimes must obey it. A view command requires repeat `1`; target lowering
+does not internalize or repeat terminal projection.
 
-## 10. Metadata schema 1
+### View color and extent contract
 
-Schema-1 execution metadata is embedded in the singular generated JavaScript
+A Flow view names a runtime `float32x4[]` source, its exact final defined
+version, and positive checked `uint32` width and height shapes. Preparation
+checks that `width * height` is a positive safe product and that an unfused
+source contains at least that many complete 16-byte pixels. Extra source
+elements are ignored.
+
+Each source pixel is linear `(red, green, blue, alpha)`. For each RGB channel,
+target lowering first clamps to `[0, 1]`, then applies:
+
+```text
+channel <= 0.0031308 ? 12.92 * channel
+                     : 1.055 * pow(channel, 1 / 2.4) - 0.055
+```
+
+Alpha is clamped to `[0, 1]` without transfer. Native packing converts each
+channel with `uint32(channel * 255 + 0.5)` and places R, G, B, A in successive
+low-to-high bytes. Web writes the equivalent normalized values to
+`rgba8unorm`. This conversion is compiler/backend work, never Tach source or a
+TypeScript readback pass.
+
+## 10. Runtime metadata schema 2
+
+Schema-2 execution metadata is embedded in the singular generated JavaScript
 module and consumed by either host driver. It is not a build sidecar or public
 package export. The complete internal shape is:
 
 ```ts
 interface Metadata {
-  schema: 1;
+  schema: 2;
   types: Array<{
     name: string;
     fields: Array<{ name: string; type: string }>;
@@ -362,6 +414,7 @@ interface PublicProgram {
     dimensions: 1 | 2 | 3;
     inferFromResource?: number;
   };
+  view?: true;
 }
 
 interface TargetPlan {
@@ -377,6 +430,7 @@ interface TargetPlan {
       access: "read" | "read_write";
       type: string;
       minimumByteSize: number;
+      kind: "buffer" | "texture";
     }>;
     parameterBlock?: {
       group: 0;
@@ -395,7 +449,18 @@ interface TargetPlan {
     steps: Step[];
     repeatBarrier?: Step;
     repeat: "program" | "invocation-loop";
+    view?: View;
   }>;
+}
+
+interface View {
+  format: "srgb8";
+  step: Step;
+  width: Shape;
+  height: Shape;
+  outputColor: number;
+  output: number;
+  fused: boolean;
 }
 
 interface Transient {
@@ -465,6 +530,15 @@ targets.spirv.kernels[]     target-specific physical entries
 targets.spirv.programs[]    target-specific barriers and plan
 ```
 
+A public `view: true` requires one view in both target plans. Its terminal
+step is separate from ordinary `steps`: a fused plan may have no ordinary
+steps because its final source dispatch became the projection. `output` names
+the terminal kernel binding reserved for color output and cannot also occur in
+that step's input resources. Web uses a `texture` binding with zero buffer
+minimum size; SPIR-V uses a `buffer` binding for packed pixels. `outputColor`
+selects driver-owned reusable output allocation. `fused` distinguishes a
+rewritten final source dispatch from a standalone projector.
+
 Array indices are cross-references. Every program plan records its public
 program index; a dispatch step records a physical-kernel index; resource
 sources identify an external or transient table plus its index. Schema
@@ -475,7 +549,7 @@ Zero-valued optional numeric fields may be absent in JSON. Consumers must use
 the schema and discriminator fields rather than property presence as a general
 truth test.
 
-Schema 1 is compiler/runtime internal while Tach is pre-1.0. Rebuild all
+Schema 2 is compiler/runtime internal while Tach is pre-1.0. Rebuild all
 artifacts together rather than treating it as a stable third-party wire
 format.
 
@@ -537,7 +611,7 @@ interface TypeRef {
   kind:
     | "void" | "bool" | "i32" | "u32" | "f32"
     | "vector" | "struct" | "atomic"
-    | "fixedArray" | "runtimeArray";
+    | "fixedArray" | "runtimeArray" | "view";
   name?: string;
   elem?: TypeRef;
   count?: number;
@@ -546,9 +620,11 @@ interface TypeRef {
 ```
 
 `TypeRef` carries the Tach spelling plus a target-neutral structural kind,
-element/count/lane information, and a struct name where applicable. Optional
-numeric fields are omitted when zero; consumers branch on `kind`, not on
-incidental property presence. Types and functions remain owned by their
+element/count/lane information, and a struct or view-format name where
+applicable. A view result has `tach: "view<srgb8>"`, `kind: "view"`, and
+`name: "srgb8"`; it has no host value layout. Optional numeric fields are
+omitted when zero; consumers branch on `kind`, not on incidental property
+presence. Types and functions remain owned by their
 canonical kernel. Arrays are already ordered module, kernel, declaration,
 field, coordinate, and parameter sequences; renderers must preserve that
 compiler-owned order. The TypeScript renderer uses this description to
@@ -569,6 +645,12 @@ emitted.
 
 The runtime builds layouts from metadata and never parses WGSL.
 
+A Web view output binding is `texture_storage_2d<rgba8unorm, write>`. A fused
+terminal entry converts and stores its own final pixel. A fallback entry reads
+the final `float32x4[]` resource over `[width, height]` and writes the texture.
+The generated package stores this complete module as deterministic gzip in
+`kernel.wgsl.gz`; the browser driver decompresses it before module creation.
+
 ## 12. SPIR-V representation
 
 SPIR-V 1.6 uses Logical addressing and the Shader capability under Tach's
@@ -584,6 +666,11 @@ Tach guarantees zero-initialized shared memory. Every Workgroup variable has
 an `OpConstantNull` initializer and the host requires
 `shaderZeroInitializeWorkgroupMemory`; no synthetic store loop or barrier is
 inserted. The host also requires Synchronization2 for plan barriers.
+
+A native view uses a storage-buffer output with one packed little-endian RGBA8
+`uint32` per pixel. The same fused/fallback distinction applies, with shared
+compiler-generated IEC sRGB conversion and alpha clamping. This is an
+offscreen compute result; it does not imply a Vulkan surface or swapchain.
 
 ## 13. Host values and materialization
 
@@ -621,10 +708,10 @@ idempotent; later use is a lifecycle error.
 
 ## 14. Commands and submission
 
-A generated program call validates buffer handles, ownership, non-aliasing,
-options, and every parameter block that can be evaluated immediately. The
-opaque command holds its public arguments until preparation; do not mutate a
-plain object/array argument between command construction and submission.
+A generated program call validates buffer handles, non-aliasing, options, and
+every parameter block that can be evaluated immediately. The opaque recipe
+holds its public arguments until preparation; do not mutate a plain
+object/array argument between command construction and execution.
 
 Accidentally awaiting a command throws a targeted error. Execution occurs only
 through:
@@ -633,11 +720,35 @@ through:
 await gpu.submit(first, second);
 ```
 
-All commands must belong to one session. `submit` prepares host-neutral plans
-in argument order and passes one batch to the selected driver. WebGPU records
-one compute pass/command buffer; Vulkan records a pooled native command buffer
-with explicit barriers. Its promise resolves after preparation/submission, not
-after GPU completion.
+The shared execution surface is:
+
+```ts
+interface Tach {
+  prepare(first: ComputeCommand, ...rest: ComputeCommand[]): Promise<void>;
+  submit(first: ComputeCommand, ...rest: ComputeCommand[]): Promise<void>;
+  present(canvas: PresentationCanvas, view: ComputeView): Promise<void>;
+  idle(): Promise<void>;
+}
+```
+
+`prepare` validates and compiles one or more recipes without executing them.
+`submit` prepares host-neutral plans in argument order and passes one batch to
+the selected driver. WebGPU records one compute pass/command buffer; Vulkan
+records a pooled native command buffer with explicit barriers. Its promise
+resolves after preparation/submission, not after GPU completion.
+
+Recipes are not session-owned. Before preparation, the executing session
+checks that every referenced buffer belongs to it. A recipe with no public
+buffers is owner-neutral and reusable by multiple sessions; a recipe with
+buffers can run only through their owner. This single rule covers ordinary
+commands and views.
+
+`submit(view)` executes its terminal projection into driver-owned offscreen
+output. Browser `present(canvas, view)` instead targets a same-sized current
+canvas texture and waits for the submitted work, establishing frame
+backpressure without readback. Deno/Vulkan currently rejects `present`
+because there is no Tach-owned native surface; native view computation still
+runs through `submit`.
 
 For indexed shorthand, explicit launch sizes must be positive safe integers
 of exact rank. Workgroup counts are:
@@ -680,18 +791,21 @@ try {
 The caller owns synchronization and closure. Both forms share one engine and
 the same ownership rules.
 
-The shared session caches ownership and submission state. WebGPU caches shader
-modules and physical pipelines per device, bind groups by layout/buffer range,
-one aligned parameter arena, and scratch allocations by transient color;
-dynamic offsets select parameter blocks and replaced buffers retire until
-`idle()`. Vulkan caches SPIR-V modules, lazy physical pipelines/layouts,
-device-local external and scratch buffers, and reusable submission records
-containing descriptor pool, command buffer, fence, and mapped parameter arena.
+The shared session caches buffer ownership and submission state; recipes do
+not acquire session ownership. WebGPU caches shader modules and physical
+pipelines per device, bind groups by layout/buffer range, one aligned parameter
+arena, scratch allocations by transient color, canvas contexts, and one
+same-extent offscreen view texture. Dynamic offsets select parameter blocks,
+and replaced buffers/textures retire only after completion. Vulkan caches
+SPIR-V modules, lazy physical pipelines/layouts, device-local external,
+scratch, and packed view buffers, plus reusable submission records containing
+descriptor pool, command buffer, fence, and mapped parameter arena.
 
 Completion boundaries are:
 
 - `gpu.idle()` for all earlier session work;
-- `buffer.read()` for earlier work plus readback; and
+- `buffer.read()` for earlier work plus readback;
+- browser `gpu.present(...)` for the presented frame; and
 - exit from `tach(callback)`.
 
 `close()` is synchronous and idempotent teardown. Call `idle()` first when
@@ -721,7 +835,7 @@ surface at submission or synchronization boundaries rather than disappearing.
 The Deno driver and native library execute the target plan rather than merely
 loading one entry point:
 
-1. decode and validate schema-1 metadata;
+1. decode and validate schema-2 metadata;
 2. select the public program and matching SPIR-V program plan;
 3. allocate every external resource using its canonical layout and size;
 4. evaluate transient lengths and allocate each color's maximum required size;
@@ -731,8 +845,9 @@ loading one entry point:
 8. evaluate dispatch domains and divide by recorded workgroup dimensions;
 9. record steps in order, including plan barriers;
 10. honor `program` versus `invocation-loop` repeat mode;
-11. bind distinct memory for distinct public buffer parameters; and
-12. synchronize work before upload and after execution as required by the
+11. allocate packed view output and execute its terminal step when present;
+12. bind distinct memory for distinct public buffer parameters; and
+13. synchronize work before upload and after execution as required by the
     embedding application.
 
 The native boundary rejects incompatible metadata before module creation,
@@ -752,7 +867,7 @@ build/
   package.json
   index.js
   index.d.ts
-  kernel.wgsl
+  kernel.wgsl.gz
   kernel.spv
   README.md
   docs/<module>.md
@@ -764,13 +879,13 @@ version because generated JavaScript imports `@depths/tach/internal`. It does
 not re-export the runtime. A consumer installs both packages and imports
 `tach` separately.
 
-The one `index.js` embeds both executable plans and sibling URLs for WGSL and
-SPIR-V. Browser and Deno consumers import the same facade; runtime host
+The one `index.js` embeds both executable plans and sibling URLs for compressed
+WGSL and SPIR-V. Browser and Deno consumers import the same facade; runtime host
 selection chooses the matching plan and shader. `tach build --verbose` adds
 only compiler diagnostics. Docs-only generation preserves every compiled
 entry and changes only `README.md` and `docs/`.
 
-Public names, parameter order, logical types, host bytes, plan semantics,
-runtime ownership, documentation, and package identity form one synchronized
-result. Do not hand-edit generated files or combine outputs from different
-compiler versions or project builds.
+Public names, parameter order, logical types, host bytes, plan and view
+semantics, buffer ownership, documentation, and package identity form one
+synchronized result. Do not hand-edit generated files or combine outputs from
+different compiler versions or project builds.

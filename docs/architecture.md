@@ -3,9 +3,9 @@
 Tach has one project compiler, two target-independent IRs, two target
 executable plans, two shader emitters, one canonical host layout, and one
 managed runtime with WebGPU and Tach-owned Vulkan drivers. The split keeps
-baseline syntax small while giving
-imports and explicit multi-dispatch programs real representations instead of
-hiding orchestration in generated glue.
+baseline syntax small while giving imports, explicit multi-dispatch programs,
+and display views real representations instead of hiding orchestration or
+presentation in generated glue.
 
 For exact source rules, read [the language guide](language.md). For internal
 data models, read [the IR guide](ir.md). For bytes and host execution, read
@@ -16,8 +16,8 @@ The shortest accurate model is:
 ```text
 project loading owns filesystem identity, imports, DAGs, and canonical order
 Kernel IR owns per-invocation portable meaning
-Flow IR owns public programs and dispatch dependencies
-target plans own physical kernels, bindings, scratch, and barriers
+Flow IR owns public programs, dispatch dependencies, and terminal views
+target plans own physical kernels, bindings, scratch, barriers, and view output
 emitters own WGSL/SPIR-V representation
 bindings and runtimes own the host boundary
 ```
@@ -39,6 +39,10 @@ Tach is organized around these rules:
 11. One project-global declaration namespace feeds one merged IR and one
     cohesive dual-host artifact set.
 12. Parallel scheduling may change elapsed time, never diagnostics or bytes.
+13. A display view is terminal Flow meaning; texture or packed-buffer output
+    is a target choice.
+14. Buffers are session-owned state; generated commands are opaque recipes
+    whose usable session is determined only by the buffers they reference.
 
 These rules let `export function scale[i]` stay a one-screen beginner feature
 while the compiler internally represents its public command, logical stage,
@@ -66,7 +70,7 @@ global headers -> direct-import semantic environments
     v                         v
 Kernel IR                  Flow IR
 helpers + stages      programs + resources
-    verify            + versions + shapes
+    verify            + versions + shapes/views
     |                         |
     +------------+------------+
                  v
@@ -85,7 +89,7 @@ helpers + stages      programs + resources
  + validation           + binary validation
        +---------+---------+
                  v
- schema-1 runtime metadata + schema-2 project description
+ schema-2 runtime metadata + schema-2 project description
                  |
                  v
  TypeScript JS/declaration/Markdown/package rendering
@@ -132,7 +136,8 @@ returns all independently recoverable lexical diagnostics.
 - types and fields;
 - helpers, indexed stages, and exported functions;
 - ordinary statements and structured control;
-- `run` domains and `transient<T>(length)` expressions; and
+- `run` domains, `transient<T>(length)` expressions, and terminal
+  `view<srgb8>` returns; and
 - exact source spans and comment trivia needed by formatting.
 
 The parser recovers at declaration and statement boundaries so one broken
@@ -152,7 +157,8 @@ own and directly imported declarations. Its order matters:
 4. lower helpers and indexed stages to Kernel IR;
 5. infer buffer mutability from effects;
 6. reject helper recursion and verify Kernel IR;
-7. lower each exported function to a Flow IR public program; and
+7. lower each exported function, including any terminal view, to a Flow IR
+   public program; and
 8. verify the complete Flow IR module.
 
 Parsing, type-field resolution, signature checking, function lowering, and
@@ -197,17 +203,22 @@ Program
   resource versions
   shape expression DAG
   ordered dispatches
+  optional terminal view
 ```
 
 An exported indexed function synthesizes one Flow program with one launch-axis
 shape and one dispatch. An exported unindexed function lowers its source
-`const`, `transient`, and `run` declarations directly.
+`const`, `transient`, and `run` declarations directly. A `view<srgb8>` program
+also records the final runtime `float32x4` resource version and checked width
+and height shapes. It may have no external resource when it constructs the
+complete frame in a transient.
 
 Resource versions state dataflow explicitly. A mutable dispatch consumes one
 version and produces another. The verifier knows whether an initial or
 transient version is defined and rejects a read before a complete definition.
 Shapes refer to public uint values, runtime lengths, launch axes, constants,
-or checked arithmetic.
+or checked arithmetic. Views reuse the same shapes; they do not introduce a
+second extent language.
 
 This layer is why bindings can expose one command for a multi-stage operation
 without encoding a dispatch graph by hand in TypeScript.
@@ -227,7 +238,8 @@ under varying control.
 `flow.Verify` first verifies its Kernel IR, then checks public program names,
 parameters, resources, dense IDs, version chains, shape DAGs, stage references,
 argument types, resource non-aliasing, definition-before-read, and final
-versions.
+versions. For a view it additionally proves the format, source element type,
+exact final defined version, and width/height shapes.
 
 Verification is a production boundary. Semantic analysis, optimization,
 backend lowering, emission, and binding generation do not accept malformed IR
@@ -255,7 +267,9 @@ defined places. Zero-trip behavior remains unchanged.
 
 Flow IR currently has no rewrite pipeline beyond construction-time shape
 interning and verification. Dispatch planning occurs per target. In
-particular, no pass fuses distinct Flow dispatches.
+particular, no pass fuses distinct Flow dispatches. Terminal view projection
+may be folded into the final dispatch under a separate exact proof because it
+is target representation of the view, not inter-stage fusion.
 
 ## 7. Target executable planning
 
@@ -277,7 +291,7 @@ For every dispatch, planning:
 6. assigns dense storage bindings;
 7. builds the shared ABI parameter block;
 8. lowers logical coordinate requirements; and
-9. applies coordinate optimization.
+9. applies coordinate optimization and optional terminal-view lowering.
 
 The target module also contains cloned helpers. Physical stage clones can
 differ because program arguments, repeat mode, parameter pruning, or later
@@ -309,6 +323,22 @@ SPIR-V plans insert barrier steps between adjacent dispatches when the first
 writes a resource touched by the second, plus an optional barrier between
 repeated program iterations. WebGPU records ordered dispatches in one compute
 pass and relies on WebGPU's pass execution model.
+
+### Terminal views
+
+Every view plan records its checked extent, output allocation color and
+binding, terminal projection step, and whether projection was fused. Planning
+folds conversion into the final stage only when a transient is written
+completely at the exact current 1D coordinate, the domain equals the transient
+length and `width * height`, and no earlier use requires the result. The
+transient and standalone projection then disappear.
+
+All other valid views receive one target-owned projection kernel that reads
+the final float pixel resource. WGSL writes an `rgba8unorm` storage texture.
+SPIR-V writes one packed RGBA8 `uint32` per pixel. Both paths apply the same
+IEC sRGB transfer to RGB and clamp alpha. View commands cannot use repeat;
+repeating a display recipe has no useful externally visible intermediate
+result and complicates the terminal resource contract.
 
 ## 8. Coordinate lowering
 
@@ -354,8 +384,9 @@ No target independently recalculates ABI offsets.
 
 1. indexes physical and helper function coordinate requirements;
 2. emits structs, resources, parameter blocks, helpers, and private entries;
-3. maps structured Kernel IR directly to structured WGSL; and
-4. reparses the exact generated WGSL subset with its in-tree validator.
+3. maps structured Kernel IR directly to structured WGSL;
+4. emits direct or standalone view projection into a storage texture; and
+5. reparses the exact generated WGSL subset with its in-tree validator.
 
 Fixed resources use aligned wrappers; runtime tails retain natural stride.
 Plain values are reconstructed from one uniform block at entry. Values become
@@ -378,6 +409,11 @@ SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
 conversion prevents padding and physical bool words from entering value
 semantics.
 
+For views, the fused path rewrites the proven terminal pixel store to packed
+color output; the fallback path adds a projection entry. Both produce packed
+RGBA8 storage for the native runtime without importing browser texture
+semantics into logical IR.
+
 Tach requires Vulkan's `shaderZeroInitializeWorkgroupMemory` feature. The
 SPIR-V emitter gives every Workgroup variable an `OpConstantNull` initializer,
 so no synthetic invocation, store loop, or barrier alters the source program.
@@ -392,13 +428,21 @@ checks.
 ## 12. Bindings and documentation
 
 `src/bindings.Generate` consumes the optimized project-wide `flow.Module` and
-both executable plans. It creates schema-1 metadata with public programs and
-both target plans.
+both executable plans. It creates schema-2 metadata with public programs,
+public view flags, buffer/texture binding kinds, and both target plans,
+including each terminal view step and extent.
+
+Runtime metadata and the project description currently both use version `2`,
+but they are distinct closed protocols. Runtime metadata is embedded in
+generated JavaScript and drives execution. The project description exists only
+between the Go engine and TypeScript build/docs renderer. Consumers identify
+them by their owning boundary and full validated shape, never by the number
+alone.
 
 The Deno-first TypeScript layer consumes that checked metadata plus the project
 description and creates one ES module, one declaration module, and one package
-manifest. The ES module embeds metadata and sibling URLs for both `kernel.wgsl`
-and `kernel.spv`; it does not embed or parse shader source.
+manifest. The ES module embeds metadata and sibling URLs for both
+`kernel.wgsl.gz` and `kernel.spv`; it does not embed or parse shader source.
 
 Generated JavaScript imports only `defineModule` from
 `@depths/tach/internal`. Public applications import `tach` and `TachError` from
@@ -447,21 +491,35 @@ tach(options?)       persistent: caller invokes idle/close
 ```
 
 Generated `defineModule` consumes public programs, host layouts, two plans, and
-two shader URLs. A generated function validates public buffers and options, then
-creates an opaque `ComputeCommand`. Preparation materializes buffers,
-evaluates shapes, sizes transients, compiles referenced pipelines, and packs
-parameter blocks.
+two shader URLs. A generated function validates public buffers and options,
+then creates an opaque `ComputeCommand`, or `ComputeView` for a view
+program. Preparation materializes buffers, evaluates shapes, sizes transients
+and view output, compiles referenced pipelines, and packs parameter blocks.
 
+`prepare(first, ...rest)` compiles and validates recipes without dispatching.
 `submit(first, ...rest)` serializes submission calls, prepares commands, and
 passes host-neutral prepared commands to the selected driver in argument order.
-It does not wait for device completion.
+It does not wait for device completion. Submitting a view runs its terminal
+projection into driver-owned offscreen output without CPU readback.
+
+Browser `present(canvas, view)` runs the same recipe directly into the current
+same-sized WebGPU canvas texture and waits for submitted work. The wait gives a
+CPU-driven frame loop bounded backpressure instead of allowing unbounded frame
+queueing. The Vulkan driver executes views into packed scratch through
+`submit`, but rejects `present` because Tach currently owns no native surface.
 
 The shared session owns:
 
 - host values and generated codecs;
 - resident opaque driver-buffer handles;
-- buffer/command ownership and lifecycle state; and
+- buffer ownership, command recipe state, and lifecycle state; and
 - serialized submission order and deferred failures.
+
+A `ComputeBuffer` belongs to exactly one session. A recipe captures only its
+arguments and may be prepared or executed by any session that owns every
+referenced buffer. Consequently a scalar-only view recipe is owner-neutral and
+can be reused across sessions; a buffer-backed recipe is constrained by those
+buffers without acquiring separate command ownership.
 
 The WebGPU driver owns its adapter/device, WGSL fetch, shader modules,
 pipelines, bind groups, aligned uniform arena, scratch by transient color,
@@ -486,12 +544,12 @@ and all their GPU objects still close independently.
 | lexer/parser | Is source spelling and grammar valid? |
 | semantic analysis | Do declarations and expressions have valid Tach meaning? |
 | Kernel IR verifier | Are per-invocation values, places, control, and effects sound? |
-| Flow verifier | Are programs, shapes, resources, versions, and dispatches sound? |
+| Flow verifier | Are programs, shapes, resources, versions, dispatches, and terminal views sound? |
 | optimizer post-verify | Did rewrites preserve both IR contracts? |
 | backend verifier | Are physical kernels and target plans internally consistent? |
 | WGSL validator | Did Tach serialize its supported WGSL shape correctly? |
 | SPIR-V validator | Is the binary structurally, semantically, and ABI valid? |
-| generated validator | Do metadata, JS, declarations, and plans agree? |
+| generated validator | Do metadata, view contracts, JS, declarations, and plans agree? |
 | output transaction | Is the staged inventory complete, confined to this project's `build`, and replaceable as one unit? |
 | browser harness | Does Chromium WebGPU compile and execute generated modules? |
 | native harness | Do `spirv-val` and Vulkan execute target plans correctly? |
@@ -547,13 +605,16 @@ Tests mirror ownership:
   challenge exact package shape and build/docs transaction rollback;
 - SPIR-V mutation tests corrupt valid modules and require rejection;
 - `browser-test` builds the example project once and checks every generated
-  endpoint through its exact generated WGSL in WebGPU;
+  endpoint through its exact generated WGSL in WebGPU, including fused and
+  fallback views plus sustained CPU-selected canvas presentation;
 - `deno-test` independently builds the same example project, validates its
   SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
-  including repeated logical sessions;
+  including fused/fallback offscreen projection, owner-neutral recipes, and
+  repeated logical sessions;
 - `showcase-ts` builds one six-kernel project and runs the same host-neutral
   renderers, mathematical workloads, and physics simulations through both
-  WebGPU and Vulkan;
+  WebGPU and Vulkan; browser renderers use direct canvas presentation while
+  native renderers exercise packed view projection;
   and
 - `dupl`, `deadcode`, and `staticcheck` provide structural duplication,
   whole-program reachability, and correctness audits beyond behavioral tests.
@@ -569,8 +630,8 @@ Before adding a feature, find its first real owner:
 2. Source convenience has existing semantics: lower to existing IR.
 3. New per-invocation portable meaning: extend Kernel IR, verification,
    effects, optimization, and both emitters.
-4. New public dispatch/resource meaning: extend Flow IR, verification, target
-   plans, metadata, and both runtimes.
+4. New public dispatch, resource, or terminal-result meaning: extend Flow IR,
+   verification, target plans, metadata, and both runtimes.
 5. Target representation improvement: keep it in backend planning/emission.
 6. Byte, binding, launch, name, or lifetime change: update the single ABI
    owner and every generated/native consumer together.

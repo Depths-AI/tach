@@ -6,7 +6,12 @@ import type {
   PreparedCommand,
   PreparedResource,
 } from "./driver.ts";
-import { type TachAdapterInfo, TachError, type TachOptions } from "./api.ts";
+import {
+  type PresentationCanvas,
+  type TachAdapterInfo,
+  TachError,
+  type TachOptions,
+} from "./api.ts";
 
 type Pointer = object | null;
 type NativeFunction = (
@@ -307,6 +312,7 @@ class VulkanDriver implements Driver {
       for (const step of command.steps) {
         if (step.kind === "dispatch") module.kernels.add(step.kernel);
       }
+      if (command.view) module.kernels.add(command.view.kernel);
     }
     await Promise.all([...requested.values()].map(async (request) => {
       const module = await this.#module(request.command),
@@ -329,35 +335,71 @@ class VulkanDriver implements Driver {
       ),
       output = new Writer();
     output.u32(abi);
-    output.u32(commands.length);
+    output.u32(
+      commands.filter((command) => command.steps.length > 0).length +
+        commands.filter((command) => command.view).length,
+    );
     commands.forEach((command, commandIndex) => {
-      output.u32(modules[commandIndex]!);
-      output.u32(command.repeat);
-      output.u32(command.scratch.size);
-      for (const [color, bytes] of command.scratch) {
-        output.u32(color);
-        output.u32(bytes);
-      }
-      output.u32(command.steps.length);
-      for (const step of command.steps) {
-        output.u32(step.kind === "dispatch" ? 0 : 1);
-        if (step.kind === "barrier") {
-          output.u32(step.resources.length);
-          for (const value of step.resources) resource(output, value);
-          continue;
+      if (command.steps.length > 0) {
+        output.u32(modules[commandIndex]!);
+        output.u32(command.repeat);
+        output.u32(command.scratch.size);
+        for (const [color, bytes] of command.scratch) {
+          output.u32(color);
+          output.u32(bytes);
         }
-        output.u32(step.kernel);
-        for (const group of step.groups) output.u32(group);
-        output.u32(step.resources.length);
-        for (const value of step.resources) {
+        output.u32(command.steps.length);
+        for (const step of command.steps) {
+          output.u32(step.kind === "dispatch" ? 0 : 1);
+          if (step.kind === "barrier") {
+            output.u32(step.resources.length);
+            for (const value of step.resources) resource(output, value);
+            continue;
+          }
+          output.u32(step.kernel);
+          for (const group of step.groups) output.u32(group);
+          output.u32(step.resources.length);
+          for (const value of step.resources) {
+            output.u32(value.binding);
+            resource(output, value);
+            output.u32(value.byteSize);
+          }
+          output.raw(step.parameters ?? new Uint8Array());
+        }
+        output.u32(command.repeatBarrier?.length ?? 0);
+        for (const value of command.repeatBarrier ?? []) {
+          resource(output, value);
+        }
+      }
+      if (command.view) {
+        const view = command.view,
+          bytes = view.width * view.height * 4,
+          resources = [
+            ...view.resources,
+            {
+              binding: view.output,
+              scratch: view.outputColor,
+              byteSize: bytes,
+            },
+          ].sort((left, right) => left.binding - right.binding);
+        output.u32(modules[commandIndex]!);
+        output.u32(1);
+        output.u32(1);
+        output.u32(view.outputColor);
+        output.u32(bytes);
+        output.u32(1);
+        output.u32(0);
+        output.u32(view.kernel);
+        for (const group of view.groups) output.u32(group);
+        output.u32(resources.length);
+        for (const value of resources) {
           output.u32(value.binding);
           resource(output, value);
           output.u32(value.byteSize);
         }
-        output.raw(step.parameters ?? new Uint8Array());
+        output.raw(view.parameters ?? new Uint8Array());
+        output.u32(0);
       }
-      output.u32(command.repeatBarrier?.length ?? 0);
-      for (const value of command.repeatBarrier ?? []) resource(output, value);
     });
     const batch = output.finish(),
       submission = new BigUint64Array(1),
@@ -370,6 +412,16 @@ class VulkanDriver implements Driver {
       );
     this.#check("submit", status);
     this.#pending.add(submission[0]!);
+  }
+
+  present(_canvas: PresentationCanvas, _view: PreparedCommand): Promise<void> {
+    return Promise.reject(
+      new TachError(
+        "vulkan-unavailable",
+        "Vulkan presentation requires a native surface",
+        { operation: "present" },
+      ),
+    );
   }
 
   async idle(): Promise<void> {

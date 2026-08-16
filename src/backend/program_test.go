@@ -56,3 +56,56 @@ export function graph(data: buffer<uint32[]>) { const count = data.length; run f
 		t.Fatalf("plan = %#v", plan)
 	}
 }
+
+func TestViewProjectionIsBackendSpecific(t *testing.T) {
+	const source = `
+function paint[i](pixels: buffer<float32x4[]>) {
+  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+}
+export function image(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels) over pixels.length;
+  return view(pixels, width, height);
+}`
+	web := lower(t, source, backend.WebProfile)
+	spirv := lower(t, source, backend.SPIRVProfile)
+	for _, executable := range []*backend.Executable{web, spirv} {
+		plan := executable.Programs[0]
+		if plan.View == nil || !plan.View.Fused || len(executable.PhysicalKernels) != 1 || len(plan.Steps) != 0 || len(plan.Transients) != 0 || plan.View.Step.Kernel != 0 || executable.Logical.Programs[0].Shape(plan.View.Width).Op != flow.ShapeParameter || executable.Logical.Programs[0].Shape(plan.View.Height).Op != flow.ShapeParameter {
+			t.Fatalf("view plan = %#v; kernels = %#v", plan.View, executable.PhysicalKernels)
+		}
+		projection := executable.PhysicalKernels[plan.View.Step.Kernel]
+		if !projection.FusedView || projection.Projection || len(projection.Bindings) != 1 || plan.View.Output != 0 {
+			t.Fatalf("projection kernel = %#v", projection)
+		}
+	}
+	if !web.PhysicalKernels[0].Bindings[0].Texture || spirv.PhysicalKernels[0].Bindings[0].Texture {
+		t.Fatalf("web view = %#v; SPIR-V view = %#v", web.Programs[0].View, spirv.Programs[0].View)
+	}
+}
+
+func TestExternalViewKeepsGeneralProjector(t *testing.T) {
+	executable := lower(t, `
+function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32): view<srgb8> {
+  run paint(pixels) over width * height;
+  return view(pixels, width, height);
+}`, backend.WebProfile)
+	plan := executable.Programs[0]
+	if plan.View == nil || plan.View.Fused || len(plan.Steps) != 1 || len(executable.PhysicalKernels) != 2 || !executable.PhysicalKernels[plan.View.Step.Kernel].Projection || len(plan.View.Step.Resources) != 1 || plan.View.Step.Resources[0].Kind != backend.ExternalSource {
+		t.Fatalf("view plan = %#v; kernels = %#v", plan.View, executable.PhysicalKernels)
+	}
+}
+
+func TestConstantExtentViewStillFuses(t *testing.T) {
+	executable := lower(t, `
+function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+export function image(): view<srgb8> {
+  const pixels = transient<float32x4>(4);
+  run paint(pixels) over pixels.length;
+  return view(pixels, 2, 2);
+}`, backend.SPIRVProfile)
+	if view := executable.Programs[0].View; view == nil || !view.Fused {
+		t.Fatalf("view plan = %#v", view)
+	}
+}

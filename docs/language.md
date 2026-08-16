@@ -6,9 +6,9 @@ memory, dispatch, and synchronization have deliberately narrower portable
 rules.
 
 This guide starts with the one-function path inside a project, then defines
-imports, explicit multi-stage programs, the value language, parallel memory,
-formatting, and the complete grammar. The compiler accepts only what this
-document assigns a meaning.
+imports, explicit multi-stage programs, display views, the value language,
+parallel memory, formatting, and the complete grammar. The compiler accepts
+only what this document assigns a meaning.
 
 ## 1. The one-function path
 
@@ -40,6 +40,18 @@ An exported indexed function is baseline syntax sugar. It simultaneously
 defines an indexed GPU stage and a public program that dispatches that stage
 once over the host-provided launch size. No orchestration syntax is required
 for the common one-kernel case.
+
+The important mental model is "write one element, launch many elements." Each
+GPU invocation receives its own coordinate (`i` here), but every invocation
+runs the same stage. Invocations are not executed in source order. Correct
+code gives each invocation distinct output, or deliberately coordinates shared
+writes with atomics or workgroup synchronization.
+
+A buffer is persistent GPU storage, not a TypeScript array copied back after
+each stage. The host creates its handle once, constructs one or more generated
+recipes, and submits them. Reading is an explicit synchronization and transfer
+boundary. Keeping intermediate state in buffers or program-local transients is
+what allows the GPU to do sustained work without repeated CPU traffic.
 
 ## 2. Projects, modules, imports, and function roles
 
@@ -186,8 +198,10 @@ public program of the same name.
 ### Public programs
 
 An exported function without coordinates is host-callable orchestration. Its
-body contains only untyped `const` declarations and `run` statements. It must
-have at least one external buffer parameter and at least one `run`.
+body contains untyped `const` declarations and `run` statements, plus a final
+view return when its result is `view<srgb8>`. Every program has at least one
+`run`. An ordinary program also has at least one external buffer parameter; a
+view program may instead create its complete image in a transient.
 
 ```tach
 function multiply[i](
@@ -220,13 +234,65 @@ export function transform(
 ```
 
 Program declarations do not execute per invocation and have no ordinary
-statements, mutable locals, loops, returns, or `@workgroup`. They describe a
+statements, mutable locals, loops, or `@workgroup`. Apart from the required
+final return of a declared view, they contain no returns. They describe a
 checked dispatch graph; indexed stages contain the actual per-invocation code.
 
 Every struct type is generated into the TypeScript API. An unexported indexed
 stage is Tach-internal; an exported indexed stage and an exported unindexed
 program are host endpoints. An explicit orchestration program is not callable
 from Tach and cannot be used as a `run` target.
+
+### Display views
+
+`view<srgb8>` is the one display result type. It belongs only to an exported,
+unindexed program and is constructed by the program's final statement:
+
+```tach
+function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
+  if (i < pixels.length) {
+    const x = i % width;
+    const y = i / width;
+    pixels[i] = float32x4(
+      float32(x) / float32(width),
+      float32(y) / float32(height),
+      0.25,
+      1,
+    );
+  }
+}
+
+export function gradient(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels, width, height) over pixels.length;
+  return view(pixels, width, height);
+}
+```
+
+The first `view(...)` argument directly names a runtime
+`buffer<float32x4[]>` or transient containing linear RGBA. Width and height
+are checked program shapes. The source resource's exact final version must be
+defined by the preceding dispatches. At preparation, both dimensions and their
+product must be positive and the source must contain at least
+`width * height` pixels; any extra source elements are not displayed. Target
+lowering applies the IEC sRGB
+transfer to RGB, clamps alpha to `[0, 1]`, and writes RGBA8 storage; source
+does not pack bytes or name a WebGPU texture, Vulkan image, canvas, or native
+surface.
+
+The generated function returns `ComputeView`, a subtype of `ComputeCommand`.
+Submitting it performs the full program and backend projection without a CPU
+readback. In a browser, `gpu.present(canvas, view)` executes the same recipe
+directly into a same-sized WebGPU canvas and waits for completion to provide
+frame backpressure. The current Deno/Vulkan host executes views into native
+packed scratch through `submit`; it has no native surface and therefore
+rejects `present`.
+
+View programs are ordinary recipes. They may take session-owned public
+buffers, or only scalar/struct values and internal transients. The latter form
+is naturally reusable by any compatible Tach session because it captures no
+buffer owner. A view cannot use command `repeat`; construct and present the
+chosen recipe once per frame instead.
 
 ## 3. Structured documentation and comments
 
@@ -261,12 +327,12 @@ Every `@docs` requires exactly one non-empty `summary`.
 | type | `field(name, "...")` |
 | any function | `param(name, "...")` |
 | indexed function | `coordinate(name, "...")` |
-| value-returning helper | `returns("...")` |
+| value-returning helper or view program | `returns("...")` |
 
 Each optional clause may occur once per referenced member. Names are unquoted
 identifiers and must resolve in that declaration; unknown and duplicate names
-are compile errors. A void helper, indexed stage, or public program cannot use
-`returns`.
+are compile errors. A void helper, indexed stage, or ordinary public program
+cannot use `returns`; a `view<srgb8>` program can and should describe its view.
 
 Documentation on a public program describes its host API. Documentation on a
 private stage describes the internal indexed operation. An exported indexed
@@ -369,7 +435,8 @@ Shape arithmetic is evaluated by the host runtime with checked `uint32`
 results. Underflow, overflow, division by zero, and a zero dispatch dimension
 are runtime errors.
 
-Program `const` declarations either name shapes or allocate transient storage:
+Program `const` declarations either name shapes or allocate transient storage.
+The same shapes also define view width and height:
 
 ```tach
 function write[i](scratch: buffer<float32[]>) {
@@ -401,6 +468,11 @@ value argument may be a matching public value or nested field, a supported
 literal, or a checked shape when the formal is `uint32`.
 
 Every `run` contributes one ordered physical dispatch to the program plan.
+For a view program, the final `return view(...)` records a terminal projection
+after those dispatches. When the final dispatch completely writes one
+transient pixel per output pixel, target planning can fold projection into
+that dispatch. Otherwise it appends a target-owned projection kernel. This
+changes physical work, not source meaning.
 
 ## 6. Data types
 
@@ -416,6 +488,11 @@ Every `run` contributes one ordered physical dispatch to the program plan.
 
 There is no `number`: host and shader code must agree on width and
 interpretation.
+
+`view<srgb8>` is a program result contract, not a value available to helpers,
+stages, buffers, structs, locals, or expressions other than the final
+`return view(...)`. `srgb8` is the sole format and is likewise not an ordinary
+source type.
 
 Numeric vectors have two, three, or four lanes:
 
@@ -791,6 +868,7 @@ block comments, cross-project imports, named imports, re-exports, deeper source
 trees, or provider extensions.
 
 Public programs express multiple dispatches and temporary resources, but not
-arbitrary host control flow. These boundaries keep one source meaning valid
-for WebGPU/WGSL and Vulkan/SPIR-V and leave target adaptation inside the
-compiler.
+arbitrary host control flow. Views express linear floating-point color and a
+checked extent, not a provider presentation object. These boundaries keep one
+source meaning valid for WebGPU/WGSL and Vulkan/SPIR-V and leave target
+adaptation inside the compiler.

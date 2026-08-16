@@ -11,7 +11,8 @@ TypeScript, WGSL, GLSL, CUDA, or native Vulkan behavior where Tach defines a
 narrower rule. Prefer the simplest Tach form that expresses the application:
 an exported indexed function for one dispatch, private indexed stages plus one
 exported program for ordered multi-dispatch work, and helpers for reusable pure
-value computation.
+value computation. Use a `view<srgb8>` program when the result is a displayable
+frame; do not route pixels through CPU readback merely to draw them.
 
 ## 1. Operational model
 
@@ -21,7 +22,8 @@ Tach is a small typed language for portable GPU compute. Tach source describes:
 - one-, two-, or three-dimensional indexed GPU work;
 - pure helper computation;
 - workgroup-local memory, atomics, and synchronization; and
-- ordered programs made from indexed stages and transient GPU storage.
+- ordered programs made from indexed stages and transient GPU storage; and
+- terminal display views from linear floating-point RGBA.
 
 The compiler owns shader entry points, bindings, padding, byte layout, launch
 geometry, target validation, generated TypeScript signatures, and the physical
@@ -35,10 +37,10 @@ boundary:
 ```text
 Tach project                         TypeScript application
 -----------                          ----------------------
-<module>/<kernel>.tach   build ->   one generated command facade
+<module>/<kernel>.tach   build ->   one generated recipe facade
 tach.json                            @depths/tach runtime
-                                     browser -> WebGPU/WGSL
-                                     Deno -> Vulkan/SPIR-V
+                                     browser -> WebGPU/WGSL + canvas present
+                                     Deno -> Vulkan/SPIR-V + offscreen views
 ```
 
 Keep responsibilities on the correct side:
@@ -47,14 +49,15 @@ Keep responsibilities on the correct side:
 - TypeScript owns user interaction, files, networking, clocks, frame loops,
   error presentation, and decisions that require ordinary host control flow.
 - Generated functions construct opaque commands; they do not execute work.
-- A Tach session owns GPU resources and submits commands in order.
+- A Tach session owns GPU resources and executes recipes in order.
 
 The minimum runtime sequence is always:
 
 ```text
 gpu.buffer(hostValue)       -> session-owned ComputeBuffer
-generatedProgram(arguments) -> opaque ComputeCommand
+generatedProgram(arguments) -> opaque ComputeCommand or ComputeView recipe
 gpu.submit(command)         -> prepare and queue GPU work
+gpu.present(canvas, view)   -> browser execution, display, and backpressure
 buffer.read() / gpu.idle()  -> wait for completion when required
 ```
 
@@ -115,9 +118,9 @@ npx tach check
 npx tach build
 ```
 
-The build creates `build/index.js`, `build/index.d.ts`, cohesive
-`build/kernel.wgsl` and `build/kernel.spv`, a generated package manifest, and
-generated Markdown.
+The build creates `build/index.js`, `build/index.d.ts`, cohesive compressed
+`build/kernel.wgsl.gz` and `build/kernel.spv`, a generated package manifest,
+and generated Markdown.
 Use the runtime and generated project as separate imports:
 
 ```ts
@@ -338,7 +341,7 @@ this file imports that name's owner directly.
 An import exposes every type, helper, and indexed stage in its target file to
 Tach source. The `export` keyword does not control this visibility. `export`
 only controls whether a function becomes a generated JavaScript/TypeScript
-command constructor.
+recipe constructor.
 
 Declaration order within a file is irrelevant. A declaration may refer to a
 later visible type or helper. This does not permit recursion: recursive value
@@ -477,7 +480,7 @@ Allowed clauses depend on attachment context:
 | type | `field(name, "...")` |
 | any function | `param(name, "...")` |
 | indexed function | `coordinate(name, "...")` |
-| value-returning helper | `returns("...")` |
+| value-returning helper or view program | `returns("...")` |
 
 File documentation is the first construct and ends with a semicolon:
 
@@ -506,7 +509,8 @@ type Particle = {
 Names passed to `field`, `param`, and `coordinate` are unquoted identifiers.
 They must resolve in the attached declaration. Unknown names and duplicate
 clauses for one member are compile errors. `returns` is invalid on a void
-helper, indexed stage, or orchestration program.
+helper, indexed stage, or ordinary orchestration program. A
+`view<srgb8>` program may use it to describe the display result.
 
 Documentation on a public program describes its host API; documentation on a
 private stage describes indexed work. An exported indexed function represents
@@ -522,7 +526,7 @@ state units, range, and relationship to dispatch shape where relevant.
 
 Structured source documentation has two application-visible outputs:
 
-- generated `index.d.ts` JSDoc on public types and command constructors; and
+- generated `index.d.ts` JSDoc on public types and recipe constructors; and
 - generated Markdown in `build/README.md` and `build/docs/<module>.md`.
 
 The root README uses `tach.json.docs.title` and `tach.json.docs.summary` and
@@ -577,16 +581,16 @@ Tach has four source spellings and three semantic roles:
 |---|---|---|
 | `function helper(...)` | pure per-invocation value helper | none |
 | `function stage[i](...)` | private indexed GPU stage | none |
-| `export function kernel[i](...)` | indexed stage plus one-dispatch program | command constructor |
-| `export function program(...)` | explicit ordered orchestration | command constructor |
+| `export function kernel[i](...)` | indexed stage plus one-dispatch program | recipe constructor |
+| `export function program(...)` | explicit ordered orchestration, optionally returning a view | command or view constructor |
 
 Choose by required work:
 
 1. If one indexed dispatch solves the operation, use an exported indexed
    function.
 2. If repeated value computation improves clarity, add private helpers.
-3. If the operation needs multiple dispatches or scratch storage, write private
-   indexed stages and one exported unindexed program.
+3. If the operation needs multiple dispatches, scratch storage, or a display
+   view, write private indexed stages and one exported unindexed program.
 4. Do not export a private implementation stage merely to call it from another
    Tach file. Direct imports already provide Tach visibility.
 
@@ -721,24 +725,74 @@ export function transform(
 ```
 
 An orchestration program body contains only untyped `const` declarations and
-`run` statements. It has at least one external buffer parameter and at least
-one `run`. It cannot contain ordinary mutable locals, `if`, loops, returns,
-barriers, `@workgroup`, or arbitrary host logic.
+`run` statements, plus a final return when it declares `view<srgb8>`. Every
+program has at least one `run`. An ordinary program has at least one external
+buffer parameter; a view program may use only plain parameters and a transient
+frame. It cannot contain ordinary mutable locals, `if`, loops, barriers,
+`@workgroup`, arbitrary host logic, or any other return.
 
 Each `run` targets a private indexed stage and creates one ordered dispatch.
 An explicit program cannot be called from Tach, cannot be a `run` target, and
 does not execute once per GPU invocation. It describes the dispatch plan that
 the generated host command will execute.
 
+### View programs
+
+`view<srgb8>` is the only public display result. It is valid only on an
+exported unindexed program, and the last statement must be exactly the
+form `return view(pixels, width, height);`:
+
+```tach
+function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
+  if (i < pixels.length) {
+    const x = i % width;
+    const y = i / width;
+    pixels[i] = float32x4(
+      float32(x) / float32(width),
+      float32(y) / float32(height),
+      0.25,
+      1,
+    );
+  }
+}
+
+export function gradient(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels, width, height) over pixels.length;
+  return view(pixels, width, height);
+}
+```
+
+`pixels` directly names a public buffer or transient of runtime
+`float32x4[]`. Width and height are positive checked shape expressions. Their
+product cannot exceed the available pixel count. The source resource's exact
+final version must be defined, so a transient frame needs a preceding complete
+write.
+
+Pixels are linear RGBA. Backend lowering clamps RGB, applies the IEC sRGB
+transfer, clamps alpha, and emits RGBA8. Tach source never packs bytes or names
+a texture, surface, canvas, WebGPU object, or Vulkan object. Target planning
+may fold projection into a proven final one-pixel-per-index dispatch and remove
+the full-frame float transient; otherwise it adds a projection stage. This is
+an implementation choice with identical source and host behavior.
+
+The generated function returns `ComputeView`, which extends `ComputeCommand`.
+Use `submit(view)` for offscreen projection on either host. Use
+`present(canvas, view)` for direct browser display and completion-backed frame
+backpressure. Deno/Vulkan has no native presentation surface and rejects
+`present`; it still executes the same view through `submit`. View recipes
+reject `repeat`; construct the CPU-selected frame recipe once per frame.
+
 ## 19. Export and generated API rules
 
-`export` has exactly one role: it gates host command constructors. Every named
+`export` has exactly one role: it gates host recipe constructors. Every named
 struct type is represented in generated TypeScript regardless of whether a
 public function uses it.
 
 There is no `export type` form. There is no default export. There are no
 re-exports. The generated package has one entry point containing all public
-types and exported functions from the complete Tach project.
+types and exported functions from the complete Tach project. Ordinary exports
+return `ComputeCommand`; view exports return `ComputeView`.
 
 An exported source parameter name becomes a generated TypeScript parameter
 name. Avoid names likely to confuse application code. Compiler-generated final
@@ -869,8 +923,8 @@ is a host API error and a TypeScript type error.
 
 ## 24. Shape expressions in programs
 
-Each explicit-program `run` domain is a checked `uint32` shape expression.
-It may use:
+Each explicit-program `run` domain and each view width/height is a checked
+`uint32` shape expression. It may use:
 
 - a `uint32` literal;
 - a public `uint32` parameter;
@@ -957,8 +1011,10 @@ this is not a reason to split one logical scratch value into aliases. Express
 the real dataflow and let the runtime manage physical scratch.
 
 Every source `run` remains an ordered physical dispatch. Do not assume distinct
-stages are fused. If a value can remain a local inside one indexed stage, that
-is materially different from writing it to a transient between dispatches.
+stages are fused. Terminal view projection alone may be folded into its final
+writer under an exact proof; that does not fuse two source `run` statements.
+If a value can remain a local inside one indexed stage, that is materially
+different from writing it to a transient between dispatches.
 
 ## 26. Scalar types
 
@@ -975,6 +1031,11 @@ Tach scalar types are explicit:
 There is no Tach `number`, `f64`, `i64`, arbitrary precision integer, string,
 null, undefined, optional value, enum, union, tuple type, class, interface, or
 generic user-defined type.
+
+`view<srgb8>` is a terminal public-program contract, not a constructible value
+type. It cannot be used for a local, helper result, parameter, field, buffer,
+array, or indexed-stage result. `srgb8` is the only view format and is not an
+ordinary type on its own.
 
 Use `uint32` for coordinates, counts, lengths, indices, masks whose ordering is
 unsigned, and program shapes. Use `int32` for signed integer arithmetic. Use
@@ -1289,8 +1350,8 @@ const cell = uint32(floor(position));
 ```
 
 Integer-to-integer conversion preserves the low 32-bit pattern. Therefore
-`uint32(-1)` is a bit-pattern conversion, not a range clamp. Floating-to-
-integer behavior should be used only with values whose range and rounding have
+`uint32(-1)` is a bit-pattern conversion, not a range clamp. Conversion from
+floating point to integer should be used only with values whose range and rounding have
 been made explicit by the algorithm.
 
 Vector constructors build vectors; scalar conversion constructors convert
@@ -1742,7 +1803,7 @@ build/
   package.json
   index.js
   index.d.ts
-  kernel.wgsl
+  kernel.wgsl.gz
   kernel.spv
   README.md
   docs/
@@ -1751,8 +1812,9 @@ build/
 
 There is one `docs/<module>.md` for each discovered module. `index.js` and
 `index.d.ts` expose all project types and exported functions through one entry
-point. `kernel.wgsl` and the SPIR-V 1.6 `kernel.spv` contain corresponding
-physical stages for WebGPU and Vulkan 1.3.
+point. Deterministic gzip `kernel.wgsl.gz` and SPIR-V 1.6 `kernel.spv` contain
+corresponding physical stages for WebGPU and Vulkan 1.3. The browser runtime
+decompresses WGSL before shader-module creation.
 
 `--verbose` additionally writes `diagnostics/flow.ir`, logical and per-target
 Kernel IR, both plan JSON files, private project/runtime JSON descriptions, and
@@ -1791,7 +1853,7 @@ directly when it uses the public runtime.
 
 Never import `@depths/tach/internal`. That subpath exists only for code emitted
 by the matching Tach compiler. Do not load either shader manually or
-reconstruct bindings; use generated command constructors. The same import runs
+reconstruct bindings; use generated recipe constructors. The same import runs
 through WebGPU in a browser and Tach's Vulkan runtime in Deno.
 
 ## 51. Programmatic build tooling for Deno
@@ -1872,6 +1934,20 @@ declare function transform(
 Always inspect generated `index.d.ts` rather than guessing the exact host shape
 for nested structs, runtime tails, or vectors.
 
+For an exported view program with source signature
+`frame(params: FrameParams): view<srgb8>`, the declaration returns
+`ComputeView` rather than `ComputeCommand`:
+
+```ts
+declare function frame(
+  params: FrameParams,
+  options?: CommandOptions,
+): ComputeView;
+```
+
+`ComputeView` is assignable to `ComputeCommand`, so the recipe can be prepared
+or submitted; its extra brand is what permits browser presentation.
+
 ## 53. Runtime session choices
 
 Import the public runtime from the package root:
@@ -1898,6 +1974,10 @@ const result = await tach(async (gpu) => {
 The callback form opens a session, runs the callback, waits for queued work,
 returns the callback result, and closes owned resources. Return host data, not
 a `ComputeBuffer`; any buffer belongs to the closing session.
+
+Generated recipes are not owned by the session. A scalar-only recipe can be
+reused in separate scoped jobs. A recipe referencing a `ComputeBuffer` can run
+only in that buffer's owner, which the session checks before GPU work.
 
 ### Persistent session
 
@@ -1940,12 +2020,31 @@ interface TachAdapterInfo {
 interface Tach {
   readonly adapter: TachAdapterInfo;
   buffer<T>(value: T): ComputeBuffer<T>;
+  prepare(
+    first: ComputeCommand,
+    ...rest: readonly ComputeCommand[]
+  ): Promise<void>;
   submit(
     first: ComputeCommand,
     ...rest: readonly ComputeCommand[]
   ): Promise<void>;
+  present(canvas: PresentationCanvas, view: ComputeView): Promise<void>;
   idle(): Promise<void>;
   close(): void;
+}
+
+interface ComputeCommand {
+  // Opaque generated recipe.
+}
+
+interface ComputeView extends ComputeCommand {
+  // Opaque recipe with one terminal srgb8 view.
+}
+
+interface PresentationCanvas {
+  readonly width: number;
+  readonly height: number;
+  getContext(context: "webgpu"): unknown;
 }
 
 interface ComputeBuffer<T> {
@@ -1964,6 +2063,15 @@ or Vulkan object.
 code cannot bind it manually, mix it with another session, or choose a physical
 layout. The runtime package root exports `tach`, `TachError`, and their public
 types; generated program functions come from the generated project package.
+
+`prepare` validates arguments, materializes and uploads referenced buffers,
+allocates required scratch, and compiles backend pipelines, but does not
+dispatch. Use it only when eager warmup is useful; `submit` and
+`present` prepare automatically. `present` is browser-only, requires canvas
+dimensions exactly equal to the view extent, executes the complete recipe,
+writes the current WebGPU canvas texture, and waits for that frame. Deno
+reports a structured `vulkan-unavailable` error because the current native
+host has no presentation surface.
 
 ## 55. Buffer creation and materialization
 
@@ -2011,7 +2119,8 @@ command directly.
 
 ## 57. Command construction
 
-Calling a generated function creates an opaque `ComputeCommand`:
+Calling a generated function creates an opaque recipe. Ordinary
+programs return `ComputeCommand`; view programs return `ComputeView`:
 
 ```ts
 const command = scale(values, 2);
@@ -2024,8 +2133,8 @@ need. It does not submit or execute GPU work. Execute only through:
 await gpu.submit(command);
 ```
 
-Generated command construction checks buffer-handle shape, ownership when
-known, non-aliasing, options, and plain values that can be packed immediately.
+Generated recipe construction checks buffer-handle shape, non-aliasing,
+options, and plain values that can be packed immediately.
 Buffer arguments remain live handles. Object and array value arguments are
 retained until command preparation, so do not mutate them between construction
 and submission:
@@ -2038,8 +2147,10 @@ await gpu.submit(command);
 ```
 
 Accidentally writing `await scale(...)` throws a targeted error rather than
-silently pretending the command executed. A command belongs to the session
-that prepares it and cannot be submitted through another session.
+silently pretending the recipe executed. A recipe does not belong to a
+session. At `prepare`, `submit`, or `present`, the executing session requires
+ownership of every buffer captured by that recipe. A scalar-only recipe has no
+such owner constraint and may be reused across sessions.
 
 ## 58. Launch and command options
 
@@ -2054,6 +2165,8 @@ interface CommandOptions {
 `repeat` is a positive integer in the supported unsigned range and defaults to
 `1`. It repeats the complete public program. For a multi-stage program, that
 means the entire ordered sequence repeats, not each stage independently.
+View recipes reject any repeat other than `1`; present the selected recipe
+once per frame.
 
 Exported indexed shorthand also supports:
 
@@ -2105,9 +2218,28 @@ unit: it reduces host submission overhead and makes ordering obvious.
 does not wait for the GPU to finish. This is intentional and permits the CPU to
 continue without a synchronization stall.
 
-Do not pass an empty command list, a promise, a raw GPU command, a command from
-another session, or an object imitating `ComputeCommand`. Only generated
-commands are valid.
+A `ComputeView` remains a command, so `submit(view)` executes all source stages
+and terminal color projection on both hosts. WebGPU targets a reusable
+offscreen texture; Vulkan targets reusable packed scratch. Neither path copies
+the frame to CPU memory. Submission is useful for native computation, warmup,
+or offscreen work, but it does not draw a browser canvas.
+
+For browser display:
+
+```ts
+await gpu.present(canvas, frame(params));
+```
+
+`present` accepts exactly one `ComputeView`, checks that canvas and view extents
+match, serializes with earlier session work, and waits for the submitted frame.
+That final wait is deliberate backpressure: a CPU-driven animation can choose
+a different generated view recipe each frame without queuing frames without
+bound. The view writes directly to the current WebGPU texture; no
+`buffer.read()`, CPU RGBA conversion, `putImageData`, or upload is involved.
+
+Do not pass an empty command list, a promise, a raw GPU command, a recipe whose
+buffers belong to another session, or an object imitating `ComputeCommand`.
+Only generated recipes are valid.
 
 ## 60. Completion boundaries
 
@@ -2115,6 +2247,7 @@ Use a completion boundary only when the application needs one:
 
 - `await gpu.idle()` waits for all earlier work in the session.
 - `await buffer.read()` waits for earlier work and performs readback.
+- `await gpu.present(...)` waits for the displayed browser frame.
 - returning from `tach(async gpu => ...)` waits before session closure.
 
 `gpu.close()` is synchronous and idempotent teardown. In a persistent session,
@@ -2201,6 +2334,12 @@ reuses resident resources. Therefore a meaningful hot-path design should:
 6. avoid `read()` and `idle()` until the CPU needs a result; and
 7. include realistic data sizes and useful work when benchmarking.
 
+For display loops, return `view<srgb8>` and call `present` instead of reading a
+float frame to the CPU, converting it, and uploading it again. Keep only
+interaction and frame-recipe selection on the CPU. `present` supplies the
+necessary completion-backed backpressure, so do not add a second `idle()` per
+frame.
+
 Do not infer GPU throughput from a scoped job that includes adapter creation,
 pipeline compilation, upload, synchronization, and readback. Those costs may
 matter for a one-shot application, but they answer a different question from
@@ -2222,6 +2361,8 @@ cost. Before writing a kernel, classify each value:
 | large input or evolving state | persistent `ComputeBuffer` |
 | program-only intermediate | `transient<T>` |
 | final result needed by CPU | buffer followed by one readback |
+| final image needed by browser display | `view<srgb8>` followed by `present` |
+| final image needed only offscreen/native | `view<srgb8>` followed by `submit` |
 | intermediate used only by another kernel | resident buffer, no readback |
 
 Avoid uploading an entire large state every dispatch. Avoid reading it back
@@ -2255,8 +2396,8 @@ extent representable. Bounds-checking the final buffer access does not repair an
 index that overflowed before the comparison.
 
 `float32` has about seven decimal digits of precision and a smaller range than
-the double-precision arithmetic normally performed by JavaScript. Guard domain-
-sensitive operations when inputs can be exceptional: `sqrt` and `rsqrt` need a
+the double-precision arithmetic normally performed by JavaScript. Guard
+domain-sensitive operations when inputs can be exceptional: `sqrt` and `rsqrt` need a
 non-negative domain, logarithms need positive inputs, division needs a nonzero
 denominator, and `normalize` needs a policy for zero-length vectors. Tach does
 not provide a magic finite-value mode or implicit clamp.
@@ -2324,6 +2465,13 @@ or supplying the wrong launch rank. Do not create vanity tests for syntax the
 compiler already rejects unless the application wraps and translates that
 diagnostic.
 
+For views, exercise a scalar-only transient frame and a caller-owned pixel
+buffer. The former covers terminal fusion and owner-neutral recipe reuse; the
+latter covers standalone projection and buffer ownership. Use unequal extents,
+verify the source has at least `width * height` pixels, compare the displayed
+canvas to expected output in a real browser, submit native views without
+readback in the hot path, and test extent mismatch plus non-view rejection.
+
 ## 66. Measuring Tach applications
 
 Name the measurement before collecting it. Four useful but different numbers
@@ -2382,6 +2530,13 @@ not GPU execution versus a TypeScript loop or cold setup. Report raw samples or
 distribution statistics; do not turn a noisy microbenchmark into a pass/fail
 claim.
 
+For a displayed browser frame, `await gpu.present(canvas, view)` is already a
+completion boundary and measures recipe preparation, dispatch, projection,
+submission, and completion. Do not append `idle()`. Compare it with another
+GPU-resident presentation path, not a CPU readback path unless transfer cost is
+the explicit question. On Vulkan, time `submit(view)` through `idle()` because
+native presentation is not part of the current API.
+
 ## 67. Package integration and distribution
 
 The Tach source project and consuming npm project may share a repository without
@@ -2426,15 +2581,23 @@ per-host packages.
 
 ## 68. Unified browser and Deno host boundary
 
-`tach build` emits one package containing `index.js`, `index.d.ts`, WGSL, and
-SPIR-V 1.6. The facade embeds both executable plans and URLs to the two sibling
-shader files. There is no target flag and no separate server facade.
+`tach build` emits one package containing `index.js`, `index.d.ts`, compressed
+WGSL, and SPIR-V 1.6. The facade embeds both executable plans and URLs to the
+two sibling shader files. There is no target flag and no separate server
+facade.
 
 The managed `@depths/tach` API detects the host. A browser uses WebGPU and WGSL;
 Deno uses Tach's packaged Vulkan 1.3 runtime and SPIR-V. Both consume identical
-commands, buffers, host layouts, program ordering, and lifecycle rules. Tach
+recipes, buffers, host layouts, program ordering, views, and lifecycle rules.
+Tach
 source and application calls therefore contain no Vulkan descriptors, WebGPU
 objects, target conditionals, or provider-specific branches.
+
+Execution is unified; presentation capability is explicit. Browsers can call
+`present` because a WebGPU canvas is available. Deno can submit the same view
+for offscreen packed output but has no Tach-owned Vulkan surface. This is one
+view language and ABI with distinct host capabilities, not two generated
+facades or source paths.
 
 The Vulkan host requires an x86-64 Windows or Linux runtime, Vulkan API 1.3,
 robust buffer access, Synchronization2, and zero-initialized workgroup memory.
@@ -2487,50 +2650,71 @@ Pass `{ size: logicalCount }` if only a prefix should execute.
 
 ## 70. Pattern: two-dimensional image work
 
-Use two coordinates and an explicit logical size. Keep row-major mapping and
-edge conditions visible:
+Represent the image extent explicitly, keep row-major mapping visible, and
+return a view when the result is for display. A flattened final stage gives
+each invocation one complete pixel and enables terminal projection fusion:
 
 ```tach
 @docs(
   title("Image gradient"),
-  summary("Writes a normalized procedural color into a flat RGBA image."),
+  summary("Produces a normalized procedural display view."),
 );
 
 @docs(
-  summary("Shades one output pixel."),
-  coordinate(x, "Horizontal pixel coordinate."),
-  coordinate(y, "Vertical pixel coordinate."),
-  param(pixels, "Row-major RGBA output."),
-  param(width, "Image width in pixels."),
-  param(height, "Image height in pixels."),
+  summary("Describes the image extent."),
+  field(width, "Image width in pixels."),
+  field(height, "Image height in pixels."),
 )
-export function imageGradient[x, y](
-  pixels: buffer<float32x4[]>,
+type ImageParams = {
   width: uint32,
   height: uint32,
-) {
-  if (x >= width || y >= height) {
-    return;
+};
+
+@docs(
+  summary("Shades one row-major output pixel."),
+  coordinate(i, "Linear pixel index."),
+  param(pixels, "Linear RGBA output."),
+  param(params, "Image extent."),
+)
+function shadeGradient[i](pixels: buffer<float32x4[]>, params: ImageParams) {
+  if (i < pixels.length) {
+    const x = i % params.width;
+    const y = i / params.width;
+    pixels[i] = float32x4(
+      float32(x) / float32(params.width),
+      float32(y) / float32(params.height),
+      0.25,
+      1,
+    );
   }
-  const index = y * width + x;
-  pixels[index] = float32x4(
-    float32(x) / float32(width),
-    float32(y) / float32(height),
-    0.25,
-    1,
-  );
+}
+
+@docs(
+  summary("Builds a complete display-ready gradient."),
+  param(params, "Image extent."),
+  returns("The complete sRGB display view."),
+)
+export function imageGradient(params: ImageParams): view<srgb8> {
+  const pixels = transient<float32x4>(params.width * params.height);
+  run shadeGradient(pixels, params) over pixels.length;
+  return view(pixels, params.width, params.height);
 }
 ```
 
 ```ts
-await gpu.submit(
-  imageGradient(pixels, width, height, { size: [width, height] }),
-);
+await gpu.present(canvas, imageGradient({
+  width: canvas.width,
+  height: canvas.height,
+}));
 ```
 
-The generated host shape for this `float32x4[]` buffer permits a flat
-`Float32Array`; four lanes have a tight stride. Continue to follow generated
-`index.d.ts` rather than generalizing that fact to three-lane vector arrays.
+The caller allocates no frame buffer and performs no readback. The transient
+exists in the source dataflow, but the compiler can remove its physical
+full-frame allocation because the final 1D stage writes exactly one complete
+pixel at `i`, runs over the transient length, and that length equals
+`width * height`. If an algorithm already has caller-owned or multi-use float
+pixels, return that buffer instead; the same host API remains correct and a
+standalone projection is used.
 
 ## 71. Pattern: shared types and helpers across files
 
@@ -2653,8 +2837,8 @@ async function simulate(initialState: Float32Array, steps: number) {
 
 The handles remain distinct within every `simulateStep` command. Swapping
 JavaScript variables does not move GPU data. The final read is the only
-completion/readback boundary; the scoped result is host data, not a session-
-owned handle.
+completion/readback boundary; the scoped result is host data, not a
+session-owned handle.
 
 ## 74. Pattern: workgroup reduction
 
@@ -2710,7 +2894,8 @@ Classify failures in this order:
 4. Names and types: global collision, visibility, shadowing, type mismatch, or
    illegal value/storage type.
 5. Stage/program contract: wrong function role, invalid `run`, shape, transient,
-   resource alias, workgroup, or barrier control.
+   view source/extent/final return, resource alias, workgroup, or barrier
+   control.
 6. Target portability: a construct has no valid meaning for both targets.
 7. Generated package/runtime: host shape, ownership, lifecycle, or WebGPU
    failure.
@@ -2733,7 +2918,8 @@ When a command fails, inspect these facts before changing numerical code:
 - Does launch size have the exact rank and positive components?
 - Can a program shape underflow, overflow, divide by zero, or become zero?
 - Was an opaque command accidentally awaited instead of submitted?
-- Did a GPU error surface later at `read()` or `idle()`?
+- For `present`, is this a browser and does the canvas exactly match the view?
+- Did a GPU error surface later at `read()`, `idle()`, or `present()`?
 
 Use `TachError.code`, `operation`, message, and cause together. Preserve the
 failing public command name and input dimensions in application logs. Avoid
@@ -2779,6 +2965,7 @@ Do not generate Tach code that assumes any of the following exist:
 - arbitrary host control flow inside an orchestration program;
 - automatic fusion of distinct `run` stages;
 - direct access to runtime-owned `GPUBuffer` objects;
+- native Vulkan surface presentation through the current Deno runtime;
 - hand editing or partial preservation of generated `build/`; or
 - importing application APIs from `@depths/tach/internal`.
 
@@ -2865,7 +3052,9 @@ literal-field   := IDENT ":" expression
 `STRING` is usable only where documentation or import syntax permits it. The
 grammar shows shape, not permission: for example `transient` and `run` are
 restricted to public orchestration programs, while `shared` is restricted to
-indexed stages.
+indexed stages. The only generic public result is `view<srgb8>`, and its only
+constructor use is the final `return view(pixels, width, height)` of that
+exported unindexed program.
 
 ## 80. Application-authoring workflow for agents
 
@@ -2875,7 +3064,8 @@ When asked to add GPU work to an application, follow this sequence:
    name.
 2. Inventory existing modules, kernel identities, global declaration names,
    types, helpers, stages, and exported programs.
-3. Decide whether the operation is one dispatch or a true multi-stage program.
+3. Decide whether the operation is one dispatch, a true multi-stage program,
+   or a display view over either form.
 4. Reuse directly visible types/helpers or add the exact direct imports needed.
 5. Keep dependency edges acyclic at both file and module level.
 6. Define host data representation before choosing Tach buffer types.
@@ -2889,7 +3079,8 @@ When asked to add GPU work to an application, follow this sequence:
 13. Build the complete dual-host package.
 14. Inspect generated `index.d.ts` and update the TypeScript caller to match it.
 15. Exercise the real runtime path with representative data and explicit
-    completion only where output is consumed.
+    completion only where output is consumed; present views directly rather
+    than reading frames back.
 
 Do not start by editing generated JavaScript, TypeScript declarations, WGSL,
 SPIR-V, or Markdown.
@@ -2907,6 +3098,8 @@ Answer these questions explicitly in reasoning:
 - Does a helper improve reuse without touching memory?
 - Is device-wide sequencing necessary, requiring multiple stages?
 - Which intermediates must persist to the caller, and which are transient?
+- Is the result a display frame, and can its final writer satisfy one complete
+  `float32x4` pixel per linear index?
 - Can every `run` shape be expressed with checked public `uint32` data?
 - Does synchronization stay within a workgroup, or is another dispatch needed?
 - What exact TypeScript host shape will initialize each public buffer?
@@ -2927,7 +3120,10 @@ Before considering Tach source complete, verify:
 - Helpers use only constructible values and do not recurse.
 - Indexed stages have one to three coordinates, buffers, no value result, and
   complete bounds reasoning.
-- Explicit programs contain only shape/transient `const` and `run`.
+- Explicit programs contain only shape/transient `const`, `run`, and an
+  optional required final view return.
+- Every view source is runtime `float32x4`, fully defined, and large enough for
+  its positive width and height.
 - Every shape is checked-`uint32` safe and nonzero for valid calls.
 - Runtime arrays appear only in supported storage positions.
 - Fixed arrays appear only in shared memory.
@@ -2956,6 +3152,9 @@ Before considering the host integration complete, verify:
 - Materialized buffer writes preserve layout and byte length.
 - Command parameter objects are not mutated before submission.
 - Generated calls are passed to `gpu.submit`, not awaited directly.
+- Display recipes return `ComputeView` and use browser `present` without frame
+  readback; native offscreen views use `submit`.
+- Every presented canvas exactly matches the view extent.
 - Launch size has exact rank and positive components.
 - Persistent sessions close in `finally`.
 - `read()` or `idle()` appears only at a real completion requirement.
@@ -2979,6 +3178,8 @@ For a hot path, verify:
 - Input size and work density are representative enough to dominate fixed
   overhead.
 - Correctness validation reads exact results outside the timed hot path.
+- Display paths use `present` directly and do not add redundant per-frame
+  readback or `idle()`.
 - Comparisons distinguish cold startup, transfer-inclusive latency, resident
   GPU execution, and end-to-end application latency.
 
@@ -2995,13 +3196,14 @@ Remember the complete system in six statements:
    and module dependencies are DAGs.
 3. Helpers compute values, indexed stages compute one coordinate, exported
    indexed functions are one-dispatch host sugar, and exported unindexed
-   functions orchestrate ordered stages.
+   functions orchestrate ordered stages and may return a terminal display
+   view.
 4. Buffers hold persistent GPU storage, transients hold program-local scratch,
    and parallel writes require ownership, atomics, workgroup synchronization,
    or another dispatch.
 5. `tach build` generates one browser/Deno package; `@depths/tach` opens
-   sessions, creates buffers, submits generated commands, and owns WebGPU or
-   Vulkan details.
+   sessions, creates buffers, executes generated recipes, presents browser
+   views, and owns WebGPU or Vulkan details.
 6. GPU work is asynchronous and resident by default: submission is not
    completion, generated calls are not execution, and readback is never free.
 

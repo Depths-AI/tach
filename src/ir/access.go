@@ -86,11 +86,6 @@ func AnalyzeAccess(function *Function) AccessSummary {
 				places[x.Result] = p
 			case *Load:
 				addMemoryAccess(&summary, places[x.Place], MemoryRead, 0, x.Span, definitions, coordinates)
-			case *ArrayLength:
-				p := places[x.Place]
-				if p.buffer >= 0 && p.buffer < len(summary.Buffers) {
-					summary.Buffers[p.buffer].Read = true
-				}
 			case *Store:
 				addMemoryAccess(&summary, places[x.Place], MemoryWrite, x.Value, x.Span, definitions, coordinates)
 			case *Atomic:

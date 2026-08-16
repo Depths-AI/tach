@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"tach/src/ast"
+	"tach/src/flow"
 	"tach/src/ir"
 	"tach/src/parser"
 	"tach/src/sema"
@@ -70,6 +71,52 @@ export function invisible[i](params: uint32) { }
 	_, err = sema.CheckAndLower(m)
 	if err == nil || !strings.Contains(err.Error(), "requires at least one buffer parameter") {
 		t.Fatalf("CheckAndLower error = %v, want buffer-parameter diagnostic", err)
+	}
+}
+
+func TestViewProgramsAreStructuredAndValidated(t *testing.T) {
+	valid := `
+function paint[i](pixels: buffer<float32x4[]>) {
+  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+}
+export function image(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels) over pixels.length;
+  return view(pixels, width, height);
+}`
+	parsed, err := parser.Parse("view.tach", valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := sema.CheckAndLower(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := module.Programs[0]
+	if program.Name != "image" || len(program.Resources) != 1 || program.Resources[0].Kind != flow.Transient || program.View == nil || program.View.Format != flow.SRGB8 || program.View.Source != program.Resources[0].ID {
+		t.Fatalf("view program = %#v", program)
+	}
+	invalid := []struct {
+		source string
+		want   string
+	}{
+		{`function image(): view<srgb8> { return view(missing, 1, 1); }`, "only valid on an exported program"},
+		{`export function image[i](pixels: buffer<float32x4[]>): view<srgb8> {}`, "indexed stage image cannot declare a return type"},
+		{`export function image(data: buffer<uint32[]>): uint32 { return 1; }`, "can only return view<srgb8>"},
+		{strings.Replace(valid, "return view(pixels, width, height);", "", 1), "must return its view"},
+		{strings.Replace(valid, "view(pixels, width, height)", "view(pixels, width)", 1), "view(pixels, width, height)"},
+		{`function paint[i](pixels: buffer<uint32[]>) { pixels[i] = 0; } export function image(): view<srgb8> { const pixels = transient<uint32>(1); run paint(pixels) over 1; return view(pixels, 1, 1); }`, "float32x4 buffer or transient"},
+		{strings.Replace(valid, "view(pixels, width, height)", "view(pixels, 1.0, height)", 1), "shape literal must be uint32"},
+		{strings.Replace(valid, "view<srgb8>", "view<rgba8>", 1), "can only return view<srgb8>"},
+	}
+	for _, test := range invalid {
+		parsed, parseErr := parser.Parse("invalid-view.tach", test.source)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil || !strings.Contains(checkErr.Error(), test.want) {
+			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
+		}
 	}
 }
 

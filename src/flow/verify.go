@@ -49,7 +49,7 @@ func verifyProgram(m *Module, p *Program) error {
 			return fmt.Errorf("parameter %d has invalid kind/type", i)
 		}
 	}
-	if bufferCount == 0 {
+	if bufferCount == 0 && p.View == nil {
 		return fmt.Errorf("requires an external buffer")
 	}
 	for i, r := range p.Resources {
@@ -92,6 +92,16 @@ func verifyProgram(m *Module, p *Program) error {
 	current := map[ResourceID]VersionID{}
 	for _, r := range p.Resources {
 		current[r.ID] = r.Initial
+	}
+	if p.View != nil {
+		view, resource := p.View, p.Resource(p.View.Source)
+		pixel := types.Vec(types.TF32, 4)
+		if view.Format != SRGB8 || resource == nil || resource.Type.Kind != types.RuntimeArray || !types.Equal(resource.Type.Elem, pixel) {
+			return fmt.Errorf("has invalid view source/format")
+		}
+		if p.Version(view.Input) == nil || p.Version(view.Input).Resource != view.Source || p.Shape(view.Width) == nil || p.Shape(view.Height) == nil {
+			return fmt.Errorf("has invalid view version/extent")
+		}
 	}
 	for i, d := range p.Dispatches {
 		if d.ID != DispatchID(i+1) {
@@ -148,6 +158,11 @@ func verifyProgram(m *Module, p *Program) error {
 	for _, r := range p.Resources {
 		if current[r.ID] != r.Final {
 			return fmt.Errorf("resource %d final version mismatch", r.ID)
+		}
+	}
+	if p.View != nil {
+		if current[p.View.Source] != p.View.Input || !p.Version(p.View.Input).Defined {
+			return fmt.Errorf("view source is not the defined final resource version")
 		}
 	}
 	_ = producers

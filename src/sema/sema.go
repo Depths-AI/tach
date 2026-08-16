@@ -35,6 +35,7 @@ type funcSig struct {
 	decl     *ast.FunctionDecl
 	indexed  bool
 	exported bool
+	view     flow.ViewFormat
 }
 type namedType struct {
 	name   string
@@ -374,10 +375,18 @@ func (c *Checker) collectFunctions() error {
 		if sig.indexed && x.Return != nil {
 			return diag(x.Return.GetSpan(), "indexed stage %s cannot declare a return type", x.Name)
 		}
-		if !sig.indexed && x.Exported && x.Return != nil {
-			return diag(x.Return.GetSpan(), "public program %s cannot declare a return type", x.Name)
-		}
 		if x.Return != nil {
+			if format, ok := viewType(x.Return); ok {
+				if !x.Exported {
+					return diag(x.Return.GetSpan(), "view return is only valid on an exported program")
+				}
+				sig.view = format
+				signatures[index] = sig
+				return nil
+			}
+			if x.Exported {
+				return diag(x.Return.GetSpan(), "public program %s can only return view<srgb8>", x.Name)
+			}
 			r, err := c.resolveType(x.Return)
 			if err != nil {
 				return err
@@ -1693,10 +1702,19 @@ func ReservedName(name string) bool {
 	if _, ok := atomicBuiltin(name); ok {
 		return true
 	}
-	if name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" {
+	if name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" || name == "view" || name == "srgb8" {
 		return true
 	}
 	return types.ParseBuiltin(name) != nil
+}
+
+func viewType(expression ast.TypeExpr) (flow.ViewFormat, bool) {
+	generic, ok := expression.(*ast.GenericType)
+	if !ok || generic.Name != "view" || len(generic.Args) != 1 {
+		return 0, false
+	}
+	format, ok := generic.Args[0].(*ast.NamedType)
+	return flow.SRGB8, ok && format.Name == "srgb8"
 }
 
 func intrinsicArity(kind ir.IntrinsicKind) int {

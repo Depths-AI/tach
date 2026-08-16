@@ -156,6 +156,8 @@ try {
           readonly value?: {
             readonly adapter: { readonly name: string };
             readonly programs: number;
+            readonly presentedFrames: number;
+            readonly pngBytes: number;
           };
         };
       }
@@ -171,8 +173,19 @@ try {
       );
     }
     if (evaluation.result.value) {
+      if (
+        evaluation.result.value.programs !== 9 ||
+        evaluation.result.value.presentedFrames !== 33 ||
+        evaluation.result.value.pngBytes < 100
+      ) {
+        throw new Error(
+          `incomplete browser result: ${
+            JSON.stringify(evaluation.result.value)
+          }`,
+        );
+      }
       console.log(
-        `WebGPU execution: ${evaluation.result.value.adapter.name}; ${evaluation.result.value.programs} programs`,
+        `WebGPU execution: ${evaluation.result.value.adapter.name}; ${evaluation.result.value.programs} programs; ${evaluation.result.value.presentedFrames} presented frames`,
       );
       break;
     }

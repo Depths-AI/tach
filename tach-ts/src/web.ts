@@ -5,9 +5,10 @@ import type {
   ModuleDefinition,
   PreparedCommand,
   PreparedStep,
+  PreparedView,
 } from "./driver.ts";
 import { normalizeError, TachError, type TachErrorCode } from "./api.ts";
-import type { TachOptions } from "./api.ts";
+import type { PresentationCanvas, TachOptions } from "./api.ts";
 
 const usage = {
   mapRead: 0x0001,
@@ -17,6 +18,7 @@ const usage = {
   storage: 0x0080,
 } as const;
 const shaderStageCompute = 0x0004;
+const textureUsage = { storage: 0x08, render: 0x10 } as const;
 const noFailure = Symbol();
 
 interface CompiledKernel {
@@ -100,10 +102,13 @@ class WebDriver implements Driver {
     { buffer: GPUBuffer; capacity: number }
   >();
   readonly #retired: GPUBuffer[] = [];
+  readonly #retiredTextures: GPUTexture[] = [];
   readonly #uncaptured: GPUError[] = [];
   #nextObjectID = 1;
   #parameters?: GPUBuffer;
   #parameterCapacity = 0;
+  #offscreen?: { texture: GPUTexture; width: number; height: number };
+  readonly #canvases = new WeakMap<object, GPUCanvasContext>();
   #closed = false;
   #lost?: GPUDeviceLostInfo;
 
@@ -292,16 +297,28 @@ class WebDriver implements Driver {
     module: GPUShaderModule,
     kernel: KernelDefinition,
   ): Promise<CompiledKernel> {
-    const entries: GPUBindGroupLayoutEntry[] = kernel.bindings.map((
-      binding,
-    ) => ({
-      binding: binding.binding,
-      visibility: shaderStageCompute,
-      buffer: {
-        type: binding.access === "read_write" ? "storage" : "read-only-storage",
-        minBindingSize: binding.minimumByteSize,
-      },
-    }));
+    const entries: GPUBindGroupLayoutEntry[] = kernel.bindings.map((binding) =>
+      binding.kind === "texture"
+        ? {
+          binding: binding.binding,
+          visibility: shaderStageCompute,
+          storageTexture: {
+            access: "write-only",
+            format: "rgba8unorm",
+            viewDimension: "2d",
+          },
+        }
+        : {
+          binding: binding.binding,
+          visibility: shaderStageCompute,
+          buffer: {
+            type: binding.access === "read_write"
+              ? "storage"
+              : "read-only-storage",
+            minBindingSize: binding.minimumByteSize,
+          },
+        }
+    );
     if (kernel.parameterBlock) {
       entries.push({
         binding: kernel.parameterBlock.binding,
@@ -342,6 +359,7 @@ class WebDriver implements Driver {
           step.kind === "dispatch" ? [step.kernel] : []
         ),
       );
+      if (command.view) indices.add(command.view.kernel);
       await Promise.all(
         [...indices].map(async (index) =>
           kernels.set(index, await this.#compile(command, index))
@@ -365,25 +383,185 @@ class WebDriver implements Driver {
         }),
         pass = encoder.beginComputePass({ label: "Tach compute pass" });
       for (const command of commands) {
-        const record = () => {
-          for (const step of command.steps) {
-            if (step.kind === "dispatch") {
-              this.#dispatch(
-                pass,
-                command,
-                step,
-                compiled.get(command)!,
-                scratch,
-                parameters.get(step),
-              );
-            }
-          }
-        };
-        for (let repeat = 0; repeat < command.repeat; repeat++) record();
+        this.#dispatchCommand(
+          pass,
+          command,
+          compiled.get(command)!,
+          scratch,
+          parameters,
+        );
+        if (command.view) {
+          this.#dispatchView(
+            pass,
+            command,
+            command.view,
+            compiled.get(command)!,
+            scratch,
+            parameters.get(command.view),
+            this.#offscreenTexture(command.view),
+          );
+        }
       }
       pass.end();
       this.device.queue.submit([encoder.finish()]);
     });
+  }
+
+  async present(
+    canvas: PresentationCanvas,
+    command: PreparedCommand,
+  ): Promise<void> {
+    const view = command.view;
+    if (!view) {
+      throw new TachError("kernel", "command has no view", {
+        operation: "present",
+      });
+    }
+    if (canvas.width !== view.width || canvas.height !== view.height) {
+      throw new TachError(
+        "kernel",
+        "canvas dimensions must equal the view extent",
+        { operation: "present" },
+      );
+    }
+    const compiled = await this.#compileCommands([command]);
+    await this.#capture("present", "kernel", async () => {
+      const scratch = this.#resolveScratch([command]),
+        parameters = this.#writeParameters([command]),
+        encoder = this.device.createCommandEncoder({
+          label: "Tach presentation",
+        }),
+        pass = encoder.beginComputePass({ label: "Tach presentation pass" });
+      this.#dispatchCommand(
+        pass,
+        command,
+        compiled.get(command)!,
+        scratch,
+        parameters,
+      );
+      this.#dispatchView(
+        pass,
+        command,
+        view,
+        compiled.get(command)!,
+        scratch,
+        parameters.get(view),
+        this.#canvasTexture(canvas),
+      );
+      pass.end();
+      this.device.queue.submit([encoder.finish()]);
+      await this.device.queue.onSubmittedWorkDone();
+    });
+  }
+
+  #offscreenTexture(view: PreparedView): GPUTexture {
+    if (
+      this.#offscreen?.width === view.width &&
+      this.#offscreen.height === view.height
+    ) {
+      return this.#offscreen.texture;
+    }
+    if (this.#offscreen) this.#retiredTextures.push(this.#offscreen.texture);
+    const texture = this.device.createTexture({
+      label: "Tach offscreen view",
+      size: [view.width, view.height],
+      format: "rgba8unorm",
+      usage: textureUsage.storage,
+    });
+    this.#offscreen = { texture, width: view.width, height: view.height };
+    return texture;
+  }
+
+  #canvasTexture(canvas: PresentationCanvas): GPUTexture {
+    let context = this.#canvases.get(canvas);
+    if (!context) {
+      context = canvas.getContext("webgpu") as GPUCanvasContext | null ??
+        undefined;
+      if (!context) {
+        throw new TachError(
+          "webgpu-unavailable",
+          "canvas has no WebGPU context",
+          { operation: "present" },
+        );
+      }
+      context.configure({
+        device: this.device,
+        format: "rgba8unorm",
+        usage: textureUsage.storage | textureUsage.render,
+        alphaMode: "opaque",
+      });
+      this.#canvases.set(canvas, context);
+    }
+    return context.getCurrentTexture();
+  }
+
+  #dispatchView(
+    pass: GPUComputePassEncoder,
+    command: PreparedCommand,
+    view: PreparedView,
+    compiled: Map<number, CompiledKernel>,
+    scratch: ReadonlyMap<number, GPUBuffer>,
+    parameter: GPUBufferBinding | undefined,
+    target: GPUTexture,
+  ): void {
+    const kernel = command.target.kernels[view.kernel]!,
+      pipeline = compiled.get(view.kernel)!;
+    if (kernel.parameterBlock && !parameter) {
+      throw new TypeError("view parameters are missing");
+    }
+    const entries: GPUBindGroupEntry[] = view.resources.map((resource) => ({
+      binding: resource.binding,
+      resource: {
+        buffer: resource.buffer === undefined
+          ? scratch.get(resource.scratch!)!
+          : gpuBuffer(resource.buffer),
+        size: resource.byteSize,
+      },
+    }));
+    entries.push({ binding: view.output, resource: target.createView() });
+    const dynamic: number[] = [];
+    if (kernel.parameterBlock && parameter) {
+      entries.push({
+        binding: kernel.parameterBlock.binding,
+        resource: {
+          buffer: parameter.buffer,
+          size: kernel.parameterBlock.byteSize,
+        },
+      });
+      dynamic.push(parameter.offset ?? 0);
+    }
+    entries.sort((left, right) => left.binding - right.binding);
+    const group = this.device.createBindGroup({
+      label: "Tach view",
+      layout: pipeline.layout,
+      entries,
+    });
+    pass.setPipeline(pipeline.pipeline);
+    pass.setBindGroup(0, group, dynamic);
+    pass.dispatchWorkgroups(...view.groups);
+  }
+
+  #dispatchCommand(
+    pass: GPUComputePassEncoder,
+    command: PreparedCommand,
+    compiled: Map<number, CompiledKernel>,
+    scratch: ReadonlyMap<number, GPUBuffer>,
+    parameters: ReadonlyMap<object, GPUBufferBinding>,
+  ): void {
+    for (let repeat = 0; repeat < command.repeat; repeat++) {
+      for (const step of command.steps) {
+        if (step.kind === "dispatch") {
+          this.#dispatch(
+            pass,
+            command,
+            step,
+            compiled,
+            scratch,
+            parameters.get(step),
+          );
+        }
+      }
+    }
   }
 
   #dispatch(
@@ -493,15 +671,23 @@ class WebDriver implements Driver {
 
   #writeParameters(
     commands: readonly PreparedCommand[],
-  ): ReadonlyMap<PreparedStep, GPUBufferBinding> {
-    const steps: Extract<PreparedStep, { readonly kind: "dispatch" }>[] =
-      commands.flatMap((command) =>
-        command.steps.filter((
-          step,
-        ): step is Extract<PreparedStep, { readonly kind: "dispatch" }> =>
-          step.kind === "dispatch" && step.parameters !== undefined
-        )
-      );
+  ): ReadonlyMap<object, GPUBufferBinding> {
+    const steps: { readonly parameters: Uint8Array }[] = commands.flatMap((
+      command,
+    ) => [
+      ...command.steps.filter((
+        step,
+      ): step is Extract<PreparedStep, { readonly kind: "dispatch" }> & {
+        readonly parameters: Uint8Array;
+      } => step.kind === "dispatch" && step.parameters !== undefined),
+      ...(command.view?.parameters
+        ? [
+          command.view as PreparedView & {
+            readonly parameters: Uint8Array;
+          },
+        ]
+        : []),
+    ]);
     if (steps.length === 0) return new Map();
     const alignment = this.device.limits.minUniformBufferOffsetAlignment,
       offsets: number[] = [];
@@ -513,7 +699,7 @@ class WebDriver implements Driver {
     }
     const buffer = this.#parameterBuffer(byteLength),
       upload = new Uint8Array(byteLength),
-      bindings = new Map<PreparedStep, GPUBufferBinding>();
+      bindings = new Map<object, GPUBufferBinding>();
     steps.forEach((step, index) => {
       const parameters = step.parameters!, offset = offsets[index]!;
       upload.set(parameters, offset);
@@ -551,18 +737,22 @@ class WebDriver implements Driver {
     this.#healthy("idle");
     await this.device.queue.onSubmittedWorkDone();
     for (const buffer of this.#retired.splice(0)) buffer.destroy();
+    for (const texture of this.#retiredTextures.splice(0)) texture.destroy();
     this.#healthy("idle");
   }
 
   close(): void {
     if (this.#closed) return;
     this.#parameters?.destroy();
+    this.#offscreen?.texture.destroy();
     for (const allocation of this.#scratch.values()) {
       allocation.buffer.destroy();
     }
     for (const buffer of this.#retired) buffer.destroy();
+    for (const texture of this.#retiredTextures) texture.destroy();
     this.#scratch.clear();
     this.#retired.length = 0;
+    this.#retiredTextures.length = 0;
     this.#bindGroups.clear();
     this.device.removeEventListener("uncapturederror", this.#onUncaptured);
     this.#closed = true;

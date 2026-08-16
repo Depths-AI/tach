@@ -14,8 +14,8 @@ Tach is a small, typed language for general-purpose GPU programming from
 TypeScript applications. Its goal is to make directly authored GPU compute
 ergonomic for TypeScript developers. Kernels look familiar, while Tach
 handles the GPU-specific work that normally surrounds them: shader entry
-points, bindings, memory layout, launch geometry, resource lifetimes, target
-validation, and host bindings.
+points, bindings, memory layout, launch geometry, resource lifetimes, display
+projection, target validation, and host bindings.
 
 ```tach
 export function scale[i](
@@ -30,16 +30,52 @@ export function scale[i](
 
 One Tach project currently produces validated WGSL for browser WebGPU,
 validated SPIR-V 1.6 for Vulkan 1.3, and a typed JavaScript interface for both.
-Application code uses the same buffers, commands, and generated functions on
-either host; it does not contain a WebGPU/Vulkan branch. A native MSL backend
-is planned for an upcoming version, extending the same model to Apple GPUs
-without changing Tach source into Metal-specific code.
+Application code uses the same buffers, command recipes, and generated
+functions on either host; it does not contain a WebGPU/Vulkan branch. Browser
+applications can also present a Tach `view<srgb8>` directly to a canvas
+without copying the frame through CPU memory. A native MSL backend is planned
+for an upcoming version, extending the same model to Apple GPUs without
+changing Tach source into Metal-specific code.
 
 Tach is deliberately a compute language rather than a graphics API, tensor
 framework, or thin shader wrapper. It is intended for simulation, procedural
 generation, numerical work, image processing, custom rendering compute,
 physics, and other algorithms whose parallel work is worth expressing
 directly.
+
+## The GPU model in plain language
+
+A CPU normally follows a small number of instruction streams. A GPU becomes
+useful when the same operation can run for many independent coordinates at
+once: one array element, pixel, particle, matrix cell, or simulation cell per
+invocation. Tach lets you write what one invocation does, then describes how
+many invocations exist.
+
+In the opening `scale` example, `[i]` is the current array index. Thousands of
+invocations may evaluate the same function with different `i` values.
+`buffer<float32[]>` is storage that stays on the GPU across commands, while
+`factor` is a small immutable value supplied for this operation. The bounds
+guard matters because GPUs launch fixed-size groups and the final group may
+extend past the logical array end.
+
+Three terms cover most Tach code:
+
+- A **stage** is the work performed for one logical coordinate.
+- A **dispatch** launches that stage across a 1D, 2D, or 3D domain.
+- A **recipe** is the complete host-callable operation: one dispatch, or an
+  ordered set of dispatches with compiler-managed temporary storage.
+
+Calling a generated TypeScript function constructs a recipe; it does not run
+anything. `gpu.submit(recipe)` queues it. Buffers remain resident until the
+application explicitly reads or destroys them. That separation is the core
+performance rule: send compact inputs and commands to the GPU, keep large
+intermediate data there, and read only results the CPU genuinely needs.
+
+Display output follows the same model. A Tach program can return
+`view<srgb8>` from linear floating-point pixels. The compiler chooses texture
+or packed-buffer representation, performs color conversion, and can fold that
+projection into the final pixel stage. A browser then calls `present` to draw
+the GPU result directly without a GPU-to-CPU-to-GPU round trip.
 
 ## Why Tach exists
 
@@ -165,7 +201,7 @@ build/
   package.json
   index.js
   index.d.ts
-  kernel.wgsl
+  kernel.wgsl.gz
   kernel.spv
   README.md
   docs/
@@ -194,7 +230,7 @@ console.log(result); // Float32Array [2, 4, 6, 8]
 The host model has three ordinary operations:
 
 1. `gpu.buffer(value)` creates session-owned GPU state.
-2. A generated function such as `scale(...)` constructs a command.
+2. A generated function such as `scale(...)` constructs a reusable recipe.
 3. `gpu.submit(...)` queues commands; `read()` or `idle()` waits for their
    completion.
 
@@ -219,7 +255,10 @@ try {
 ```
 
 `submit()` waits for preparation and queue submission, not GPU completion.
-Readback, `idle()`, and the end of a scoped session are completion boundaries.
+Buffers belong to the session that created them; recipes themselves do not.
+A recipe with buffers can run only in their owning session, while a
+scalar-only recipe can run in any compatible session. Readback, `idle()`, and
+the end of a scoped session are completion boundaries.
 
 ## The source model
 
@@ -229,8 +268,8 @@ Tach keeps simple kernels short without making larger algorithms opaque:
 |---|---|---|
 | `function helper(...)` | Value helper called by kernels | None |
 | `function stage[i](...)` | Private indexed GPU stage | None |
-| `export function kernel[i](...)` | Indexed stage with a synthesized one-dispatch program | Typed command constructor |
-| `export function program(...)` | Explicit orchestration of one or more stages | Typed command constructor |
+| `export function kernel[i](...)` | Indexed stage with a synthesized one-dispatch program | Typed recipe constructor |
+| `export function program(...)` | Explicit orchestration of one or more stages, optionally returning a display view | Typed recipe or view constructor |
 
 The brackets declare logical invocation coordinates. A two-dimensional kernel
 can use `[x, y]`; the host then supplies a matching logical size:
@@ -305,7 +344,7 @@ export function transform(
 }
 ```
 
-The host still receives one command constructor:
+The host still receives one recipe constructor:
 
 ```ts
 await gpu.submit(transform(input, output, count, 2, 0.5));
@@ -313,6 +352,57 @@ await gpu.submit(transform(input, output, count, 2, 0.5));
 
 The compiler checks stage calls, domains, transient lifetimes, storage access,
 and synchronization before either target is emitted.
+
+## Produce and present a view
+
+A view program turns linear floating-point RGBA into one backend-neutral
+display result. It remains ordinary Tach orchestration, so a procedural frame
+can be driven entirely by scalar parameters:
+
+```tach
+function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
+  if (i < pixels.length) {
+    const x = i % width;
+    const y = i / width;
+    pixels[i] = float32x4(
+      float32(x) / float32(width),
+      float32(y) / float32(height),
+      0.25,
+      1,
+    );
+  }
+}
+
+export function gradient(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels, width, height) over pixels.length;
+  return view(pixels, width, height);
+}
+```
+
+The generated function returns `ComputeView`, which is also a
+`ComputeCommand`. `submit(view)` performs offscreen projection on WebGPU and
+Vulkan without readback. In a browser, present directly to a same-sized
+canvas:
+
+```ts
+import { tach } from "@depths/tach";
+import { gradient } from "./build/index.js";
+
+const canvas = document.querySelector("canvas")!;
+const gpu = await tach();
+try {
+  await gpu.present(canvas, gradient(canvas.width, canvas.height));
+} finally {
+  gpu.close();
+}
+```
+
+The program emits linear `float32x4` pixels. Target lowering applies sRGB
+conversion and selects a WebGPU storage texture or Vulkan packed output. When
+the final stage writes exactly one transient element per pixel, projection is
+folded into that dispatch and the full-frame float transient disappears. The
+source API is unchanged when the fallback projection is required.
 
 ## Documentation and agent guidance
 
@@ -345,3 +435,9 @@ Other available commands are shown by `npx tach help`.
   execution, readback, errors, and generated bindings.
 - [AI-agent guide](docs/INSTRUCTIONS.md) - the complete language and tooling
   reference intended for programmatic consumption.
+- [Architecture guide](docs/architecture.md) - how projects move through the
+  frontend, two IRs, target planning, code generation, packaging, and runtime.
+- [IR guide](docs/ir.md) - Flow programs, Kernel templates, verification,
+  optimization, and backend mapping.
+- [ABI guide](docs/abi.md) - generated signatures, memory layout, metadata,
+  view projection, sessions, and backend execution contracts.

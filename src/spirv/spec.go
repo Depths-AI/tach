@@ -140,10 +140,13 @@ const (
 	GLSL450Log2        uint32 = 30
 	GLSL450Sqrt        uint32 = 31
 	GLSL450InverseSqrt uint32 = 32
+	GLSL450FMin        uint32 = 37
 	GLSL450UMin        uint32 = 38
 	GLSL450SMin        uint32 = 39
+	GLSL450FMax        uint32 = 40
 	GLSL450UMax        uint32 = 41
 	GLSL450SMax        uint32 = 42
+	GLSL450FClamp      uint32 = 43
 	GLSL450UClamp      uint32 = 44
 	GLSL450SClamp      uint32 = 45
 	GLSL450Length      uint32 = 66

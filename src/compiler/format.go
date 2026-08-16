@@ -342,7 +342,7 @@ func formatSource(file, text string) (string, error) {
 			}
 			write(token.Text)
 		case lexer.Less:
-			if previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" {
+			if previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" {
 				write("<")
 				generics++
 			} else {

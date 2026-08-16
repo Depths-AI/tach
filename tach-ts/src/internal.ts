@@ -10,6 +10,7 @@ import type {
   ResourceDefinition,
   ResourceSource,
   ShapeExpression,
+  StepDefinition,
   ValueSource,
 } from "./driver.ts";
 import type {
@@ -633,7 +634,7 @@ function barrierResource(
 
 export function defineModule(definition: ModuleDefinition): DefinedModule {
   if (
-    definition.schema !== 1 ||
+    definition.schema !== 2 ||
     definition.targets.web.programs.length !== definition.programs.length ||
     definition.targets.spirv.programs.length !== definition.programs.length
   ) throw new TypeError("invalid generated Tach schema");
@@ -653,7 +654,6 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
         { operation: info.name },
       );
     }
-    let owner: RuntimeOwner | undefined;
     const storage: BufferState<unknown>[] = [],
       seen = new Map<BufferState<unknown>, string>();
     for (let index = 0; index < info.parameters.length; index++) {
@@ -666,13 +666,6 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
         values[index] as ComputeBuffer<unknown>,
         `${info.name}.${parameter.name}`,
       );
-      if (owner && state.owner !== owner) {
-        throw new TachError(
-          "buffer",
-          `${info.name} compute buffers belong to different Tach sessions`,
-          { operation: info.name },
-        );
-      }
       const previous = seen.get(state);
       if (previous) {
         throw new TachError(
@@ -681,86 +674,120 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
           { operation: info.name },
         );
       }
-      owner = state.owner;
       seen.set(state, parameter.name);
       storage[required(parameter.resource, parameter.name)] = state;
     }
-    if (!owner) {
-      throw new TachError("kernel", `${info.name} has no compute buffer`, {
-        operation: info.name,
-      });
-    }
-    owner.assertHealthy(info.name);
-    const host = owner.driver.adapter.backend === "webgpu" ? "web" : "spirv";
-    const target = definition.targets[host],
-      plan = required(
-        target.programs[programIndex],
-        `program plan ${programIndex}`,
-      );
     let configured: ReturnType<typeof launchOptions>;
     try {
       configured = launchOptions(options as LaunchOptions | undefined);
     } catch (cause) {
       throw normalizeError(cause, "kernel", info.name);
     }
-    let launch: number[] = [];
-    if (info.launch) {
-      if (configured.size !== undefined) {
-        launch = typeof configured.size === "number"
-          ? [configured.size]
-          : [...configured.size];
-        if (launch.length !== info.launch.dimensions) {
-          throw new TachError(
-            "kernel",
-            `kernel requires an exact ${info.launch.dimensions}D launch size`,
-            { operation: info.name },
-          );
-        }
-      } else if (info.launch.inferFromResource === undefined) {
-        const step = plan.steps.find((candidate) =>
-            candidate.kind === "dispatch"
-          ),
-          kernel = required(
-            target.kernels[required(step?.kernel, "launch kernel")],
-            "launch kernel",
-          );
-        launch = kernel.workgroupSize.slice(0, info.launch.dimensions);
-      }
+    if (info.view && configured.repeat !== 1) {
+      throw new TachError("kernel", "view commands cannot repeat", {
+        operation: info.name,
+      });
     }
-    for (const step of plan.steps) {
+    let validationLaunch: number[] = [];
+    if (info.launch && configured.size !== undefined) {
+      validationLaunch = typeof configured.size === "number"
+        ? [configured.size]
+        : [...configured.size];
+      if (validationLaunch.length !== info.launch.dimensions) {
+        throw new TachError(
+          "kernel",
+          `kernel requires an exact ${info.launch.dimensions}D launch size`,
+          { operation: info.name },
+        );
+      }
+    } else if (info.launch?.inferFromResource === undefined && info.launch) {
+      const plan = definition.targets.web.programs[programIndex]!,
+        step = plan.steps.find((candidate) => candidate.kind === "dispatch"),
+        kernel = required(
+          definition.targets.web
+            .kernels[required(step?.kernel, "launch kernel")],
+          "launch kernel",
+        );
+      validationLaunch = kernel.workgroupSize.slice(0, info.launch.dimensions);
+    }
+    const validationPlan = definition.targets.web.programs[programIndex]!;
+    const validationSteps = validationPlan.view
+      ? [...validationPlan.steps, validationPlan.view.step]
+      : validationPlan.steps;
+    for (const step of validationSteps) {
       if (step.kind !== "dispatch") continue;
-      const block = target.kernels[required(step.kernel, "validation kernel")]
-        ?.parameterBlock;
+      const block = definition.targets.web
+        .kernels[required(step.kernel, "validation kernel")]?.parameterBlock;
       if (!block) continue;
       const bytes = new Uint8Array(block.byteSize),
-        view = new DataView(bytes.buffer),
+        data = new DataView(bytes.buffer),
         sources = step.parameters ?? [];
       block.fields.forEach((field, index) => {
         const source = required(sources[index], "validation parameter source");
-        if (source.kind !== "shape") {
-          const parameter = source.kind === "parameter"
-            ? required(
-              info.parameters[required(source.parameter, "value parameter")],
-              "parameter",
-            ).name + (source.path ?? []).map((name) => `.${name}`).join("")
-            : `parameter ${index}`;
-          writeValue(
-            view,
-            field.byteOffset,
-            field.layout,
-            valueOf(source, info, values, storage, launch, configured.repeat),
-            `${info.name}.${parameter}`,
-          );
-        }
+        if (source.kind === "shape") return;
+        const parameter = source.kind === "parameter"
+          ? required(
+            info.parameters[required(source.parameter, "value parameter")],
+            "parameter",
+          ).name + (source.path ?? []).map((name) => `.${name}`).join("")
+          : `parameter ${index}`;
+        writeValue(
+          data,
+          field.byteOffset,
+          field.layout,
+          valueOf(
+            source,
+            info,
+            values,
+            storage,
+            validationLaunch,
+            configured.repeat,
+          ),
+          `${info.name}.${parameter}`,
+        );
       });
     }
     return createComputeCommand({
-      owner,
-      prepare(): PreparedCommand {
+      buffers: [...seen.keys()],
+      view: info.view === true,
+      prepare(owner: RuntimeOwner): PreparedCommand {
+        owner.assertHealthy(info.name);
         for (let index = 0; index < storage.length; index++) {
           if (storage[index] && info.resources[index]) {
             materialize(storage[index]!, info.resources[index]!);
           }
+        }
+        const host = owner.driver.adapter.backend === "webgpu"
+            ? "web"
+            : "spirv",
+          target = definition.targets[host],
+          plan = required(
+            target.programs[programIndex],
+            `program plan ${programIndex}`,
+          );
+        let launch: number[] = [];
+        if (info.launch && configured.size !== undefined) {
+          launch = typeof configured.size === "number"
+            ? [configured.size]
+            : [...configured.size];
+          if (launch.length !== info.launch.dimensions) {
+            throw new TachError(
+              "kernel",
+              `kernel requires an exact ${info.launch.dimensions}D launch size`,
+              { operation: info.name },
+            );
+          }
+        } else if (
+          info.launch?.inferFromResource === undefined && info.launch
+        ) {
+          const step = plan.steps.find((candidate) =>
+              candidate.kind === "dispatch"
+            ),
+            kernel = required(
+              target.kernels[required(step?.kernel, "launch kernel")],
+              "launch kernel",
+            );
+          launch = kernel.workgroupSize.slice(0, info.launch.dimensions);
         }
         if (info.launch && launch.length === 0) {
           const index = required(
@@ -800,7 +827,7 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
             ),
           )
         );
-        const steps: PreparedStep[] = plan.steps.map((step) => {
+        const prepareStep = (step: StepDefinition): PreparedStep => {
           if (step.kind === "barrier") {
             return {
               kind: "barrier",
@@ -862,30 +889,65 @@ export function defineModule(definition: ModuleDefinition): DefinedModule {
               groups: workgroups(domain, kernel.workgroupSize),
               resources,
             };
-        });
+        };
+        const steps = plan.steps.map(prepareStep);
         const repeatBarrier = configured.repeat > 1 && plan.repeatBarrier
           ? plan.repeatBarrier.resources.map((source) =>
             barrierResource(source, storage, plan.transients)
           )
           : undefined;
-        return repeatBarrier
-          ? {
-            module: definition,
-            shader: definition.shaders[host],
-            target,
-            steps,
-            repeat: plan.repeat === "program" ? configured.repeat : 1,
-            repeatBarrier,
-            scratch,
+        let view;
+        if (plan.view) {
+          const width = shapeValue(
+              plan.view.width,
+              values,
+              info.resources,
+              storage,
+              launch,
+            ),
+            height = shapeValue(
+              plan.view.height,
+              values,
+              info.resources,
+              storage,
+              launch,
+            ),
+            pixels = width * height;
+          if (!Number.isSafeInteger(pixels) || pixels <= 0) {
+            throw new RangeError("view extent overflow");
           }
-          : {
-            module: definition,
-            shader: definition.shaders[host],
-            target,
-            steps,
-            repeat: plan.repeat === "program" ? configured.repeat : 1,
-            scratch,
+          const terminal = prepareStep(plan.view.step);
+          if (terminal.kind !== "dispatch") {
+            throw new TypeError("invalid generated view step");
+          }
+          if (
+            !plan.view.fused &&
+            required(terminal.resources[0], "view source").byteSize <
+              pixels * 16
+          ) {
+            throw new RangeError("view source is smaller than its extent");
+          }
+          view = {
+            kernel: terminal.kernel,
+            groups: terminal.groups,
+            resources: terminal.resources,
+            width,
+            height,
+            outputColor: plan.view.outputColor,
+            output: plan.view.output,
+            ...(terminal.parameters ? { parameters: terminal.parameters } : {}),
           };
+        }
+        return {
+          module: definition,
+          shader: definition.shaders[host],
+          target,
+          steps,
+          repeat: plan.repeat === "program" ? configured.repeat : 1,
+          ...(repeatBarrier ? { repeatBarrier } : {}),
+          scratch,
+          ...(view ? { view } : {}),
+        };
       },
     });
   }

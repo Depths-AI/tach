@@ -1,0 +1,57 @@
+@docs(
+  title("Procedural views"),
+  summary("Builds display views from scalar-driven transients or caller-owned linear pixels."),
+);
+
+@docs(
+  summary("Describes a procedural image extent and color bias."),
+  field(width, "Image width in pixels."),
+  field(height, "Image height in pixels."),
+  field(bias, "Linear red-channel bias."),
+)
+type ViewParams = {
+  width: uint32,
+  height: uint32,
+  bias: float32,
+};
+
+@docs(
+  summary("Writes one row-major linear RGBA pixel for later sRGB projection."),
+  coordinate(i, "Linear pixel index."),
+  param(pixels, "Row-major linear RGBA image storage."),
+  param(params, "Image extent and color bias."),
+)
+function paint[i](pixels: buffer<float32x4[]>, params: ViewParams) {
+  if (i < pixels.length) {
+    const x = i % params.width;
+    const y = i / params.width;
+    pixels[i] = float32x4(
+      float32(x) / float32(params.width) + params.bias,
+      float32(y) / float32(params.height),
+      0.25,
+      1.0,
+    );
+  }
+}
+
+@docs(
+  summary("Produces a procedural gradient without requiring a public frame buffer."),
+  param(params, "Image extent and color bias."),
+  returns("The complete display view after backend-owned sRGB projection."),
+)
+export function gradient(params: ViewParams): view<srgb8> {
+  const pixels = transient<float32x4>(params.width * params.height);
+  run paint(pixels, params) over pixels.length;
+  return view(pixels, params.width, params.height);
+}
+
+@docs(
+  summary("Writes a caller-owned linear RGBA buffer and projects its final contents."),
+  param(pixels, "Caller-owned row-major linear RGBA image storage."),
+  param(params, "Image extent and color bias."),
+  returns("The complete display view after standalone sRGB projection."),
+)
+export function gradientInto(pixels: buffer<float32x4[]>, params: ViewParams): view<srgb8> {
+  run paint(pixels, params) over pixels.length;
+  return view(pixels, params.width, params.height);
+}

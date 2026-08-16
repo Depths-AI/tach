@@ -92,6 +92,63 @@ export function clear[i](data: buffer<uint32[]>) {
 	}
 }
 
+func TestViewProjectsStraightIntoStorageTexture(t *testing.T) {
+	a, err := parser.Parse("view.tach", `
+function paint[i](pixels: buffer<float32x4[]>) {
+  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+}
+export function image(width: uint32, height: uint32): view<srgb8> {
+  const pixels = transient<float32x4>(width * height);
+  run paint(pixels) over pixels.length;
+  return view(pixels, width, height);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"texture_storage_2d<rgba8unorm, write>", "fn _tach_view_srgb", "textureStore(", "@workgroup_size(256, 1, 1)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("view WGSL missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "@compute") != 1 || strings.Contains(out, "_tach_view_source_") {
+		t.Fatalf("view was not fused into its pixel stage:\n%s", out)
+	}
+	if err := wgsl.Validate(out); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExternalViewUsesStandaloneProjection(t *testing.T) {
+	a, err := parser.Parse("view.tach", `
+function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32): view<srgb8> {
+  run paint(pixels) over width * height;
+  return view(pixels, width, height);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, "@compute") != 2 || !strings.Contains(out, "_tach_view_source_") || !strings.Contains(out, "@workgroup_size(16, 16, 1)") {
+		t.Fatalf("standalone projection missing:\n%s", out)
+	}
+}
+
 func TestLogicalIndicesAreOptimizedAfterWGSLBackendLowering(t *testing.T) {
 	a, err := parser.Parse("coordinates.tach", `
 @workgroup(16, 8)

@@ -8,6 +8,10 @@ declare const computeCommandBrand: unique symbol;
 export interface ComputeCommand {
   readonly [computeCommandBrand]: never;
 }
+declare const computeViewBrand: unique symbol;
+export interface ComputeView extends ComputeCommand {
+  readonly [computeViewBrand]: never;
+}
 export type LaunchSize =
   | number
   | readonly [x: number, y: number]
@@ -30,6 +34,11 @@ export interface TachAdapterInfo {
   readonly architecture?: string;
   readonly type?: "integrated" | "discrete" | "virtual" | "cpu" | "unknown";
 }
+export interface PresentationCanvas {
+  readonly width: number;
+  readonly height: number;
+  getContext(context: "webgpu"): unknown;
+}
 export interface Tach {
   readonly adapter: TachAdapterInfo;
   buffer<T>(value: T): ComputeBuffer<T>;
@@ -41,6 +50,7 @@ export interface Tach {
     first: ComputeCommand,
     ...rest: readonly ComputeCommand[]
   ): Promise<void>;
+  present(canvas: PresentationCanvas, view: ComputeView): Promise<void>;
   idle(): Promise<void>;
   close(): void;
 }

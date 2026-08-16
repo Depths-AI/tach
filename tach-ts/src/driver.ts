@@ -1,4 +1,4 @@
-import type { TachAdapterInfo } from "./api.ts";
+import type { PresentationCanvas, TachAdapterInfo } from "./api.ts";
 
 export type DriverBuffer = object | number;
 
@@ -60,6 +60,7 @@ export interface KernelDefinition {
     readonly access: "read" | "read_write";
     readonly type: string;
     readonly minimumByteSize: number;
+    readonly kind: "buffer" | "texture";
   }[];
   readonly parameterBlock?: ParameterBlockDefinition;
 }
@@ -127,6 +128,16 @@ export interface ProgramPlanDefinition {
   readonly steps: readonly StepDefinition[];
   readonly repeatBarrier?: StepDefinition;
   readonly repeat: "program" | "invocation-loop";
+  readonly view?: ViewDefinition;
+}
+export interface ViewDefinition {
+  readonly format: "srgb8";
+  readonly step: StepDefinition;
+  readonly width: ShapeExpression;
+  readonly height: ShapeExpression;
+  readonly outputColor: number;
+  readonly output: number;
+  readonly fused: boolean;
 }
 export interface PublicProgramDefinition {
   readonly name: string;
@@ -136,6 +147,7 @@ export interface PublicProgramDefinition {
     readonly dimensions: 1 | 2 | 3;
     readonly inferFromResource?: number;
   };
+  readonly view?: boolean;
 }
 export interface TargetDefinition {
   readonly vulkan?: string;
@@ -145,7 +157,7 @@ export interface TargetDefinition {
   readonly programs: readonly ProgramPlanDefinition[];
 }
 export interface ModuleDefinition {
-  readonly schema: 1;
+  readonly schema: 2;
   readonly types: readonly unknown[];
   readonly programs: readonly PublicProgramDefinition[];
   readonly shaders: { readonly web: URL; readonly spirv: URL };
@@ -183,6 +195,17 @@ export interface PreparedCommand {
   readonly repeat: number;
   readonly repeatBarrier?: readonly PreparedBarrierResource[];
   readonly scratch: ReadonlyMap<number, number>;
+  readonly view?: PreparedView;
+}
+export interface PreparedView {
+  readonly kernel: number;
+  readonly groups: readonly [number, number, number];
+  readonly resources: readonly PreparedResource[];
+  readonly width: number;
+  readonly height: number;
+  readonly outputColor: number;
+  readonly output: number;
+  readonly parameters?: Uint8Array;
 }
 
 export interface Driver {
@@ -193,6 +216,7 @@ export interface Driver {
   destroyBuffer(buffer: DriverBuffer): void;
   prepare(commands: readonly PreparedCommand[]): Promise<void>;
   submit(commands: readonly PreparedCommand[]): Promise<void>;
+  present(canvas: PresentationCanvas, view: PreparedCommand): Promise<void>;
   idle(): Promise<void>;
   close(): void;
 }

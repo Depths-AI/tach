@@ -1,92 +1,124 @@
 # Tach large GPU showcase
 
 This standalone npm workspace measures six fixed, sustained GPU workloads from
-one generated Tach project package through both Chromium/WebGPU and
-Deno/Vulkan 1.3. It has one workload profile and no performance verdicts. The
-harness records what each selected adapter did.
+one Tach project through Chromium/WebGPU and Deno/Vulkan 1.3. It is a
+calculator, not a performance gate: it records what the selected adapters did,
+with one workload profile, five samples, raw observations, and no pass/fail
+budget.
 
-Each workload lives in its own `.tach` kernel file. `kernels/mesh` and
-`kernels/procedural` directly import shared color helpers from
-`shared/color`, exercising project imports in addition to six independent
-public programs. One project build merges all seven files into one
-JavaScript/TypeScript facade, one WGSL module, and one SPIR-V 1.6 module. One
-host-neutral workload implementation imports all six public programs from
-`build/index.js`; the browser and Deno runners each execute it in one
-persistent Tach session through the same `tach` API.
+The showcase answers a practical beginner question: what useful work can a
+TypeScript application describe in Tach while GPU APIs, shader modules,
+bindings, scratch allocation, synchronization, color conversion, and host
+selection remain compiler/runtime responsibilities?
+
+## One project, two hosts
+
+Each workload lives in its own `.tach` file. `kernels/mesh` and
+`kernels/procedural` directly import `shared/color`, so the build also exercises
+whole-file project imports. One `tach build` merges all seven files into one
+JavaScript facade, one declaration file, compressed WGSL, and SPIR-V 1.6.
+
+The shared TypeScript workload implementation imports all six generated
+recipes through `build/index.js`. Browser and Deno runners open one persistent
+Tach session and call the same functions. WebGPU/Vulkan selection, physical
+entry points, bindings, and view output are absent from application code.
 
 ## Workloads
 
-| Category | Kernel | Fixed work |
+| Category | Kernel | Fixed useful work |
 |---|---|---|
 | Rendering | `procedural.tach` | 1920 x 1080 analytic scene; up to 72 traversal steps, eight soft-shadow samples, three ambient-occlusion samples, material lighting, fog, and spatial post-processing |
-| Rendering | `mesh.tach` | 1920 x 1080 compute-only renderer over terrain and 244 torus-knot, twisted-ribbon, superquadric, and organic elements: 162,481 vertices and 312,064 triangles |
-| Mathematics | `matrix.tach` | 2048 x 2048 dense matrix multiplication with 16 x 16 cooperative shared-memory tiles: 17,179,869,184 floating-point operations |
-| Mathematics | `monte-carlo.tach` | 1,048,576 geometric Brownian paths, each evolved through 64 Box-Muller Gaussian time steps |
+| Rendering | `mesh.tach` | 1920 x 1080 compute renderer over terrain and 244 torus-knot, twisted-ribbon, superquadric, and organic elements: 162,481 vertices and 312,064 triangles |
+| Mathematics | `matrix.tach` | 2048 x 2048 dense matrix multiplication with 16 x 16 cooperative shared-memory tiles: 17,179,869,184 floating-point multiply/add operations |
+| Mathematics | `monte-carlo.tach` | 1,048,576 geometric Brownian paths, each advanced through 64 Box-Muller Gaussian time steps |
 | Physics | `particles.tach` | 2,097,152 particles, 64 integration steps, and four moving softened inverse-square attractors per step |
 | Physics | `wave.tach` | 2048 x 2048 height/velocity grid advanced through 64 five-point stencil steps |
 
-The procedural renderer dispatches trace, lighting, and post-processing
-stages. The mesh renderer dispatches vertex projection, visibility clear,
-per-triangle bounding-box rasterization with atomic depth ownership,
-perspective-correct reconstruction of smooth normals, material identity and
-roughness, heterogeneous lighting, and post-processing. Both frames are
-produced entirely by compute work; no browser graphics pipeline recreates
-their contents.
+The procedural renderer runs traversal, lighting, and post-processing. The
+mesh renderer runs vertex projection, visibility clear, per-triangle
+bounding-box rasterization with atomic depth ownership, perspective-correct
+normal/material reconstruction, lighting, and post-processing. The mesh is a
+heterogeneous world of arbitrary curved elements rather than a regular proxy
+grid.
 
-The mesh report includes exact GPU-produced coverage counters: total candidate
-fragments, candidates per output and visible pixel, and visible coverage. It
-does not infer overdraw from triangle count.
+Both rendering programs return `view<srgb8>` from linear `float32x4` final
+pixels. They never pack display bytes in Tach source. Their final per-pixel
+stage is eligible for terminal projection fusion, so WebGPU can write the
+canvas storage texture directly and Vulkan can write packed RGBA8 scratch
+without materializing another full-frame float output or using CPU conversion.
 
-## Timing
+The renderer paths differ only at the real host capability boundary:
+
+- Chromium calls `gpu.present(canvas, view)`, producing the measured frame
+  directly on a 1920 x 1080 WebGPU canvas and waiting for completion.
+- Deno calls `gpu.submit(view)` followed by `gpu.idle()`, producing the same
+  backend-neutral view offscreen through Vulkan because no native surface is
+  part of the current runtime.
+
+No graphics pipeline recreates either frame.
+
+## Timing contract
 
 Each backend reuses one adapter and Tach session for its complete run. Each
 workload:
 
-1. allocates and uploads its resident inputs outside timing;
-2. completes one untimed warmup;
+1. constructs and uploads resident inputs outside timing;
+2. calls `prepare` and completes one untimed warmup;
 3. records five independent samples;
-4. reports the median and all raw samples;
-5. reads back and validates output after timing; and
-6. destroys its buffers before the next workload is constructed.
+4. reports the median and every raw sample;
+5. reads only the buffers required for post-timing numerical validation; and
+6. destroys its public buffers before constructing the next workload.
 
-Every sample measures:
+For non-display work and native views, one sample is:
 
 ```text
-gpu.submit(command) through gpu.idle()
+gpu.submit(recipe) through gpu.idle()
 ```
 
-This includes command preparation, backend encoding, queue submission, and GPU
-completion. It excludes initial allocation/upload, output readback, PNG
-encoding, validation, and report writing. The managed runtime and respective
-browser or native FFI boundary remain part of each observation.
+For browser rendering, one sample is:
+
+```text
+gpu.present(canvas, view)
+```
+
+`present` already waits for the frame, so adding `idle()` would duplicate the
+completion boundary. Both forms include command preparation, backend encoding,
+queue submission, and GPU completion. They exclude initial allocation/upload,
+post-timing readback, PNG encoding, report generation, and validation. The
+managed JavaScript runtime and, on native, the Deno FFI boundary remain part of
+the observation.
 
 Throughput uses work intrinsic to each algorithm:
 
-- complete pixels per second for procedural rendering;
-- covered candidate fragments per second for mesh rendering;
+- complete output pixels per second for procedural rendering;
+- measured candidate fragments per second for mesh rendering;
 - floating-point multiply/add operations per second for matrix algebra;
 - stochastic path-steps per second for Monte Carlo;
 - attractor interactions per second for particles; and
 - stencil cell updates per second for the wave field.
 
-FPS is `1000 / median milliseconds` for the two complete-frame renderers. It
-is a calculated rate, not an acceptance threshold.
+Renderer FPS is `1000 / median milliseconds`. It is a calculated observation,
+not an acceptance threshold.
 
-## Validation
+## Correctness evidence
 
-Validation protects the measurements from empty or broken work without timing
-a second implementation:
+Validation exists to prevent timings from describing skipped or empty work:
 
-- both renderers require opaque, spatially varied 1080p output;
+- browser procedural and mesh canvases are captured after timing as exact PNGs;
+- mesh coverage and visibility buffers must report nonzero candidate fragments
+  and visible pixels on both hosts;
 - matrix multiplication compares six dispersed cells with direct reference
   dot products;
 - Monte Carlo checks finite non-negative payoffs and bounded distribution
   statistics;
-- particle samples must remain finite and inside the simulation volume; and
-- wave samples must remain finite, active, and stable.
+- sampled particles must remain finite and inside the simulation volume; and
+- sampled wave state must remain finite, active, and stable.
 
-The renderer readbacks are copied byte-for-byte into PNGs after timing. The
-math and physics checks read actual GPU output after all timed samples.
+The math and physics checks read actual GPU output only after all timed samples.
+Mesh counters likewise affect reported throughput only after timing. The
+procedural Vulkan run proves complete view dispatch/projection and successful
+completion; the current public native API intentionally does not expose its
+driver-owned packed view scratch for image capture.
 
 ## Run
 
@@ -99,27 +131,30 @@ npm run build --workspace=@depths/tach
 npm run benchmark --workspace=@tach/showcase-ts
 ```
 
-`npm run check --workspace=@tach/showcase-ts` lints and type-checks both host
-entries and the shared workload implementation without running hardware work.
-The build script compiles the Tach project once, copies the complete package
-locally, bundles the browser entry with Deno, and places the exact WGSL beside
-it. Deno directly imports the same generated package and uses its SPIR-V.
+Static validation without hardware execution is:
+
+```sh
+npm run check --workspace=@tach/showcase-ts
+```
+
+The build script compiles the Tach project once, copies the complete generated
+package locally, bundles the browser entry with Deno, and places the exact
+`kernel.wgsl.gz` beside it. Deno imports the same generated package and uses
+its SPIR-V plan.
 
 ## Reports
 
-Every successful benchmark writes:
+Every successful benchmark replaces ignored local reports with:
 
 ```text
 showcase-ts/reports/gpu.json
 showcase-ts/reports/gpu.md
 showcase-ts/reports/webgpu-procedural.png
 showcase-ts/reports/webgpu-mesh.png
-showcase-ts/reports/vulkan-procedural.png
-showcase-ts/reports/vulkan-mesh.png
 ```
 
-JSON is the machine-readable source and contains separate host records.
-Markdown puts both backends in one comparison table and then records their
-adapter, timing contract, raw samples, medians, throughput, FPS, validation,
-and full workload details. Each PNG is the exact post-timing readback from its
-named backend. Reports are local observations and ignored by Git.
+JSON is the machine-readable source and contains separate WebGPU and Vulkan
+host records. Markdown compares both backends, then records adapter, timing
+contract, raw samples, medians, throughput, FPS, validation facts, and workload
+details. PNGs are exact post-timing browser canvas captures. Reports describe
+one local run and remain ignored by Git.

@@ -1,4 +1,10 @@
-import type { ComputeBuffer, ComputeCommand, Tach } from "@depths/tach";
+import type {
+  ComputeBuffer,
+  ComputeCommand,
+  ComputeView,
+  PresentationCanvas,
+  Tach,
+} from "@depths/tach";
 import {
   denseMatrixProduct,
   type MeshParams,
@@ -29,8 +35,6 @@ export interface BenchmarkResult {
   readonly throughput: number;
   readonly throughputUnit: string;
   readonly framesPerSecond: number | null;
-  readonly correct: boolean;
-  readonly check: string;
   readonly details: Readonly<Record<string, Detail>>;
 }
 
@@ -40,16 +44,8 @@ export interface BenchmarkReport {
   readonly results: readonly BenchmarkResult[];
 }
 
-export interface BenchmarkRun {
-  readonly report: BenchmarkReport;
-  readonly frames: Readonly<Record<string, Uint32Array>>;
-}
-
 interface Readback {
-  readonly correct: boolean;
-  readonly check: string;
   readonly details?: Readonly<Record<string, Detail>>;
-  readonly frame?: Uint32Array;
   readonly units?: number;
 }
 
@@ -60,58 +56,56 @@ interface Workload {
   readonly problem: string;
   readonly dispatches: number;
   readonly command: ComputeCommand;
+  readonly view?: ComputeView;
   readonly buffers: readonly ComputeBuffer<unknown>[];
   readonly units: number;
   readonly divisor: number;
   readonly throughputUnit: string;
   readonly details: Readonly<Record<string, Detail>>;
-  readonly frame?: "procedural" | "mesh";
-  readonly readback: () => Promise<Readback>;
+  readonly readback?: () => Promise<Readback>;
 }
+
+export type BenchmarkCanvases = Readonly<
+  Partial<Record<"procedural" | "mesh", PresentationCanvas>>
+>;
 
 function median(values: readonly number[]): number {
   return [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
 }
 
-async function complete(gpu: Tach, command: ComputeCommand): Promise<void> {
-  await gpu.submit(command);
+async function complete(
+  gpu: Tach,
+  workload: Workload,
+  canvases: BenchmarkCanvases,
+): Promise<void> {
+  const canvas = workload.view &&
+    canvases[workload.id as "procedural" | "mesh"];
+  if (workload.view && canvas) {
+    await gpu.present(canvas, workload.view);
+    return;
+  }
+  await gpu.submit(workload.command);
   await gpu.idle();
 }
 
-async function timed(gpu: Tach, command: ComputeCommand): Promise<number> {
+async function timed(
+  gpu: Tach,
+  workload: Workload,
+  canvases: BenchmarkCanvases,
+): Promise<number> {
   const start = performance.now();
-  await complete(gpu, command);
+  await complete(gpu, workload, canvases);
   return performance.now() - start;
 }
 
-function validateFrame(pixels: Uint32Array): Readback {
-  const stride = Math.max(1, Math.trunc(pixels.length / 8192));
-  const colors = new Set<number>();
-  for (let i = 0; i < pixels.length; i += stride) {
-    const pixel = pixels[i]!;
-    if ((pixel >>> 24) !== 255) {
-      return { correct: false, check: `pixel ${i} is not opaque` };
-    }
-    colors.add(pixel);
-  }
-  return {
-    correct: colors.size >= 64,
-    check: colors.size >= 64
-      ? "GPU frame is opaque and spatially varied"
-      : "frame lacks spatial variation",
-    details: { sampledColors: colors.size },
-    frame: pixels,
-  };
-}
-
-function proceduralWorkload(gpu: Tach): Workload {
+function proceduralWorkload(_gpu: Tach): Workload {
   const count = frameWidth * frameHeight;
-  const pixels = gpu.buffer(new Uint32Array(count));
   const params: ProceduralParams = {
     width: frameWidth,
     height: frameHeight,
     time: 1.7,
   };
+  const view = proceduralWorld(params);
   return {
     id: "procedural",
     category: "rendering",
@@ -119,8 +113,9 @@ function proceduralWorkload(gpu: Tach): Workload {
     problem:
       "1920 x 1080 analytic world with traversal, shadows, ambient occlusion, lighting, fog, and post-processing",
     dispatches: 3,
-    command: proceduralWorld(pixels, params),
-    buffers: [pixels],
+    command: view,
+    view,
+    buffers: [],
     units: count,
     divisor: 1e6,
     throughputUnit: "million pixels/s",
@@ -131,8 +126,6 @@ function proceduralWorkload(gpu: Tach): Workload {
       shadowSteps: 8,
       ambientOcclusionSamples: 3,
     },
-    frame: "procedural",
-    readback: async () => validateFrame(await pixels.read()),
   };
 }
 
@@ -456,12 +449,19 @@ function meshWorkload(gpu: Tach): Workload {
   const indices = gpu.buffer(scene.indices);
   const visibility = gpu.buffer(new Uint32Array(pixelCount));
   const coverage = gpu.buffer(new Uint32Array(triangles));
-  const pixels = gpu.buffer(new Uint32Array(pixelCount));
   const params: MeshParams = {
     width: frameWidth,
     height: frameHeight,
     time: 1.7,
   };
+  const view = meshWorld(
+    vertices,
+    normals,
+    indices,
+    visibility,
+    coverage,
+    params,
+  );
   return {
     id: "mesh",
     category: "rendering",
@@ -469,16 +469,9 @@ function meshWorkload(gpu: Tach): Workload {
     problem:
       `1920 x 1080 terrain and ${scene.elements.toLocaleString()} torus-knot, twisted-ribbon, superquadric, and organic elements (${triangles.toLocaleString()} triangles)`,
     dispatches: 5,
-    command: meshWorld(
-      vertices,
-      normals,
-      indices,
-      visibility,
-      coverage,
-      pixels,
-      params,
-    ),
-    buffers: [vertices, normals, indices, visibility, coverage, pixels],
+    command: view,
+    view,
+    buffers: [vertices, normals, indices, visibility, coverage],
     units: triangles,
     divisor: 1e6,
     throughputUnit: "million candidate fragments/s",
@@ -492,10 +485,8 @@ function meshWorkload(gpu: Tach): Workload {
       smoothVertexNormals: true,
       perspectiveCorrectAttributes: true,
     },
-    frame: "mesh",
     readback: async () => {
-      const [frame, fragments, owners] = await Promise.all([
-        pixels.read(),
+      const [fragments, owners] = await Promise.all([
         coverage.read(),
         visibility.read(),
       ]);
@@ -503,12 +494,12 @@ function meshWorkload(gpu: Tach): Workload {
       for (const count of fragments) candidates += count;
       let visiblePixels = 0;
       for (const owner of owners) if (owner !== 0xffff_ffff) visiblePixels++;
-      const validation = validateFrame(frame);
+      if (candidates === 0 || visiblePixels === 0) {
+        throw new Error("mesh projection produced no visible fragments");
+      }
       return {
-        ...validation,
         units: candidates,
         details: {
-          ...validation.details,
           candidateFragments: candidates,
           candidatesPerOutputPixel: candidates / pixelCount,
           candidatesPerVisiblePixel: candidates / visiblePixels,
@@ -577,9 +568,10 @@ function matrixWorkload(gpu: Tach): Workload {
           Math.abs(result[row! * size + column!]! - expected),
         );
       }
+      if (maximumError >= 0.01) {
+        throw new Error(`matrix reference error ${maximumError}`);
+      }
       return {
-        correct: maximumError < 0.01,
-        check: `six reference cells; max error ${maximumError}`,
         details: { maximumSampleError: maximumError },
       };
     },
@@ -624,20 +616,20 @@ function monteCarloWorkload(gpu: Tach): Workload {
       let positive = 0;
       for (const payoff of result) {
         if (!Number.isFinite(payoff) || payoff < 0) {
-          return { correct: false, check: "non-finite or negative payoff" };
+          throw new Error("non-finite or negative payoff");
         }
         sum += payoff;
         if (payoff > 0) positive++;
       }
       const mean = sum / result.length;
       const positivePercent = positive / result.length * 100;
-      const correct = mean > 8 && mean < 11 && positivePercent > 50 &&
-        positivePercent < 54;
+      if (
+        mean <= 8 || mean >= 11 || positivePercent <= 50 ||
+        positivePercent >= 54
+      ) {
+        throw new Error("payoff distribution escaped model bounds");
+      }
       return {
-        correct,
-        check: correct
-          ? "payoff distribution matches model bounds"
-          : "payoff distribution escaped model bounds",
         details: { meanPayoff: mean, positivePathPercent: positivePercent },
       };
     },
@@ -697,19 +689,17 @@ function particleWorkload(gpu: Tach): Workload {
         const y = result[offset + 1]!;
         const z = result[offset + 2]!;
         if (!Number.isFinite(x + y + z)) {
-          return { correct: false, check: "non-finite particle state" };
+          throw new Error("non-finite particle state");
         }
         const radius = Math.sqrt(x * x + y * y + z * z);
         radiusSum += radius;
         maximumRadius = Math.max(maximumRadius, radius);
         checked++;
       }
-      const correct = maximumRadius <= Math.sqrt(3) * 12.001 && radiusSum > 0;
+      if (maximumRadius > Math.sqrt(3) * 12.001 || radiusSum <= 0) {
+        throw new Error("particle escaped simulation bounds");
+      }
       return {
-        correct,
-        check: correct
-          ? "sampled particle state is finite and bounded"
-          : "particle escaped simulation bounds",
         details: {
           sampledParticles: checked,
           meanRadius: radiusSum / checked,
@@ -777,19 +767,16 @@ function waveWorkload(gpu: Tach): Workload {
         const heightValue = result[offset]!;
         const velocity = result[offset + 1]!;
         if (!Number.isFinite(heightValue + velocity)) {
-          return { correct: false, check: "non-finite wave state" };
+          throw new Error("non-finite wave state");
         }
         maximumAmplitude = Math.max(maximumAmplitude, Math.abs(heightValue));
         energy += heightValue * heightValue + velocity * velocity;
         checked++;
       }
-      const correct = maximumAmplitude > 0.001 && maximumAmplitude < 2 &&
-        energy > 0;
+      if (maximumAmplitude <= 0.001 || maximumAmplitude >= 2 || energy <= 0) {
+        throw new Error("wave stability bounds failed");
+      }
       return {
-        correct,
-        check: correct
-          ? "sampled wave remains finite, active, and stable"
-          : "wave stability bounds failed",
         details: {
           sampledCells: checked,
           maximumAmplitude,
@@ -803,42 +790,40 @@ function waveWorkload(gpu: Tach): Workload {
 async function execute(
   gpu: Tach,
   workload: Workload,
-): Promise<{ readonly result: BenchmarkResult; readonly frame?: Uint32Array }> {
+  canvases: BenchmarkCanvases,
+): Promise<BenchmarkResult> {
   try {
     await gpu.prepare(workload.command);
-    await complete(gpu, workload.command);
+    await complete(gpu, workload, canvases);
     const gpuSamplesMs: number[] = [];
     for (let sample = 0; sample < samples; sample++) {
-      gpuSamplesMs.push(await timed(gpu, workload.command));
+      gpuSamplesMs.push(await timed(gpu, workload, canvases));
     }
     const gpuMs = median(gpuSamplesMs);
-    const readback = await workload.readback();
-    if (!readback.correct) throw new Error(`${workload.id}: ${readback.check}`);
+    const readback = await workload.readback?.() ?? {};
     const units = readback.units ?? workload.units;
     return {
-      result: {
-        id: workload.id,
-        category: workload.category,
-        name: workload.name,
-        problem: workload.problem,
-        dispatches: workload.dispatches,
-        gpuSamplesMs,
-        gpuMs,
-        throughput: units / (gpuMs / 1000) / workload.divisor,
-        throughputUnit: workload.throughputUnit,
-        framesPerSecond: workload.frame ? 1000 / gpuMs : null,
-        correct: readback.correct,
-        check: readback.check,
-        details: { ...workload.details, ...readback.details },
-      },
-      ...(readback.frame ? { frame: readback.frame } : {}),
+      id: workload.id,
+      category: workload.category,
+      name: workload.name,
+      problem: workload.problem,
+      dispatches: workload.dispatches,
+      gpuSamplesMs,
+      gpuMs,
+      throughput: units / (gpuMs / 1000) / workload.divisor,
+      throughputUnit: workload.throughputUnit,
+      framesPerSecond: workload.view ? 1000 / gpuMs : null,
+      details: { ...workload.details, ...readback.details },
     };
   } finally {
     for (const buffer of workload.buffers) buffer.destroy();
   }
 }
 
-export async function runBenchmarks(gpu: Tach): Promise<BenchmarkRun> {
+export async function runBenchmarks(
+  gpu: Tach,
+  canvases: BenchmarkCanvases = {},
+): Promise<BenchmarkReport> {
   const factories = [
     proceduralWorkload,
     meshWorkload,
@@ -848,21 +833,15 @@ export async function runBenchmarks(gpu: Tach): Promise<BenchmarkRun> {
     waveWorkload,
   ] as const;
   const results: BenchmarkResult[] = [];
-  const frames: Record<string, Uint32Array> = {};
   for (const factory of factories) {
     const workload = factory(gpu);
     console.log(`${gpu.adapter.backend}: ${workload.name}`);
-    const executed = await execute(gpu, workload);
-    results.push(executed.result);
-    if (executed.frame) frames[executed.result.id] = executed.frame;
+    results.push(await execute(gpu, workload, canvases));
   }
   return {
-    report: {
-      samples,
-      timing:
-        "warm pipeline; gpu.submit(command) through gpu.idle(); readback and validation excluded",
-      results,
-    },
-    frames,
+    samples,
+    timing:
+      "warm pipeline; execute through GPU completion; readback and validation excluded",
+    results,
   };
 }

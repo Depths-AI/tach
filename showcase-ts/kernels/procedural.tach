@@ -174,15 +174,15 @@ function light[i](
   summary("Applies a spatial reconstruction filter, tone mapping, and vignette."),
   coordinate(i, "Linear pixel index."),
   param(hdr, "Linear frame produced by lighting."),
-  param(pixels, "Packed display frame."),
+  param(frame, "Linear display frame."),
   param(params, "Frame dimensions."),
 )
 function proceduralPost[i](
   hdr: buffer<float32x4[]>,
-  pixels: buffer<uint32[]>,
+  frame: buffer<float32x4[]>,
   params: ProceduralParams,
 ) {
-  if (i < pixels.length) {
+  if (i < frame.length) {
     const x = i % params.width;
     const y = i / params.width;
     const left = hdr[x > 0 ? i - 1 : i].xyz;
@@ -196,19 +196,22 @@ function proceduralPost[i](
     const nx = float32(x) / float32(params.width) * 2.0 - 1.0;
     const ny = float32(y) / float32(params.height) * 2.0 - 1.0;
     const vignette = saturate(1.08 - (nx * nx + ny * ny) * 0.24);
-    pixels[i] = packColor(sqrt(color) * vignette);
+    frame[i] = float32x4(color * vignette, 1.0);
   }
 }
 
 @docs(
   summary("Renders one complete procedural world frame."),
-  param(pixels, "Packed 1080p output frame."),
   param(params, "Frame dimensions and animation time."),
+  returns("The complete sRGB display view."),
 )
-export function proceduralWorld(pixels: buffer<uint32[]>, params: ProceduralParams) {
-  const surface = transient<float32x4>(pixels.length);
-  const hdr = transient<float32x4>(pixels.length);
-  run trace(surface, params) over pixels.length;
-  run light(surface, hdr, params) over pixels.length;
-  run proceduralPost(hdr, pixels, params) over pixels.length;
+export function proceduralWorld(params: ProceduralParams): view<srgb8> {
+  const count = params.width * params.height;
+  const surface = transient<float32x4>(count);
+  const hdr = transient<float32x4>(count);
+  const frame = transient<float32x4>(count);
+  run trace(surface, params) over count;
+  run light(surface, hdr, params) over count;
+  run proceduralPost(hdr, frame, params) over count;
+  return view(frame, params.width, params.height);
 }

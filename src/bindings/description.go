@@ -184,6 +184,9 @@ func describeProgram(module *flow.Module, program *flow.Program, stage *ir.Funct
 	for _, parameter := range program.Parameters {
 		item.Parameters = append(item.Parameters, Parameter{Name: parameter.Name, Type: typeRef(parameter.Type), Buffer: parameter.Kind == flow.BufferParameter, Access: access[parameter.Resource].String(), Description: doc.Parameters[parameter.Name]})
 	}
+	if program.View != nil {
+		item.Returns = &Return{Type: TypeRef{Tach: "view<srgb8>", Kind: "view", Name: "srgb8"}, Description: doc.Returns}
+	}
 	return item
 }
 

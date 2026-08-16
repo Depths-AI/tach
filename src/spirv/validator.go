@@ -1461,6 +1461,13 @@ func (v *validation) validateExtInst(in Instruction) error {
 		if !allResultType() || base.kind != typeFloat {
 			return fmt.Errorf("%s Pow requires matching float32 scalar/vector operands and result", ctx)
 		}
+	case GLSL450FMin, GLSL450FMax:
+		if err := need(2); err != nil {
+			return err
+		}
+		if !allResultType() || base.kind != typeFloat {
+			return fmt.Errorf("%s float min/max requires matching float32 scalar/vector operands and result", ctx)
+		}
 	case GLSL450UMin, GLSL450UMax:
 		if err := need(2); err != nil {
 			return err
@@ -1481,6 +1488,13 @@ func (v *validation) validateExtInst(in Instruction) error {
 		}
 		if !allResultType() || base.kind != typeInt || base.signed {
 			return fmt.Errorf("%s UClamp requires matching uint32 scalar/vector operands and result", ctx)
+		}
+	case GLSL450FClamp:
+		if err := need(3); err != nil {
+			return err
+		}
+		if !allResultType() || base.kind != typeFloat {
+			return fmt.Errorf("%s FClamp requires matching float32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450SClamp:
 		if err := need(3); err != nil {

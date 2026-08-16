@@ -1,12 +1,9 @@
 import { tach, type TachAdapterInfo } from "@depths/tach";
-import {
-  type BenchmarkReport,
-  type BenchmarkRun,
-  runBenchmarks,
-} from "./src/benchmarks.ts";
+import { type BenchmarkReport, runBenchmarks } from "./src/benchmarks.ts";
 
-interface HostRun extends BenchmarkRun {
+interface HostRun {
   readonly adapter: TachAdapterInfo;
+  readonly report: BenchmarkReport;
 }
 interface PublishedHost {
   readonly adapter: TachAdapterInfo;
@@ -17,7 +14,7 @@ const root = new URL("./", import.meta.url);
 const vulkan = await tach(
   async (gpu): Promise<HostRun> => ({
     adapter: gpu.adapter,
-    ...await runBenchmarks(gpu),
+    report: await runBenchmarks(gpu),
   }),
   { powerPreference: "high-performance" },
 );
@@ -88,9 +85,12 @@ class Protocol {
   }
 }
 
-async function webGPU(): Promise<HostRun> {
+async function webGPU(): Promise<{
+  readonly run: HostRun;
+  readonly frames: Readonly<Record<string, Uint8Array>>;
+}> {
   let posted: PublishedHost | undefined;
-  const frames: Record<string, Uint32Array> = {}, abort = new AbortController();
+  const frames: Record<string, Uint8Array> = {}, abort = new AbortController();
   const server = Deno.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -117,7 +117,7 @@ async function webGPU(): Promise<HostRun> {
       return new Response(null, { status: 204 });
     }
     if (request.method === "POST" && path.startsWith("/frame/")) {
-      frames[path.slice(7)] = new Uint32Array(await request.arrayBuffer());
+      frames[path.slice(7)] = new Uint8Array(await request.arrayBuffer());
       return new Response(null, { status: 204 });
     }
     return new Response("not found", { status: 404 });
@@ -206,7 +206,12 @@ async function webGPU(): Promise<HostRun> {
     }
     socket.close();
     if (!posted) throw new Error("browser showcase did not publish results");
-    return { ...posted, frames };
+    for (const name of ["procedural", "mesh"]) {
+      if (!frames[name]?.length) {
+        throw new Error(`${name} PNG was not captured`);
+      }
+    }
+    return { run: posted, frames };
   } finally {
     chrome.kill();
     await chrome.status;
@@ -215,7 +220,9 @@ async function webGPU(): Promise<HostRun> {
   }
 }
 
-const web = await webGPU(), generatedAt = new Date().toISOString();
+const browser = await webGPU(),
+  web = browser.run,
+  generatedAt = new Date().toISOString();
 const hosts: readonly HostRun[] = [web, vulkan];
 const published = {
   generatedAt,
@@ -235,8 +242,8 @@ function markdown(): string {
     "",
     "## Results",
     "",
-    "| Backend | Adapter | Category | Workload | Median | Raw samples (ms) | Throughput | FPS | Validation |",
-    "|---|---|---|---|---:|---|---:|---:|---|",
+    "| Backend | Adapter | Category | Workload | Median | Raw samples (ms) | Throughput | FPS |",
+    "|---|---|---|---|---:|---|---:|---:|",
   ];
   for (const host of hosts) {
     for (const result of host.report.results) {
@@ -249,7 +256,7 @@ function markdown(): string {
           result.gpuSamplesMs.map((sample) => sample.toFixed(3)).join(", ")
         } | ${result.throughput.toFixed(3)} ${result.throughputUnit} | ${
           result.framesPerSecond?.toFixed(1) ?? "-"
-        } | ${cell(result.check)} |`,
+        } |`,
       );
     }
   }
@@ -287,62 +294,6 @@ function markdown(): string {
   return lines.join("\n");
 }
 
-const crcTable = Uint32Array.from({ length: 256 }, (_, byte) => {
-  let value = byte;
-  for (let bit = 0; bit < 8; bit++) {
-    value = value & 1 ? 0xedb8_8320 ^ value >>> 1 : value >>> 1;
-  }
-  return value >>> 0;
-});
-function chunk(name: string, data: Uint8Array): Uint8Array {
-  const type = new TextEncoder().encode(name),
-    output = new Uint8Array(data.length + 12),
-    view = new DataView(output.buffer);
-  view.setUint32(0, data.length);
-  output.set(type, 4);
-  output.set(data, 8);
-  let crc = 0xffff_ffff;
-  for (const byte of output.subarray(4, data.length + 8)) {
-    crc = crcTable[(crc ^ byte) & 255]! ^ crc >>> 8;
-  }
-  view.setUint32(data.length + 8, (crc ^ 0xffff_ffff) >>> 0);
-  return output;
-}
-async function png(pixels: Uint32Array): Promise<Uint8Array> {
-  const width = 1920,
-    height = 1080,
-    row = width * 4,
-    raw = new Uint8Array((row + 1) * height),
-    bytes = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-  for (let y = 0; y < height; y++) {
-    raw.set(bytes.subarray(y * row, (y + 1) * row), y * (row + 1) + 1);
-  }
-  const compressed = new Uint8Array(
-    await new Response(
-      new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate")),
-    ).arrayBuffer(),
-  );
-  const header = new Uint8Array(13), view = new DataView(header.buffer);
-  view.setUint32(0, width);
-  view.setUint32(4, height);
-  header.set([8, 6, 0, 0, 0], 8);
-  const parts = [
-    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk("IHDR", header),
-    chunk("IDAT", compressed),
-    chunk("IEND", new Uint8Array()),
-  ];
-  const output = new Uint8Array(
-    parts.reduce((sum, part) => sum + part.length, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    output.set(part, offset);
-    offset += part.length;
-  }
-  return output;
-}
-
 const reports = new URL("reports/", root);
 await Deno.remove(reports, { recursive: true }).catch((error) => {
   if (!(error instanceof Deno.errors.NotFound)) throw error;
@@ -354,12 +305,10 @@ await Promise.all([
     `${JSON.stringify(published, null, 2)}\n`,
   ),
   Deno.writeTextFile(new URL("reports/gpu.md", root), markdown()),
-  ...hosts.flatMap((host) =>
-    Object.entries(host.frames).map(async ([name, frame]) =>
-      Deno.writeFile(
-        new URL(`reports/${host.adapter.backend}-${name}.png`, root),
-        await png(frame),
-      )
+  ...Object.entries(browser.frames).map(([name, frame]) =>
+    Deno.writeFile(
+      new URL(`reports/${web.adapter.backend}-${name}.png`, root),
+      frame,
     )
   ),
 ]);

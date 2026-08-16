@@ -43,6 +43,7 @@ function defineModule({ shader = compressedShader, resources, kernels }) {
     access: resource.access,
     type: "uint32[]",
     minimumByteSize: resource.minimumByteSize,
+    kind: "buffer",
   }));
   const block = kernel.parameterBlock && {
     group: 0,
@@ -95,7 +96,7 @@ function defineModule({ shader = compressedShader, resources, kernels }) {
       web: shader,
       spirv: new URL("file:///unused.spv"),
     },
-    schema: 1,
+    schema: 2,
     types: [],
     programs: [{
       name: kernel.name,
@@ -133,6 +134,11 @@ function fakeWebGPU({
     shaders: 0,
     shaderSources: [],
     submitted: 0,
+    textures: 0,
+    texturesDestroyed: 0,
+    textureViews: 0,
+    canvasConfigured: 0,
+    currentTextures: 0,
     workDone: 0,
     writes: 0,
   };
@@ -213,6 +219,19 @@ function fakeWebGPU({
       buffers.push(buffer);
       return buffer;
     },
+    createTexture(descriptor) {
+      calls.textures++;
+      return {
+        descriptor,
+        createView() {
+          calls.textureViews++;
+          return {};
+        },
+        destroy() {
+          calls.texturesDestroyed++;
+        },
+      };
+    },
     createCommandEncoder() {
       const pass = {
         setPipeline() {},
@@ -258,6 +277,26 @@ function fakeWebGPU({
   return {
     buffers,
     calls,
+    canvas(width, height, context = true) {
+      const texture = device.createTexture({ size: [width, height] });
+      return {
+        width,
+        height,
+        getContext(name) {
+          if (name !== "webgpu" || !context) return null;
+          return {
+            configure(descriptor) {
+              calls.canvasConfigured++;
+              this.descriptor = descriptor;
+            },
+            getCurrentTexture() {
+              calls.currentTextures++;
+              return texture;
+            },
+          };
+        },
+      };
+    },
     gpu: {
       requestAdapter() {
         return Promise.resolve(adapter);
@@ -433,7 +472,7 @@ const graph = defineRuntimeModule({
     web: compressedShader,
     spirv: new URL("file:///unused.spv"),
   },
-  schema: 1,
+  schema: 2,
   types: [],
   programs: [{
     name: "graph",
@@ -519,6 +558,78 @@ const graph = defineRuntimeModule({
       }],
     },
   },
+});
+
+const u32 = { kind: "u32", size: 4 };
+const dimension = (parameter) => ({ op: "parameter", parameter });
+function viewTarget(texture) {
+  const width = dimension(0),
+    height = dimension(1),
+    pixels = { op: "mul", left: width, right: height };
+  return {
+    kernels: [{
+      entryPoint: "_tach_k0",
+      workgroupSize: [64, 1, 1],
+      bindings: [{
+        group: 0,
+        binding: 0,
+        access: "read_write",
+        type: texture ? "rgba8unorm" : "uint32[]",
+        minimumByteSize: 4,
+        kind: texture ? "texture" : "buffer",
+      }],
+      parameterBlock: {
+        group: 0,
+        binding: 1,
+        byteSize: 16,
+        fields: [0, 4].map((byteOffset) => ({
+          type: "uint32",
+          byteOffset,
+          layout: u32,
+        })),
+      },
+    }],
+    programs: [{
+      program: 0,
+      transients: [],
+      steps: [],
+      repeat: "program",
+      view: {
+        format: "srgb8",
+        step: {
+          kind: "dispatch",
+          kernel: 0,
+          domain: [pixels],
+          resources: [],
+          parameters: [
+            { kind: "parameter", parameter: 0 },
+            { kind: "parameter", parameter: 1 },
+          ],
+        },
+        width,
+        height,
+        outputColor: 0,
+        output: 0,
+        fused: true,
+      },
+    }],
+  };
+}
+const image = defineRuntimeModule({
+  shaders: { web: compressedShader, spirv: new URL("file:///unused.spv") },
+  schema: 2,
+  types: [],
+  programs: [{
+    name: "image",
+    parameters: ["width", "height"].map((name) => ({
+      name,
+      kind: "value",
+      type: "uint32",
+    })),
+    resources: [],
+    view: true,
+  }],
+  targets: { web: viewTarget(true), spirv: viewTarget(false) },
 });
 
 test("the public runtime has one entry point and one error type", () => {
@@ -996,6 +1107,80 @@ test("command ownership and resident-buffer lifetime are enforced", async () => 
   } finally {
     first.close();
     second.close();
+  }
+});
+
+test("scalar view recipes are owner-neutral and offscreen textures are reused", async () => {
+  const recipe = image.command(0, [32, 16]),
+    firstFake = fakeWebGPU(),
+    secondFake = fakeWebGPU(),
+    first = await tach({ gpu: firstFake.gpu }),
+    second = await tach({ gpu: secondFake.gpu });
+  try {
+    assert.throws(
+      () => image.command(0, [32, 16], { repeat: 2 }),
+      /view commands cannot repeat/u,
+    );
+    await first.prepare(recipe);
+    await first.submit(recipe);
+    await second.submit(recipe);
+    assert.equal(firstFake.calls.dispatches, 1);
+    assert.equal(secondFake.calls.dispatches, 1);
+    assert.equal(firstFake.calls.textures, 1);
+    await first.submit(image.command(0, [32, 16]));
+    assert.equal(firstFake.calls.textures, 1);
+    await first.submit(image.command(0, [16, 16]));
+    assert.equal(firstFake.calls.textures, 2);
+    assert.equal(firstFake.calls.texturesDestroyed, 0);
+    await first.idle();
+    assert.equal(firstFake.calls.texturesDestroyed, 1);
+  } finally {
+    first.close();
+    second.close();
+  }
+});
+
+test("present serializes completed frames into one configured canvas", async () => {
+  const fake = fakeWebGPU(),
+    gpu = await tach({ gpu: fake.gpu }),
+    canvas = fake.canvas(32, 16),
+    view = image.command(0, [32, 16]);
+  try {
+    await Promise.all(
+      Array.from({ length: 8 }, () => gpu.present(canvas, view)),
+    );
+    assert.equal(fake.calls.canvasConfigured, 1);
+    assert.equal(fake.calls.currentTextures, 8);
+    assert.equal(fake.calls.dispatches, 8);
+    assert.equal(fake.calls.submitted, 8);
+    assert.equal(fake.calls.workDone, 8);
+    assert.throws(
+      () => gpu.present(canvas, clear.command(0, [gpu.buffer([0])])),
+      /requires a generated Tach view/u,
+    );
+  } finally {
+    gpu.close();
+  }
+});
+
+test("present validates view extents and WebGPU canvas capability", async () => {
+  for (
+    const [view, canvas, message] of [
+      [image.command(0, [32, 16]), fakeWebGPU().canvas(16, 16), "dimensions"],
+      [
+        image.command(0, [32, 16]),
+        fakeWebGPU().canvas(32, 16, false),
+        "context",
+      ],
+      [image.command(0, [0, 16]), fakeWebGPU().canvas(0, 16), "overflow"],
+    ]
+  ) {
+    const gpu = await tach({ gpu: fakeWebGPU().gpu });
+    try {
+      await assert.rejects(gpu.present(canvas, view), new RegExp(message, "u"));
+    } finally {
+      gpu.close();
+    }
   }
 });
 
