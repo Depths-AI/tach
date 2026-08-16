@@ -2,6 +2,7 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)]
   [string]$Version,
+  [string]$Notes,
   [switch]$Publish
 )
 
@@ -18,6 +19,15 @@ if ($Version -notmatch $semver) {
   throw "VERSION must be semantic and prefixed with v, for example v0.1.0"
 }
 $packageVersion = $Version.Substring(1)
+if ($Publish -and $PSBoundParameters.ContainsKey("Notes")) {
+  throw "publish uses the notes locked by the dry stage; omit -Notes"
+}
+if (-not $Publish) {
+  $Notes = ([string]$Notes).Trim()
+  if (-not $Notes) {
+    throw "dry release requires meaningful -Notes text"
+  }
+}
 $releaseDir = Join-Path $root "dist\releases\$Version"
 $workDir = Join-Path $releaseDir ".work"
 $targets = @(
@@ -81,6 +91,34 @@ function Write-Utf8([string]$Path, [string]$Text) {
 
 function Get-Sha256([string]$Path) {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-VersionCoherence {
+  $package = Get-Content -LiteralPath (Join-Path $root "tach-ts\package.json") -Raw |
+    ConvertFrom-Json
+  if ($package.version -ne $packageVersion) {
+    throw "tach-ts package version is $($package.version), expected $packageVersion"
+  }
+  foreach ($path in @(
+    "browser-test\package.json",
+    "deno-test\package.json",
+    "showcase-ts\package.json"
+  )) {
+    $consumer = Get-Content -LiteralPath (Join-Path $root $path) -Raw |
+      ConvertFrom-Json
+    if ($consumer.dependencies.$packageName -ne $packageVersion) {
+      throw "$path does not depend on $packageName@$packageVersion"
+    }
+  }
+  $extension = Get-Content -LiteralPath (Join-Path $root "vscode\package.json") -Raw |
+    ConvertFrom-Json
+  if ($extension.version -ne $packageVersion) {
+    throw "VS Code extension version is $($extension.version), expected $packageVersion"
+  }
+  $main = Get-Content -LiteralPath (Join-Path $root "main.go") -Raw
+  if ($main -notmatch "var version = `"$([regex]::Escape($packageVersion))`"") {
+    throw "main.go fallback version does not match $packageVersion"
+  }
 }
 
 function Get-HttpStatus($ErrorRecord) {
@@ -173,9 +211,12 @@ function Assert-Stage {
   }
   $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
   $head = Read-Checked "git" @("rev-parse", "HEAD")
-  if ($manifest.schema -ne 1 -or $manifest.tag -ne $Version -or
+  if ($manifest.schema -ne 2 -or $manifest.tag -ne $Version -or
       $manifest.version -ne $packageVersion -or $manifest.commit -ne $head) {
     throw "release stage does not describe $Version at HEAD"
+  }
+  if ([string]::IsNullOrWhiteSpace($manifest.notes)) {
+    throw "release stage has no human-authored notes"
   }
   if ($manifest.dirty) {
     throw "release stage was built from a dirty tree; commit and rebuild it"
@@ -212,6 +253,7 @@ function Assert-Stage {
 }
 
 function New-ReleaseStage {
+  Assert-VersionCoherence
   foreach ($command in @("deno", "git", "go", "npm", "spirv-val", "zig")) {
     Assert-Command $command
   }
@@ -379,11 +421,12 @@ await compiler.compilerPath();
         }
     )
     $manifest = [ordered]@{
-      schema = 1
+      schema = 2
       tag = $Version
       version = $packageVersion
       commit = $head
       dirty = $dirty
+      notes = $Notes
       generatedAt = [DateTime]::UtcNow.ToString("o")
       tools = [ordered]@{
         go = Read-Checked "go" @("version")
@@ -410,6 +453,34 @@ await compiler.compilerPath();
     Write-Warning "The tree was dirty. Commit the release harness and rerun dry mode before publishing."
   } else {
     Write-Host "Publish these exact artifacts with: .\release.ps1 $Version -Publish"
+  }
+}
+
+function Publish-Npm([string]$Archive, [string]$Npmrc) {
+  Push-Location $root
+  try {
+    $output = & npm publish $Archive `
+      --access public `
+      --registry $registry `
+      --userconfig $Npmrc 2>&1
+    $exitCode = $LASTEXITCODE
+    $output | ForEach-Object { Write-Host $_ }
+    if ($exitCode -eq 0) {
+      return
+    }
+    $message = $output -join [Environment]::NewLine
+    $approval = [regex]::Match(
+      $message,
+      'https://www\.npmjs\.com/auth/cli/[0-9A-Za-z_-]+'
+    )
+    if ($message -notmatch '\bEOTP\b' -or -not $approval.Success) {
+      throw "npm publish exited $exitCode"
+    }
+    Set-Clipboard -Value $approval.Value
+    Write-Host "npm approval URL copied to the clipboard."
+    Write-Host "Open it in the intended npm browser profile; waiting for publication."
+  } finally {
+    Pop-Location
   }
 }
 
@@ -459,9 +530,9 @@ registry=$registry
         tag_name = $Version
         target_commitish = $head
         name = "Tach $Version"
+        body = [string]$manifest.notes
         draft = $true
         prerelease = $packageVersion.Contains("-")
-        generate_release_notes = $true
       }
       Write-Host "Created draft GitHub release $Version"
     } elseif ($release.target_commitish -ne $head) {
@@ -472,6 +543,14 @@ registry=$registry
         target_commitish = $head
       }
       Write-Host "Retargeted empty draft release $Version"
+    }
+    if ($release.name -ne "Tach $Version" -or
+        $release.body -ne [string]$manifest.notes) {
+      $release = Invoke-GitHub "Patch" "/repos/$repository/releases/$($release.id)" @{
+        name = "Tach $Version"
+        body = [string]$manifest.notes
+      }
+      Write-Host "Updated human-authored GitHub release notes"
     }
 
     $publicFiles = @($manifest.artifacts.name) + @("release.json", "checksums.txt")
@@ -505,28 +584,12 @@ registry=$registry
       Write-Host "Uploaded $name"
       $release = Invoke-GitHub "Get" "/repos/$repository/releases/$($release.id)"
     }
-    if ($release.draft) {
-      $release = Invoke-GitHub "Patch" "/repos/$repository/releases/$($release.id)" @{
-        draft = $false
-      }
-      Write-Host "Published GitHub release $Version"
-    }
-
     $published = Get-PublishedNpmVersion
     if ($null -eq $published) {
       $archive = Join-Path $releaseDir "depths-tach-$packageVersion.tgz"
       Write-Host "npm will require interactive browser/2FA approval."
-      Invoke-Checked "npm" @(
-        "publish",
-        $archive,
-        "--access",
-        "public",
-        "--registry",
-        $registry,
-        "--userconfig",
-        $npmrc
-      )
-      for ($attempt = 0; $attempt -lt 30 -and $null -eq $published; $attempt++) {
+      Publish-Npm $archive $npmrc
+      for ($attempt = 0; $attempt -lt 300 -and $null -eq $published; $attempt++) {
         $published = Get-PublishedNpmVersion
         if ($null -eq $published) {
           Start-Sleep -Seconds 2
@@ -535,6 +598,12 @@ registry=$registry
     }
     if ($published -ne $packageVersion) {
       throw "npm did not publish $packageName@$packageVersion"
+    }
+    if ($release.draft) {
+      $release = Invoke-GitHub "Patch" "/repos/$repository/releases/$($release.id)" @{
+        draft = $false
+      }
+      Write-Host "Published GitHub release $Version"
     }
     Write-Host "Released $packageName@$packageVersion from commit $head"
   } finally {
