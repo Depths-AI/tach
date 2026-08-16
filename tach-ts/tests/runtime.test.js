@@ -117,7 +117,6 @@ function fakeWebGPU({
   failWork = false,
   scopeErrors = [],
   shaderError,
-  workDone,
 } = {}) {
   const buffers = [];
   const calls = {
@@ -157,7 +156,6 @@ function fakeWebGPU({
       },
       onSubmittedWorkDone() {
         calls.workDone++;
-        if (workDone) return workDone(calls.workDone);
         return failWork ? Promise.reject(undefined) : Promise.resolve();
       },
     },
@@ -263,31 +261,6 @@ function fakeWebGPU({
     gpu: {
       requestAdapter() {
         return Promise.resolve(adapter);
-      },
-    },
-  };
-}
-
-function fakeCanvas(width, height) {
-  const calls = { configured: 0, contexts: 0, textures: 0 };
-  const context = {
-    configure(configuration) {
-      calls.configured++;
-      calls.configuration = configuration;
-    },
-    getCurrentTexture() {
-      calls.textures++;
-      return { createView: () => ({}) };
-    },
-  };
-  return {
-    calls,
-    canvas: {
-      width,
-      height,
-      getContext(kind) {
-        calls.contexts++;
-        return kind === "webgpu" ? context : null;
       },
     },
   };
@@ -708,111 +681,6 @@ test("one submission batches dispatches without waiting for the queue", async ()
     assert.equal(fake.calls.dispatches, 4);
     assert.equal(fake.calls.submitted, 2);
     assert.equal(fake.calls.workDone, 1);
-  } finally {
-    gpu.close();
-  }
-});
-
-test("presentation batches a dynamic command and GPU-only canvas blit", async () => {
-  const fake = fakeWebGPU(), surface = fakeCanvas(2, 2);
-  const gpu = await tach({ gpu: fake.gpu });
-  try {
-    const pixels = gpu.buffer(new Uint32Array(4));
-    await gpu.present(
-      surface.canvas,
-      pixels,
-      clear.command(0, [pixels]),
-      fill.command(0, [pixels, 0xff00ffff]),
-    );
-    surface.canvas.width = 1;
-    surface.canvas.height = 4;
-    await gpu.present(
-      surface.canvas,
-      pixels,
-      fill.command(0, [pixels, 0xff00ffff]),
-    );
-
-    assert.equal(fake.calls.submitted, 2);
-    assert.equal(fake.calls.passes, 2);
-    assert.equal(fake.calls.dispatches, 5);
-    assert.equal(fake.calls.workDone, 2);
-    assert.equal(fake.calls.shaders, 3);
-    assert.equal(fake.calls.pipelines, 3);
-    assert.equal(surface.calls.contexts, 1);
-    assert.equal(surface.calls.configured, 1);
-    assert.equal(surface.calls.textures, 2);
-    assert.equal(surface.calls.configuration.format, "rgba8unorm");
-    assert.equal(surface.calls.configuration.alphaMode, "opaque");
-    assert.equal(
-      fake.buffers.some((buffer) =>
-        buffer.descriptor.label === "Tach readback"
-      ),
-      false,
-    );
-  } finally {
-    await gpu.idle();
-    gpu.close();
-  }
-});
-
-test("presentation permits one GPU frame and one waiting caller", async () => {
-  let release;
-  const fake = fakeWebGPU({
-      workDone(call) {
-        return call === 2
-          ? new Promise((resolve) => release = resolve)
-          : Promise.resolve();
-      },
-    }),
-    surface = fakeCanvas(2, 2),
-    gpu = await tach({ gpu: fake.gpu });
-  try {
-    const pixels = gpu.buffer(new Uint32Array(4)),
-      command = clear.command(0, [pixels]);
-    await gpu.present(surface.canvas, pixels, command);
-    const waiting = gpu.present(surface.canvas, pixels, command);
-    while (fake.calls.workDone < 2) await Promise.resolve();
-    assert.equal(fake.calls.submitted, 1);
-    assert.throws(
-      () => gpu.present(surface.canvas, pixels, command),
-      /another presentation is already pending/u,
-    );
-    release();
-    await waiting;
-    assert.equal(fake.calls.submitted, 2);
-  } finally {
-    await gpu.idle();
-    gpu.close();
-  }
-});
-
-test("presentation rejects invalid output before queue submission", async () => {
-  const fake = fakeWebGPU(), surface = fakeCanvas(3, 2);
-  const gpu = await tach({ gpu: fake.gpu });
-  try {
-    const pixels = gpu.buffer(new Uint32Array(4));
-    await assert.rejects(
-      gpu.present(surface.canvas, pixels, clear.command(0, [pixels])),
-      /requires 6 packed RGBA8 pixels, got 4/u,
-    );
-    assert.equal(fake.calls.submitted, 0);
-    assert.equal(surface.calls.textures, 0);
-  } finally {
-    gpu.close();
-  }
-});
-
-test("presentation output must have a generated buffer layout", async () => {
-  const fake = fakeWebGPU(), surface = fakeCanvas(1, 1);
-  const gpu = await tach({ gpu: fake.gpu });
-  try {
-    const pixels = gpu.buffer(new Uint32Array(1)),
-      data = gpu.buffer(new Uint32Array(1));
-    await assert.rejects(
-      gpu.present(surface.canvas, pixels, clear.command(0, [data])),
-      /presentation buffer must be materialized/u,
-    );
-    assert.equal(fake.calls.submitted, 0);
   } finally {
     gpu.close();
   }

@@ -7,7 +7,7 @@ import type {
   PreparedStep,
 } from "./driver.ts";
 import { normalizeError, TachError, type TachErrorCode } from "./api.ts";
-import type { PresentationCanvas, TachOptions } from "./api.ts";
+import type { TachOptions } from "./api.ts";
 
 const usage = {
   mapRead: 0x0001,
@@ -17,27 +17,7 @@ const usage = {
   storage: 0x0080,
 } as const;
 const shaderStageCompute = 0x0004;
-const textureUsage = { storage: 0x08, renderAttachment: 0x10 } as const;
 const noFailure = Symbol();
-
-const presentationShader = `
-struct Pixels { data: array<u32>, }
-@group(0) @binding(0) var<storage, read> pixels: Pixels;
-@group(0) @binding(1) var surface: texture_storage_2d<rgba8unorm, write>;
-
-@compute @workgroup_size(8, 8)
-fn present(@builtin(global_invocation_id) id: vec3<u32>) {
-  let size = textureDimensions(surface);
-  if (id.x >= size.x || id.y >= size.y) { return; }
-  let packed = pixels.data[id.y * size.x + id.x];
-  textureStore(surface, vec2<i32>(id.xy), vec4<f32>(
-    f32(packed & 255u),
-    f32((packed >> 8u) & 255u),
-    f32((packed >> 16u) & 255u),
-    f32(packed >> 24u),
-  ) / 255.0);
-}
-`;
 
 interface CompiledKernel {
   readonly layout: GPUBindGroupLayout;
@@ -46,11 +26,6 @@ interface CompiledKernel {
 interface ModuleCache {
   module?: Promise<GPUShaderModule>;
   readonly pipelines: Map<number, Promise<CompiledKernel>>;
-}
-interface Presentation {
-  readonly canvas: PresentationCanvas;
-  readonly pixels: DriverBuffer;
-  readonly byteLength: number;
 }
 
 const shaderCacheName = "tach-wgsl-v1";
@@ -118,10 +93,6 @@ function align(value: number, alignment: number): number {
 class WebDriver implements Driver {
   readonly adapter;
   readonly #modules = new WeakMap<ModuleDefinition, ModuleCache>();
-  readonly #canvases = new WeakMap<
-    PresentationCanvas,
-    GPUCanvasContext
-  >();
   readonly #bindGroups = new Map<string, GPUBindGroup>();
   readonly #objectIDs = new WeakMap<object, number>();
   readonly #scratch = new Map<
@@ -133,7 +104,6 @@ class WebDriver implements Driver {
   #nextObjectID = 1;
   #parameters?: GPUBuffer;
   #parameterCapacity = 0;
-  #presentation: Promise<CompiledKernel> | undefined;
   #closed = false;
   #lost?: GPUDeviceLostInfo;
 
@@ -385,14 +355,9 @@ class WebDriver implements Driver {
     await this.#compileCommands(commands);
   }
 
-  async #submit(
-    commands: readonly PreparedCommand[],
-    presentation?: Presentation,
-  ): Promise<void> {
+  async submit(commands: readonly PreparedCommand[]): Promise<void> {
     const compiled = await this.#compileCommands(commands);
-    const presenter = presentation ? await this.#compilePresentation() : null;
-    if (presentation) await this.idle();
-    await this.#capture(presentation ? "present" : "submit", "kernel", () => {
+    await this.#capture("submit", "kernel", () => {
       const scratch = this.#resolveScratch(commands),
         parameters = this.#writeParameters(commands);
       const encoder = this.device.createCommandEncoder({
@@ -416,129 +381,9 @@ class WebDriver implements Driver {
         };
         for (let repeat = 0; repeat < command.repeat; repeat++) record();
       }
-      if (presentation) {
-        this.#present(pass, presenter!, presentation);
-      }
       pass.end();
       this.device.queue.submit([encoder.finish()]);
     });
-  }
-
-  submit(commands: readonly PreparedCommand[]): Promise<void> {
-    return this.#submit(commands);
-  }
-
-  present(
-    commands: readonly PreparedCommand[],
-    canvas: PresentationCanvas,
-    pixels: DriverBuffer,
-    byteLength: number,
-  ): Promise<void> {
-    return this.#submit(commands, { canvas, pixels, byteLength });
-  }
-
-  async #compilePresentation(): Promise<CompiledKernel> {
-    let pending = this.#presentation;
-    if (!pending) {
-      pending = this.#capture("present", "kernel", async () => {
-        const module = this.device.createShaderModule({
-            label: "Tach presentation shader",
-            code: presentationShader,
-          }),
-          layout = this.device.createBindGroupLayout({
-            label: "Tach presentation group 0",
-            entries: [{
-              binding: 0,
-              visibility: shaderStageCompute,
-              buffer: { type: "read-only-storage", minBindingSize: 4 },
-            }, {
-              binding: 1,
-              visibility: shaderStageCompute,
-              storageTexture: {
-                access: "write-only",
-                format: "rgba8unorm",
-                viewDimension: "2d",
-              },
-            }],
-          });
-        return {
-          layout,
-          pipeline: await this.device.createComputePipelineAsync({
-            label: "Tach presentation",
-            layout: this.device.createPipelineLayout({
-              label: "Tach presentation layout",
-              bindGroupLayouts: [layout],
-            }),
-            compute: { module, entryPoint: "present" },
-          }),
-        };
-      });
-      this.#presentation = pending;
-    }
-    try {
-      return await pending;
-    } catch (cause) {
-      if (this.#presentation === pending) this.#presentation = undefined;
-      throw cause;
-    }
-  }
-
-  #present(
-    pass: GPUComputePassEncoder,
-    pipeline: CompiledKernel,
-    presentation: Presentation,
-  ): void {
-    const { canvas, byteLength } = presentation,
-      width = canvas.width,
-      height = canvas.height,
-      pixelCount = width * height;
-    if (
-      !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
-      width <= 0 || height <= 0 || !Number.isSafeInteger(pixelCount)
-    ) {
-      throw new RangeError(
-        "presentation canvas dimensions must be positive integers",
-      );
-    }
-    if (byteLength !== pixelCount * 4) {
-      throw new RangeError(
-        `presentation requires ${pixelCount} packed RGBA8 pixels, got ${
-          byteLength / 4
-        }`,
-      );
-    }
-    let context = this.#canvases.get(canvas);
-    if (!context) {
-      context = canvas.getContext("webgpu") as GPUCanvasContext | null ??
-        undefined;
-      if (!context) {
-        throw new TypeError("canvas does not provide a WebGPU context");
-      }
-      context.configure({
-        device: this.device,
-        format: "rgba8unorm",
-        usage: textureUsage.storage | textureUsage.renderAttachment,
-        alphaMode: "opaque",
-      });
-      this.#canvases.set(canvas, context);
-    }
-    const group = this.device.createBindGroup({
-      label: "Tach presentation group 0",
-      layout: pipeline.layout,
-      entries: [{
-        binding: 0,
-        resource: {
-          buffer: gpuBuffer(presentation.pixels),
-          size: byteLength,
-        },
-      }, {
-        binding: 1,
-        resource: context.getCurrentTexture().createView(),
-      }],
-    });
-    pass.setPipeline(pipeline.pipeline);
-    pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
   }
 
   #dispatch(

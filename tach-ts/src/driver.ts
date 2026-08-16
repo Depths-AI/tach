@@ -1,4 +1,4 @@
-import type { PresentationCanvas, TachAdapterInfo } from "./api.ts";
+import type { TachAdapterInfo } from "./api.ts";
 
 export type DriverBuffer = object | number;
 
@@ -193,12 +193,6 @@ export interface Driver {
   destroyBuffer(buffer: DriverBuffer): void;
   prepare(commands: readonly PreparedCommand[]): Promise<void>;
   submit(commands: readonly PreparedCommand[]): Promise<void>;
-  present?(
-    commands: readonly PreparedCommand[],
-    canvas: PresentationCanvas,
-    pixels: DriverBuffer,
-    byteLength: number,
-  ): Promise<void>;
   idle(): Promise<void>;
   close(): void;
 }

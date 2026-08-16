@@ -5,7 +5,6 @@ export type {
   ComputeCommand,
   LaunchOptions,
   LaunchSize,
-  PresentationCanvas,
   Tach,
   TachAdapterInfo,
   TachBackend,

@@ -1,5 +1,3 @@
-/// <reference lib="dom" />
-
 import { tach } from "@depths/tach";
 import * as programs from "#kernels";
 
@@ -110,52 +108,7 @@ const run = tach(async (gpu) => {
     [24, 48, 72, 96],
     "batched parameters",
   );
-
-  const canvas = document.createElement("canvas"), presentationFrames = 96;
-  canvas.width = 16;
-  canvas.height = 16;
-  document.body.append(canvas);
-  let blankCanvas = canvas.toDataURL();
-  const pixels = gpu.buffer(new Uint32Array(256));
-  await gpu.prepare(
-    programs.bitwise(pixels),
-    programs.reduceLanes(pixels, { size: 1 }),
-  );
-  for (let frame = 0; frame < presentationFrames; frame++) {
-    await new Promise(requestAnimationFrame);
-    const input = Uint32Array.from(
-      { length: 256 },
-      (_, index) => (0xff00_0000 | frame << 8 | index) >>> 0,
-    );
-    pixels.write(input);
-    if (frame === presentationFrames / 2) {
-      canvas.width = 8;
-      canvas.height = 32;
-      blankCanvas = canvas.toDataURL();
-    }
-    await gpu.present(
-      canvas,
-      pixels,
-      frame % 2 === 0
-        ? programs.reduceLanes(pixels, { size: 1 })
-        : programs.bitwise(pixels),
-    );
-  }
-  await gpu.idle();
-  await new Promise(requestAnimationFrame);
-  if (canvas.toDataURL() === blankCanvas) {
-    throw new Error("GPU presentation left the canvas blank");
-  }
-  equal(
-    await pixels.read(),
-    new Uint32Array(256).fill(expectedBitwise()),
-    "dynamic presentation",
-  );
-  return {
-    adapter: gpu.adapter,
-    presentations: presentationFrames,
-    programs: Object.keys(programs).length,
-  };
+  return { adapter: gpu.adapter, programs: Object.keys(programs).length };
 });
 
 Object.assign(globalThis, { __tachTest: run });
