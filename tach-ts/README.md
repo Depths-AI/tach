@@ -48,12 +48,12 @@ only specialized accelerator servers.
 
 Tach sits between a high-level tensor library and a low-level GPU API:
 
-- unlike a tensor framework, it lets you define arbitrary per-element logic,
-  memory access, stages, atomics, and workgroup cooperation;
-- unlike WebGPU or Vulkan, it owns provider resources, layouts, bindings,
-  synchronization plans, host codecs, and dual-backend compilation; and
-- unlike a shader preprocessor, it has its own checked project, module, type,
-  program, documentation, and generated-package model.
+- unlike a tensor framework, you write the per-element logic yourself,
+  including irregular access and explicit stages;
+- unlike WebGPU or Vulkan, you do not own shaders, bind groups, pipelines,
+  or a second native backend; and
+- unlike a shader string preprocessor, Tach is its own checked project:
+  modules, types, programs, docs, and one generated package.
 
 Tach is not a graphics-pipeline API, an AI framework, a CPU fallback system, or
 a promise that every small loop belongs on a GPU. It is the compact path from a
@@ -245,13 +245,12 @@ invocation 2 -> values[2]
 ...
 ```
 
-An **invocation** is one logical execution of an indexed Tach function. Its
-coordinate says which element, pixel, particle, cell, or matrix position it
-owns.
+An **invocation** is one run of an indexed Tach function. Its coordinate
+says which element, pixel, particle, or cell that run owns.
 
-A **dispatch** launches the required invocations. Hardware groups them into
-**workgroups**. Workgroups matter for launch geometry and local shared memory,
-but a beginner can usually accept Tach's defaults.
+A **dispatch** launches those runs. Hardware groups them into
+**workgroups** of up to 256. Workgroups matter when neighbors share a
+small scratchpad; until then, accept Tach's defaults.
 
 A **buffer** is typed storage that can stay on the GPU across many dispatches.
 Moving data between TypeScript and the GPU costs time, so useful applications
@@ -372,17 +371,19 @@ memory, or barriers. A workgroup may contain at most 256 invocations.
 
 ## 6. Functions: four roles, one consistent rule
 
-Two independent questions classify every function:
+Two independent questions classify every function. Indexed means it runs
+once per GPU coordinate. Exported means TypeScript can call it.
 
 | Indexed? | Exported? | Role |
 |---|---|---|
-| no | no | pure value helper |
-| yes | no | private GPU stage |
-| yes | yes | public one-dispatch shorthand |
-| no | yes | public multi-dispatch program or display view |
+| no | no | ordinary helper, like a private `function` in TypeScript |
+| yes | no | private GPU stage, called only from a Tach program |
+| yes | yes | the common case: one stage, one launch, one generated function |
+| no | yes | a program that runs several stages, or returns a display view |
 
 `export` has one meaning: generate a JavaScript/TypeScript recipe constructor.
-It does not control visibility inside Tach.
+It does not control visibility inside Tach. Private helpers and stages are
+visible to files that import them.
 
 ### 6.1 Pure helpers
 
@@ -499,12 +500,14 @@ resource identity explicit.
 
 ## 8. Display a GPU result without reading pixels through the CPU
 
-Rendering into a buffer and calling `read()` every frame would transfer the
-whole image to TypeScript. Tach instead makes display projection a first-class
-program result.
+If you computed an image in a buffer and called `read()` every frame, the
+whole frame would copy into JavaScript and then back onto the GPU to draw.
+Tach instead lets a program return a picture. You write linear
+floating-point RGBA. Tach converts that to 8-bit sRGB. In the browser,
+`present` draws it on a canvas. The pixels never visit the CPU.
 
-`view<srgb8>` describes an sRGB display image whose source is linear
-`float32x4` pixels:
+A view is not a `<canvas>` and not a DOM node. `view<srgb8>` is the
+finished image as a result type:
 
 ```tach
 type Frame = {
@@ -553,13 +556,16 @@ channel <= 0.0031308 ? 12.92 * channel
                      : 1.055 * pow(channel, 1 / 2.4) - 0.055
 ```
 
-Alpha is clamped without that transfer. Channels are then rounded to RGBA8.
+Alpha is clamped without that transfer. Channels are then rounded to one
+packed RGBA8 `uint32` word with `uint32(channel * 255 + 0.5)`. Both backends
+share that word. WebGPU stores it as `rgba8unorm` texels so `present` can
+write a canvas texture; Vulkan stores the word in packed scratch.
 
-When the final stage writes every pixel exactly once and the transient is not
-needed elsewhere, Tach folds projection into that final writer. Otherwise it
-emits a separate correct projection step. The source contract does not change.
-A caller-owned pixel buffer naturally takes the standalone path and remains
-available for later GPU work or an explicit CPU read.
+When the last stage already writes each pixel once, and nothing else needs
+the float buffer, Tach can convert in that same stage. Otherwise it adds a
+separate conversion step. TypeScript does not change. A buffer you still
+own naturally takes the separate step, so you can keep using those linear
+pixels.
 
 ### 8.1 Present in a browser
 
@@ -615,11 +621,9 @@ await gpu.submit(render({ width, height, time }));
 await gpu.idle();
 ```
 
-WebGPU projects to a reusable offscreen texture. Vulkan projects to a reusable
-packed RGBA8 output buffer. Neither path reads pixels to the CPU.
-
-Deno currently has no native presentation surface, so `gpu.present(...)`
-rejects there. Recipe construction and offscreen execution remain identical.
+Both hosts compute the picture and leave it on the GPU. Neither copies
+pixels to JavaScript. Deno has no window, so `gpu.present(...)` rejects
+there. Building the recipe and submitting it stay identical.
 
 Views cannot use `repeat`; one view recipe defines one frame.
 
@@ -821,37 +825,41 @@ reductions need not reproduce serial CPU order bit for bit.
 
 ## 12. Parallel correctness
 
-GPU invocations and workgroups may execute in any order. Correct code gives
-every write one of these foundations:
+GPU runs may finish in any order. A `for` loop in TypeScript does not.
+Correct code gives every write one of these foundations:
 
-1. one invocation uniquely owns the destination;
-2. an atomic operation resolves competing access;
-3. a workgroup barrier coordinates lanes within one workgroup; or
-4. another ordered dispatch provides device-wide sequencing.
+1. this run uniquely owns the destination, the way `scale` owns `values[i]`;
+2. an atomic operation updates a shared integer even if others update it
+   too;
+3. a barrier makes one team of at most 256 runs wait for each other; or
+4. a later `run` stage in a program sequences work after the previous
+   stage has finished.
 
-A bounds check prevents out-of-range access. It does not prevent two valid
-invocations from racing on the same element.
+A bounds check prevents writing off the end of an array. It does not
+prevent two valid runs from writing the same slot.
 
 ### 12.1 Shared memory
 
-`shared<T>` is workgroup-local scratch. It is zero-initialized, declared at the
-top level of an indexed stage, and requires explicit `@workgroup` geometry. It
-is not visible to other workgroups or later dispatches.
+`shared<T>` is a whiteboard for one team. It is zero-initialized, declared
+at the top of an indexed stage, and requires an explicit `@workgroup`
+size. The next team, and the next stage, cannot see it.
 
 ### 12.2 Atomics
 
-`atomic<int32>` and `atomic<uint32>` support atomic load, store, exchange, add,
-subtract, minimum, maximum, and bitwise updates. Atomic state in a public buffer
-persists across commands.
+`atomic<int32>` and `atomic<uint32>` support atomic load, store, exchange,
+add, subtract, minimum, maximum, and bitwise updates. Use them when many
+runs must update one integer. Atomic state in a public buffer survives
+across commands.
 
 ### 12.3 Barriers
 
-`workgroupBarrier()` orders workgroup memory. `bufferBarrier()` orders buffer
-memory for participating lanes in the same workgroup.
+`workgroupBarrier()` waits until every run in this team has reached that
+line, then lets them all continue, with shared memory visible. 
+`bufferBarrier()` does the same for buffer memory inside that team.
 
-Every invocation in the workgroup must reach a barrier under uniform control. A
-barrier inside a branch selected differently by different lanes can deadlock.
-Neither barrier synchronizes different workgroups.
+Every run in the team must reach the barrier. A barrier inside
+`if (i == 0)` will hang: the other runs never arrive. Neither barrier
+waits for a different team.
 
 ## 13. Structured documentation and generated API docs
 
@@ -1467,6 +1475,7 @@ optimize a Tach project. The repository references define compiler-facing
 details:
 
 - [language reference](https://github.com/Depths-AI/tach/blob/master/docs/language.md);
+- [examples guide](https://github.com/Depths-AI/tach/blob/master/examples/README.md);
 - [architecture](https://github.com/Depths-AI/tach/blob/master/docs/architecture.md);
 - [intermediate representations](https://github.com/Depths-AI/tach/blob/master/docs/ir.md);
 - [generated ABI](https://github.com/Depths-AI/tach/blob/master/docs/abi.md); and

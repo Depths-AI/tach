@@ -30,28 +30,29 @@ export function scale[i](
 
 Read it as ordinary typed code:
 
-- `type` declares an object-shaped value type;
-- `export function` makes a host-callable program;
-- `[i]` names one logical GPU coordinate;
-- `buffer<float32[]>` is runtime-sized GPU storage; and
-- `Params` is an immutable host value.
+- `type` declares an object-shaped value type, the way a TypeScript
+  `type` does;
+- `export function` makes a function TypeScript can call;
+- `[i]` names the index of this run;
+- `buffer<float32[]>` is an array that lives on the GPU; and
+- `Params` is an immutable value supplied from TypeScript for this call.
 
-An exported indexed function is baseline syntax sugar. It simultaneously
-defines an indexed GPU stage and a public program that dispatches that stage
-once over the host-provided launch size. No orchestration syntax is required
-for the common one-kernel case.
+An exported indexed function is the common case. It is both "what happens
+at index `i`" and "launch that work once over a size the host provides."
+You do not need a separate orchestration function until one operation has
+several ordered steps.
 
-The important mental model is "write one element, launch many elements." Each
-GPU invocation receives its own coordinate (`i` here), but every invocation
-runs the same stage. Invocations are not executed in source order. Correct
-code gives each invocation distinct output, or deliberately coordinates shared
-writes with atomics or workgroup synchronization.
+The important mental model is "write one element, launch many elements."
+Each run receives its own `i`, but every run executes the same body. Runs
+are not executed in source order. Correct code gives each run its own
+output slot, or deliberately coordinates shared writes with atomics or a
+later second stage.
 
-A buffer is persistent GPU storage, not a TypeScript array copied back after
-each stage. The host creates its handle once, constructs one or more generated
-recipes, and submits them. Reading is an explicit synchronization and transfer
-boundary. Keeping intermediate state in buffers or program-local transients is
-what allows the GPU to do sustained work without repeated CPU traffic.
+A buffer stays on the GPU. It is not a TypeScript array copied back after
+each call. The host creates the handle once, builds one or more recipes,
+and submits them. `read()` is an explicit wait-and-copy. Leaving
+intermediate state in buffers, or in program-local scratch, is what lets
+the GPU do sustained work without shipping every frame through JavaScript.
 
 ## 2. Projects, modules, imports, and function roles
 
@@ -140,19 +141,19 @@ from depending on each other in opposite directions even when the individual
 file edges do not form a cycle. This gives the compiler deterministic,
 parallelizable dependency branches without changing source visibility.
 
-There are three fundamental function roles:
+There are three fundamental function roles, plus one spelling that covers
+the common case:
 
 ```text
-function helper(values...): Result { ... }
-function stage[i](buffers..., values...) { ... }
-export function program(buffers..., values...) { ... }
+function helper(values...): Result { ... }     // ordinary value helper
+function stage[i](buffers..., values...) { }   // private GPU work
+export function program(...) { ... }           // several stages, or a view
+export function program[i](...) { ... }        // the usual one-launch kernel
 ```
 
-The fourth source spelling is the baseline shorthand:
-
-```text
-export function program[i](buffers..., values...) { ... }
-```
+Start with the last form. Introduce a helper when math repeats. Introduce
+a private stage plus an exported program when one TypeScript call must run
+several launches in order.
 
 ### Helpers
 
@@ -197,11 +198,11 @@ public program of the same name.
 
 ### Public programs
 
-An exported function without coordinates is host-callable orchestration. Its
-body contains untyped `const` declarations and `run` statements, plus a final
-view return when its result is `view<srgb8>`. Every program has at least one
-`run`. An ordinary program also has at least one external buffer parameter; a
-view program may instead create its complete image in a transient.
+An exported function without `[i]` is a recipe of ordered steps. TypeScript
+calls it once. Its body is not a pixel loop: it names scratch, then
+`run`s stages, and may finish with `return view(...)`. Every program has
+at least one `run`. An ordinary program also takes at least one public
+buffer; a view program may paint its whole image in scratch instead.
 
 ```tach
 function multiply[i](
@@ -245,8 +246,10 @@ from Tach and cannot be used as a `run` target.
 
 ### Display views
 
-`view<srgb8>` is the one display result type. It belongs only to an exported,
-unindexed program and is constructed by the program's final statement:
+A view is a finished picture, not a `<canvas>` and not a DOM node.
+`view<srgb8>` is the one display result type. It belongs only to an
+exported, unindexed program and is constructed by the program's final
+statement:
 
 ```tach
 function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
@@ -274,19 +277,20 @@ The first `view(...)` argument directly names a runtime
 are checked program shapes. The source resource's exact final version must be
 defined by the preceding dispatches. At preparation, both dimensions and their
 product must be positive and the source must contain at least
-`width * height` pixels; any extra source elements are not displayed. Target
-lowering applies the IEC sRGB
-transfer to RGB, clamps alpha to `[0, 1]`, and writes RGBA8 storage; source
-does not pack bytes or name a WebGPU texture, Vulkan image, canvas, or native
-surface.
+`width * height` pixels; any extra source elements are not displayed. You
+write linear floating-point RGBA, the way a renderer thinks about color.
+Tach converts RGB with the IEC sRGB transfer, clamps alpha to `[0, 1]`,
+and packs both to 8-bit channels. The browser stores those bytes as a
+canvas texture so `present` can draw them. Native Vulkan stores the same
+bytes in a packed buffer. Source does not pack bytes or name a canvas,
+texture, or native window.
 
 The generated function returns `ComputeView`, a subtype of `ComputeCommand`.
-Submitting it performs the full program and backend projection without a CPU
-readback. In a browser, `gpu.present(canvas, view)` executes the same recipe
-directly into a same-sized WebGPU canvas and waits for completion to provide
-frame backpressure. The current Deno/Vulkan host executes views into native
-packed scratch through `submit`; it has no native surface and therefore
-rejects `present`.
+`submit(view)` computes the picture and leaves it on the GPU. In a
+browser, `gpu.present(canvas, view)` draws it on a same-sized canvas and
+waits until that frame is done, so a render loop cannot queue forever.
+Deno/Vulkan can still `submit` the same view; it has no window, so
+`present` rejects there.
 
 View programs are ordinary recipes. They may take session-owned public
 buffers, or only scalar/struct values and internal transients. The latter form
@@ -352,7 +356,14 @@ whitespace is accepted. Tach has no block-comment form.
 
 ## 4. Coordinates, workgroups, and launch size
 
-Every coordinate is an immutable `uint32`. Names are local to the stage:
+A coordinate is the index of this run: `i` for a line, `[x, y]` for an
+image, `[x, y, z]` for a volume. Each one is an immutable `uint32`. Names
+are local to the stage:
+
+Hardware groups runs into **workgroups**. You can ignore that word until
+you need a small scratchpad that only one team shares. Tach picks a
+default size; extra runs past the array still happen, which is why
+kernels keep a bounds check.
 
 ```tach
 export function volume[x, y, z](out: buffer<uint32[]>) {
@@ -380,7 +391,7 @@ For explicit programs, each `run` supplies its stage domain and the generated
 host function accepts only `CommandOptions`, not a launch size.
 
 Tach rounds each domain axis up to whole workgroups. Extra coordinates may
-execute at the edge. Source owns bounds guards.
+run at the edge. Your kernel owns the bounds check.
 
 Default workgroups are:
 
@@ -410,7 +421,14 @@ must state an explicit workgroup.
 
 ## 5. Program shapes and transient storage
 
-A `run` domain is one shape for a 1D stage or a bracketed list for 2D/3D:
+A public program is a short recipe of ordered steps, not a loop over
+pixels. `run stage(...) over count` means: launch that stage across
+`count` indices, then go on. `transient<T>(length)` is scratch the
+TypeScript side never sees: allocated for this program, thrown away after
+it, and not zero-filled. A later step may read it only after an earlier
+step has written it.
+
+A `run` domain is one size for a 1D stage or a bracketed list for 2D/3D:
 
 ```tach
 function fill[x, y](out: buffer<uint32[]>, width: uint32) {
@@ -706,8 +724,12 @@ shape expressions.
 
 ## 12. Shared memory, atomics, and barriers
 
-An uninitialized top-level stage declaration `let name: shared<T>;` allocates
-zero-initialized workgroup memory:
+Most kernels never need this section. If each run owns a different slot,
+you are done. Reach for the tools below only when runs must meet: a
+count, a histogram, a reduction inside one team of at most 256.
+
+An uninitialized top-level stage declaration `let name: shared<T>;` is a
+whiteboard for that team. It is zero before your code runs:
 
 ```tach
 @workgroup(64)
@@ -739,15 +761,20 @@ Atomic operations receive an addressable atomic place:
 | `atomicAnd`, `atomicOr`, `atomicXor` | bitwise update | previous value |
 | `atomicExchange` | replacement | previous value |
 
-Buffer atomics use device scope; shared atomics use workgroup scope. Atomic
-operations are relaxed.
+Atomics on a public buffer are visible to every run on the device. Atomics
+on shared memory are visible only inside this team. Updates are relaxed:
+they do not imply a wait. Use a barrier when the next line must see
+everyone else's write.
 
-`workgroupBarrier()` synchronizes workgroup memory within one workgroup.
-`bufferBarrier()` synchronizes storage-buffer memory within one workgroup.
-Every invocation must reach a barrier together. Tach rejects barriers under
-control derived from coordinates, mutable memory loads, atomic results, or
-other varying values. Here *uniform* means equal across a workgroup, not a
-source type or storage class.
+A normal `total += 1` from many runs can lose updates. `atomicAdd` cannot.
+
+`workgroupBarrier()` waits until every run in this team has reached that
+line, then continues with shared memory visible.
+`bufferBarrier()` does the same for buffer memory inside that team.
+Everyone must arrive. Tach rejects a barrier inside a branch that
+different runs might take differently — for example anything derived from
+the coordinate `i`, from a buffer load, or from an atomic result. *Uniform*
+here means "the same decision for every run in the team," not a type.
 
 ## 13. Lexical and scope rules
 

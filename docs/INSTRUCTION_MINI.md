@@ -125,8 +125,9 @@ only. See §26: scalars,
 
 `view<srgb8>` is not an ordinary value type. It is only an exported
 unindexed-program result over final linear `float32x4[]` pixels and checked
-positive width/height. Backends apply IEC sRGB conversion and RGBA8 output;
-source never packs display bytes or names provider objects. See §18: view
+positive width/height. Both backends pack one RGBA8 `uint32` word after IEC
+sRGB conversion; WebGPU stores it as an `rgba8unorm` texel and Vulkan as that
+word. Source never packs display bytes or names provider objects. See §18: view
 programs and §26: type boundary.
 
 `buffer<T>` is addressable GPU storage; access is inferred. Distinct public

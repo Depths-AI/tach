@@ -174,8 +174,8 @@ try {
     }
     if (evaluation.result.value) {
       if (
-        evaluation.result.value.programs !== 9 ||
-        evaluation.result.value.presentedFrames !== 33 ||
+        evaluation.result.value.programs !== 11 ||
+        evaluation.result.value.presentedFrames !== 35 ||
         evaluation.result.value.pngBytes < 100
       ) {
         throw new Error(

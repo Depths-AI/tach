@@ -1,5 +1,10 @@
 # Tach IR: Flow programs and Kernel templates
 
+This page is for contributors who need the compiler's portable meaning,
+not for application authors. Kernel authors do not write this notation.
+If you are learning to call Tach from TypeScript, use the
+[language guide](language.md) and the [examples](../examples/README.md).
+
 Tach has two target-independent intermediate representations:
 
 - **Flow IR** describes host-callable programs, resources, shapes, versions,
@@ -14,8 +19,7 @@ private physical kernels. IR dump methods remain contributor diagnostics and tes
 oracles rather than a public command, emitted artifact, or accepted input
 language.
 
-Kernel authors do not need this notation. Contributors should understand the
-identity boundary:
+The identity boundary is:
 
 ```text
 public program -> Flow dispatch -> logical stage -> physical target kernel
@@ -503,9 +507,11 @@ It does not deduplicate identical stage clones or fuse adjacent source
 dispatches. A narrow terminal-view rule is the exception: when the last
 dispatch completely and exclusively writes one transient element at its exact
 1D coordinate, its domain equals `width * height`, and the transient is not
-otherwise needed, planning rewrites that final store directly to target color
-output. Otherwise planning adds one standalone projection kernel. Both plans
-implement the same Flow view.
+otherwise needed, planning rewrites that final store through the shared pack
+sequence. Otherwise planning adds one standalone projection kernel. Both
+plans implement the same Flow view and the same packed RGBA8 `uint32` word.
+WGSL then unpacks those bytes into an `rgba8unorm` texture store. SPIR-V
+stores the word in a storage buffer.
 
 ## 12. Backend mapping
 
@@ -524,7 +530,7 @@ implement the same Flow view.
 | source barrier | WGSL barrier | `OpControlBarrier` |
 | plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier2` in Tach's Vulkan 1.3 runtime |
 | view output | `rgba8unorm` storage texture | packed `uint32[]` RGBA8 scratch |
-| terminal view conversion | direct texture store or projection kernel | direct packed store or projection kernel |
+| terminal view conversion | unpack packed word to `textureStore` | store packed `uint32` |
 
 Backend coordinate optimization may map exact modulo/row-major expressions to
 local coordinate inputs and remove dead global inputs. It never changes

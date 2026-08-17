@@ -101,6 +101,41 @@ async function verifyLanguage(gpu: Tach): Promise<void> {
 const width = 128, height = 72;
 const reusableView = programs.gradient({ width, height, bias: 0 });
 
+const swatchLinear = [0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1];
+const swatchBytes = [0, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 255, 255, 0, 255];
+
+async function presentedBytes(canvas: HTMLCanvasElement): Promise<number[]> {
+  const blob = await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob(
+      (image) => image ? resolve(image) : reject(new Error("PNG capture failed")),
+      "image/png",
+    )
+  );
+  const bitmap = await createImageBitmap(blob, { colorSpaceConversion: "none" });
+  const probe = document.createElement("canvas");
+  probe.width = canvas.width;
+  probe.height = canvas.height;
+  const context = probe.getContext("2d");
+  if (!context) throw new Error("2d probe canvas is unavailable");
+  context.drawImage(bitmap, 0, 0);
+  return [...context.getImageData(0, 0, canvas.width, canvas.height).data];
+}
+
+async function verifySwatch(gpu: Tach, fused: boolean): Promise<void> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 2;
+  canvas.height = 2;
+  document.body.append(canvas);
+  if (fused) {
+    await gpu.present(canvas, programs.swatch());
+  } else {
+    const pixels = gpu.buffer(new Float32Array(16));
+    await gpu.present(canvas, programs.swatchInto(pixels));
+    equal(Array.from(await pixels.read()), swatchLinear, "external swatch source");
+  }
+  equal(await presentedBytes(canvas), swatchBytes, fused ? "fused" : "fallback");
+}
+
 const run = tach(async (gpu) => {
   equal(Object.keys(programs).sort(), [
     "accumulate",
@@ -111,12 +146,16 @@ const run = tach(async (gpu) => {
     "math",
     "reduceLanes",
     "scale",
+    "swatch",
+    "swatchInto",
     "transform",
   ], "public programs");
   await verifyLanguage(gpu);
 
   await gpu.prepare(reusableView);
   await gpu.submit(reusableView);
+  await verifySwatch(gpu, true);
+  await verifySwatch(gpu, false);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -152,7 +191,7 @@ const run = tach(async (gpu) => {
   return {
     adapter: gpu.adapter,
     programs: Object.keys(programs).length,
-    presentedFrames: views.length + 1,
+    presentedFrames: views.length + 3,
     pngBytes: image.size,
   };
 });

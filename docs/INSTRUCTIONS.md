@@ -770,11 +770,15 @@ final version must be defined, so a transient frame needs a preceding complete
 write.
 
 Pixels are linear RGBA. Backend lowering clamps RGB, applies the IEC sRGB
-transfer, clamps alpha, and emits RGBA8. Tach source never packs bytes or names
-a texture, surface, canvas, WebGPU object, or Vulkan object. Target planning
-may fold projection into a proven final one-pixel-per-index dispatch and remove
-the full-frame float transient; otherwise it adds a projection stage. This is
-an implementation choice with identical source and host behavior.
+transfer, clamps alpha, and quantizes every channel with
+`uint32(channel * 255 + 0.5)` into one packed RGBA8 `uint32` word. Both
+targets share that word. WebGPU unpacks it into an `rgba8unorm` texture so
+`present` can write a 2D image; Vulkan stores the word in packed scratch. Tach
+source never packs bytes or names a texture, surface, canvas, WebGPU object,
+or Vulkan object. Target planning may fold projection into a proven final
+one-pixel-per-index dispatch and remove the full-frame float transient;
+otherwise it adds a projection stage. This is an implementation choice with
+identical source and host behavior.
 
 The generated function returns `ComputeView`, which extends `ComputeCommand`.
 Use `submit(view)` for offscreen projection on either host. Use
@@ -2467,7 +2471,9 @@ diagnostic.
 
 For views, exercise a scalar-only transient frame and a caller-owned pixel
 buffer. The former covers terminal fusion and owner-neutral recipe reuse; the
-latter covers standalone projection and buffer ownership. Use unequal extents,
+latter covers standalone projection and buffer ownership. Also exercise a
+tiny known-color swatch on both paths so the shared pack can be checked as
+exact 8-bit display bytes, not only as a non-empty PNG. Use unequal extents,
 verify the source has at least `width * height` pixels, compare the displayed
 canvas to expected output in a real browser, submit native views without
 readback in the hot path, and test extent mismatch plus non-view rejection.

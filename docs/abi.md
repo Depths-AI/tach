@@ -1,13 +1,14 @@
 # Tach program, memory, and runtime ABI
 
+This is the byte-and-lifetime contract between the compiler and the two
+runtimes. Application code does not implement it. You consume generated
+modules and `@depths/tach`. Read this when a generated signature, a
+buffer layout, or a view's on-GPU storage has to be exact.
+
 Tach owns one external contract across a complete source project, generated
 JavaScript/TypeScript, WebGPU/WGSL, Vulkan/SPIR-V, and reflection metadata.
 This document defines names, resource identity, bytes, physical dispatch
 plans, launch geometry, lifetime, and synchronization.
-
-Application code normally consumes generated modules and `@depths/tach`; it
-does not implement this ABI. The Tach-owned WebGPU/Vulkan drivers and compiler
-contributors need the complete contract.
 
 See [the language guide](language.md) for source semantics and
 [the IR guide](ir.md) for logical programs, kernel templates, and executable
@@ -15,13 +16,13 @@ plans.
 
 ## 1. Three connected boundaries
 
-The ABI separates three identities that a one-function example can make look
-the same:
+The ABI separates three identities that `export function scale[i]` can
+make look like one name:
 
 ```text
-public program       host-callable generated function
-logical stage        indexed portable GPU operation
-physical kernel      target entry created for one dispatch
+public program       the TypeScript function you call
+logical stage        the portable per-index GPU work
+physical kernel      the private shader entry created for one launch
 ```
 
 For baseline shorthand:
@@ -360,7 +361,8 @@ checks that `width * height` is a positive safe product and that an unfused
 source contains at least that many complete 16-byte pixels. Extra source
 elements are ignored.
 
-Each source pixel is linear `(red, green, blue, alpha)`. For each RGB channel,
+Each source pixel is linear `(red, green, blue, alpha)`: the color space a
+renderer thinks in, not the bytes a monitor wants. For each RGB channel,
 target lowering first clamps to `[0, 1]`, then applies:
 
 ```text
@@ -368,11 +370,13 @@ channel <= 0.0031308 ? 12.92 * channel
                      : 1.055 * pow(channel, 1 / 2.4) - 0.055
 ```
 
-Alpha is clamped to `[0, 1]` without transfer. Native packing converts each
-channel with `uint32(channel * 255 + 0.5)` and places R, G, B, A in successive
-low-to-high bytes. Web writes the equivalent normalized values to
-`rgba8unorm`. This conversion is compiler/backend work, never Tach source or a
-TypeScript readback pass.
+Alpha is clamped to `[0, 1]` without transfer. Both targets then quantize
+each channel with `uint32(channel * 255 + 0.5)` and pack R, G, B, A into one
+little-endian `uint32` word. That word is the portable display pixel. WebGPU
+unpacks it to `k / 255` and `textureStore`s an `rgba8unorm` texel so `present`
+can write a 2D image. Vulkan stores the word in packed scratch. This
+conversion is compiler/backend work, never Tach source or a TypeScript
+readback pass.
 
 ## 10. Runtime metadata schema 2
 
@@ -646,8 +650,9 @@ emitted.
 The runtime builds layouts from metadata and never parses WGSL.
 
 A Web view output binding is `texture_storage_2d<rgba8unorm, write>`. A fused
-terminal entry converts and stores its own final pixel. A fallback entry reads
-the final `float32x4[]` resource over `[width, height]` and writes the texture.
+terminal entry packs its own final pixel and unpacks that word into the
+texture. A fallback entry reads the final `float32x4[]` resource over
+`[width, height]`, applies the same pack, and writes the texture.
 The generated package stores this complete module as deterministic gzip in
 `kernel.wgsl.gz`; the browser driver decompresses it before module creation.
 
@@ -668,9 +673,9 @@ an `OpConstantNull` initializer and the host requires
 inserted. The host also requires Synchronization2 for plan barriers.
 
 A native view uses a storage-buffer output with one packed little-endian RGBA8
-`uint32` per pixel. The same fused/fallback distinction applies, with shared
-compiler-generated IEC sRGB conversion and alpha clamping. This is an
-offscreen compute result; it does not imply a Vulkan surface or swapchain.
+`uint32` per pixel. The same fused/fallback distinction and the same pack
+sequence apply; only the container differs. This is an offscreen compute
+result; it does not imply a Vulkan surface or swapchain.
 
 ## 13. Host values and materialization
 

@@ -11,11 +11,11 @@
 # Tach
 
 Tach is a small, typed language for general-purpose GPU programming from
-TypeScript applications. Its goal is to make directly authored GPU compute
-ergonomic for TypeScript developers. Kernels look familiar, while Tach
-handles the GPU-specific work that normally surrounds them: shader entry
-points, bindings, memory layout, launch geometry, resource lifetimes, display
-projection, target validation, and host bindings.
+TypeScript applications. You write the parallel work the way you would write
+a typed function. Tach owns the GPU ceremony that normally surrounds that
+function: how the work is launched, how memory is laid out, how buffers
+live across calls, how a finished image reaches a canvas, and how the same
+program is checked for the browser and for native Vulkan.
 
 ```tach
 export function scale[i](
@@ -28,14 +28,14 @@ export function scale[i](
 }
 ```
 
-One Tach project currently produces validated WGSL for browser WebGPU,
-validated SPIR-V 1.6 for Vulkan 1.3, and a typed JavaScript interface for both.
-Application code uses the same buffers, command recipes, and generated
-functions on either host; it does not contain a WebGPU/Vulkan branch. Browser
-applications can also present a Tach `view<srgb8>` directly to a canvas
-without copying the frame through CPU memory. A native MSL backend is planned
-for an upcoming version, extending the same model to Apple GPUs without
-changing Tach source into Metal-specific code.
+One Tach project currently produces a typed JavaScript interface plus the two
+GPU programs behind it: WGSL for browser WebGPU, and SPIR-V 1.6 for Vulkan
+1.3. Application code uses the same buffers, recipes, and generated functions
+on either host; it does not contain a WebGPU/Vulkan branch. A browser can
+also `present` a Tach `view<srgb8>` straight to a canvas, so a finished
+frame does not copy through JavaScript. A native MSL backend is planned for
+an upcoming version, extending the same model to Apple GPUs without changing
+Tach source into Metal-specific code.
 
 Tach is deliberately a compute language rather than a graphics API, tensor
 framework, or thin shader wrapper. It is intended for simulation, procedural
@@ -45,37 +45,37 @@ directly.
 
 ## The GPU model in plain language
 
-A CPU normally follows a small number of instruction streams. A GPU becomes
-useful when the same operation can run for many independent coordinates at
-once: one array element, pixel, particle, matrix cell, or simulation cell per
-invocation. Tach lets you write what one invocation does, then describes how
-many invocations exist.
+A CPU normally follows one instruction stream. It walks an array with a
+`for` loop, one index after another. A GPU is useful when the same work can
+happen at many indices at once: one array element, pixel, particle, or
+simulation cell per run. Tach lets you write what one run does, then says
+how many runs exist.
 
-In the opening `scale` example, `[i]` is the current array index. Thousands of
-invocations may evaluate the same function with different `i` values.
+In the opening `scale` example, `[i]` is the current array index. Thousands
+of runs may evaluate the same function with different `i` values.
 `buffer<float32[]>` is storage that stays on the GPU across commands, while
-`factor` is a small immutable value supplied for this operation. The bounds
-guard matters because GPUs launch fixed-size groups and the final group may
-extend past the logical array end.
+`factor` is a small immutable value supplied for this call. The
+`if (i < values.length)` guard is not timid style. GPUs launch work in
+fixed-size groups, so the last group may extend past the array. Extra runs
+must do nothing.
 
 Three terms cover most Tach code:
 
-- A **stage** is the work performed for one logical coordinate.
+- A **stage** is the work performed for one index (or pixel, or particle).
 - A **dispatch** launches that stage across a 1D, 2D, or 3D domain.
-- A **recipe** is the complete host-callable operation: one dispatch, or an
-  ordered set of dispatches with compiler-managed temporary storage.
+- A **recipe** is the object a generated TypeScript function returns: one
+  dispatch, or several in order, with compiler-managed scratch.
 
-Calling a generated TypeScript function constructs a recipe; it does not run
-anything. `gpu.submit(recipe)` queues it. Buffers remain resident until the
-application explicitly reads or destroys them. That separation is the core
-performance rule: send compact inputs and commands to the GPU, keep large
-intermediate data there, and read only results the CPU genuinely needs.
+Calling `scale(...)` constructs a recipe; it does not run anything.
+`gpu.submit(recipe)` queues it. Buffers stay on the GPU until the
+application explicitly `read()`s or destroys them. That separation is the
+core performance rule: send compact inputs and commands, keep large
+intermediate data on the GPU, and read only what JavaScript genuinely needs.
 
-Display output follows the same model. A Tach program can return
-`view<srgb8>` from linear floating-point pixels. The compiler chooses texture
-or packed-buffer representation, performs color conversion, and can fold that
-projection into the final pixel stage. A browser then calls `present` to draw
-the GPU result directly without a GPU-to-CPU-to-GPU round trip.
+Display follows the same model. You write linear floating-point pixels and
+return `view<srgb8>`. Tach converts those pixels into 8-bit sRGB for a
+screen. A browser then calls `present` to draw the GPU result directly,
+without copying the frame through JavaScript.
 
 ## Why Tach exists
 
@@ -85,9 +85,9 @@ there is a large gap between high-level libraries and low-level GPU APIs.
 At one end, a framework can provide tensors, operators, automatic
 differentiation, or an entire rendering model. That is wonderfully productive
 when the problem fits the framework. At the other end, WebGPU provides direct
-and portable access to GPU resources, but the application must own shader
-source, layouts, bind groups, pipeline construction, command encoding,
-readback, validation, and usually a separate answer for native execution.
+and portable access to the GPU, but the application must own the shader
+text, the resource plumbing, command encoding, readback, validation, and
+usually a separate answer for native execution.
 
 Tach occupies the space between those ends. The algorithm remains an explicit
 kernel, but the ceremony becomes compiler-owned. The language is narrow enough
@@ -264,12 +264,12 @@ the end of a scoped session are completion boundaries.
 
 Tach keeps simple kernels short without making larger algorithms opaque:
 
-| Source form | Meaning | Generated host API |
+| Source form | Meaning | In TypeScript |
 |---|---|---|
-| `function helper(...)` | Value helper called by kernels | None |
-| `function stage[i](...)` | Private indexed GPU stage | None |
-| `export function kernel[i](...)` | Indexed stage with a synthesized one-dispatch program | Typed recipe constructor |
-| `export function program(...)` | Explicit orchestration of one or more stages, optionally returning a display view | Typed recipe or view constructor |
+| `function helper(...)` | Ordinary value helper, called by GPU stages | Not exported |
+| `function stage[i](...)` | Private GPU work for one index | Not exported |
+| `export function kernel[i](...)` | The common case: one stage, one launch | Typed recipe constructor |
+| `export function program(...)` | Several stages in order, optionally a display view | Typed recipe or view constructor |
 
 The brackets declare logical invocation coordinates. A two-dimensional kernel
 can use `[x, y]`; the host then supplies a matching logical size:
@@ -305,14 +305,16 @@ Files import other project files by extensionless module/kernel identity:
 import "data/particles";
 ```
 
-Declarations from the current file and directly imported files are visible.
-Imports are not transitive, names are unique across the project, and the
-compiler rejects cyclic file or module dependencies.
+Declarations from the current file and from files it directly imports are
+visible. Imports are not transitive: unlike `export *` in TypeScript,
+importing a file does not also expose that file's imports. Names are unique
+across the project, and the compiler rejects cyclic file or module
+dependencies.
 
 ## Compose multi-stage work
 
-An exported indexed function is the concise path for one dispatch. When an
-operation needs several stages, export an orchestration function instead:
+An exported indexed function is the concise path for one launch. When one
+operation needs several ordered steps, export a program instead:
 
 ```tach
 function multiply[i](
@@ -381,9 +383,8 @@ export function gradient(width: uint32, height: uint32): view<srgb8> {
 ```
 
 The generated function returns `ComputeView`, which is also a
-`ComputeCommand`. `submit(view)` performs offscreen projection on WebGPU and
-Vulkan without readback. In a browser, present directly to a same-sized
-canvas:
+`ComputeCommand`. `submit(view)` computes the picture and leaves it on the
+GPU. In a browser, `present` draws it on a same-sized canvas:
 
 ```ts
 import { tach } from "@depths/tach";
@@ -398,11 +399,13 @@ try {
 }
 ```
 
-The program emits linear `float32x4` pixels. Target lowering applies sRGB
-conversion and selects a WebGPU storage texture or Vulkan packed output. When
-the final stage writes exactly one transient element per pixel, projection is
-folded into that dispatch and the full-frame float transient disappears. The
-source API is unchanged when the fallback projection is required.
+You write linear `float32x4` pixels. Tach converts them to 8-bit sRGB for
+display. The browser stores that picture as a canvas texture; native Vulkan
+stores the same bytes in a packed buffer. When the last pixel-writing stage
+already writes each pixel once, Tach can do the conversion in that stage
+and skip the extra full-frame float buffer. If the pixels belong to a
+buffer you still need, it converts in a separate step. The TypeScript API
+does not change.
 
 ## Documentation and agent guidance
 
@@ -431,6 +434,8 @@ Other available commands are shown by `npx tach help`.
 
 - [Language guide](docs/language.md) - syntax, types, expressions, imports,
   programs, memory, synchronization, documentation, and diagnostics.
+- [Examples guide](examples/README.md) - the canonical kernels, what each
+  one does, and why it is in the corpus.
 - [TypeScript guide](tach-ts/README.md) - runtime behavior, buffers, commands,
   execution, readback, errors, and generated bindings.
 - [AI-agent guide](docs/INSTRUCTIONS.md) - the complete language and tooling

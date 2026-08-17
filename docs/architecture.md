@@ -1,11 +1,18 @@
 # Tach compiler and runtime architecture
 
-Tach has one project compiler, two target-independent IRs, two target
-executable plans, two shader emitters, one canonical host layout, and one
-managed runtime with WebGPU and Tach-owned Vulkan drivers. The split keeps
-baseline syntax small while giving imports, explicit multi-dispatch programs,
-and display views real representations instead of hiding orchestration or
-presentation in generated glue.
+This is how Tach is built, not how to write a first kernel. If you want to
+author GPU work from TypeScript, start with the [root README](../README.md),
+the [language guide](language.md), the [examples](../examples/README.md),
+and the [TypeScript guide](../tach-ts/README.md). Come here when you need
+to know why a view is not a canvas, why WebGPU and Vulkan share one pack
+but not one container, or where a change belongs.
+
+Tach has one project compiler, two target-independent intermediate
+representations, two target executable plans, two shader emitters, one
+canonical host layout, and one managed runtime with WebGPU and Tach-owned
+Vulkan drivers. The split keeps beginner syntax small: imports, multi-step
+programs, and display views have real compiler objects instead of living
+as generated glue.
 
 For exact source rules, read [the language guide](language.md). For internal
 data models, read [the IR guide](ir.md). For bytes and host execution, read
@@ -334,11 +341,13 @@ length and `width * height`, and no earlier use requires the result. The
 transient and standalone projection then disappear.
 
 All other valid views receive one target-owned projection kernel that reads
-the final float pixel resource. WGSL writes an `rgba8unorm` storage texture.
-SPIR-V writes one packed RGBA8 `uint32` per pixel. Both paths apply the same
-IEC sRGB transfer to RGB and clamp alpha. View commands cannot use repeat;
-repeating a display recipe has no useful externally visible intermediate
-result and complicates the terminal resource contract.
+the final float pixel resource. Both targets first lower each pixel to one
+packed RGBA8 `uint32` word: IEC sRGB on RGB, clamp-only alpha, then
+`uint32(channel * 255 + 0.5)` with R, G, B, A in low-to-high bytes. WGSL
+unpacks that word into an `rgba8unorm` storage texture so `present` can write
+a 2D image. SPIR-V stores the word in packed scratch. View commands cannot
+use repeat; repeating a display recipe has no useful externally visible
+intermediate result and complicates the terminal resource contract.
 
 ## 8. Coordinate lowering
 
@@ -384,8 +393,10 @@ No target independently recalculates ABI offsets.
 
 1. indexes physical and helper function coordinate requirements;
 2. emits structs, resources, parameter blocks, helpers, and private entries;
-3. maps structured Kernel IR directly to structured WGSL;
-4. emits direct or standalone view projection into a storage texture; and
+3. maps structured Kernel IR directly to structured WGSL, including the
+   shared view-pack helper;
+4. stores a fused or standalone view by unpacking the packed word into an
+   `rgba8unorm` storage texture; and
 5. reparses the exact generated WGSL subset with its in-tree validator.
 
 Fixed resources use aligned wrappers; runtime tails retain natural stride.
@@ -409,10 +420,10 @@ SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
 conversion prevents padding and physical bool words from entering value
 semantics.
 
-For views, the fused path rewrites the proven terminal pixel store to packed
-color output; the fallback path adds a projection entry. Both produce packed
-RGBA8 storage for the native runtime without importing browser texture
-semantics into logical IR.
+For views, planning rewrites a proven terminal store, or adds a projection
+entry, through the same pack sequence used by WGSL. SPIR-V stores that packed
+`uint32` for the native runtime without importing browser texture semantics
+into logical IR.
 
 Tach requires Vulkan's `shaderZeroInitializeWorkgroupMemory` feature. The
 SPIR-V emitter gives every Workgroup variable an `OpConstantNull` initializer,
@@ -606,11 +617,12 @@ Tests mirror ownership:
 - SPIR-V mutation tests corrupt valid modules and require rejection;
 - `browser-test` builds the example project once and checks every generated
   endpoint through its exact generated WGSL in WebGPU, including fused and
-  fallback views plus sustained CPU-selected canvas presentation;
+  fallback views, exact 8-bit swatch presentation, and sustained CPU-selected
+  canvas presentation;
 - `deno-test` independently builds the same example project, validates its
   SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
-  including fused/fallback offscreen projection, owner-neutral recipes, and
-  repeated logical sessions;
+  including fused/fallback offscreen projection, the same swatch pair,
+  owner-neutral recipes, and repeated logical sessions;
 - `showcase-ts` builds one six-kernel project and runs the same host-neutral
   renderers, mathematical workloads, and physics simulations through both
   WebGPU and Vulkan; browser renderers use direct canvas presentation while
