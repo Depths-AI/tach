@@ -510,7 +510,7 @@ dispatch completely and exclusively writes one transient element at its exact
 otherwise needed, planning rewrites that final store through the shared pack
 sequence. Otherwise planning adds one standalone projection kernel. Both
 plans implement the same Flow view and the same packed RGBA8 `uint32` word.
-WGSL then unpacks those bytes into an `rgba8unorm` texture store. SPIR-V
+WGSL then unpacks those bytes with `unpack4x8unorm` into an `rgba8unorm` texture store. SPIR-V
 stores the word in a storage buffer.
 
 ## 12. Backend mapping
@@ -522,12 +522,12 @@ stores the word in a storage buffer.
 | plain stage value | reconstructed uniform-block leaf | reconstructed uniform-block leaf |
 | immutable value | expression or private local | SSA result ID |
 | buffer/shared place | access expression | pointer/access chain |
-| load/store | expression/assignment | `OpLoad` / `OpStore` |
+| load/store | expression/assignment | `OpLoad` / `OpStore` (host-ABI Aligned vs logical Workgroup/Input) |
 | `If` result | private mutable local | merge block and `OpPhi` |
 | `Loop` carrier | generated mutable local | header `OpPhi` |
 | intrinsic | WGSL builtin | core or GLSL.std.450 instruction |
-| atomic | WGSL atomic builtin | `OpAtomic*` |
-| source barrier | WGSL barrier | `OpControlBarrier` |
+| atomic | WGSL atomic builtin | `OpAtomic*` at QueueFamily or Workgroup |
+| source barrier | WGSL barrier | `OpControlBarrier` with availability/visibility |
 | plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier2` in Tach's Vulkan 1.3 runtime |
 | view output | `rgba8unorm` storage texture | packed `uint32[]` RGBA8 scratch |
 | terminal view conversion | unpack packed word to `textureStore` | store packed `uint32` |

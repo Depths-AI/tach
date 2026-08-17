@@ -55,7 +55,8 @@ next session.
 
 - Deno;
 - Khronos `spirv-val`;
-- a Vulkan 1.3 loader and compatible x86-64 Windows or Linux device; and
+- a Vulkan 1.3 loader and x86-64 Windows or Linux device with Synchronization2,
+  zero-initialized workgroup memory, and the Vulkan memory model; and
 - the matching Tach native library in the local `@depths/tach` workspace.
 
 The repository builds the native library against official Vulkan SDK headers

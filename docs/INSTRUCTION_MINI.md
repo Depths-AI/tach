@@ -17,8 +17,9 @@ readback. Generated functions construct opaque recipes; they do not execute.
 `submit` queues work, while browser `present` executes a `ComputeView` directly
 to a canvas and supplies frame backpressure. `read`, `idle`, scoped exit, and
 `present` are completion boundaries. The identical imports use WebGPU in
-browsers and Tach-owned Vulkan 1.3 in Deno. See §1: operational model
-and §2: complete quick start.
+browsers and Tach-owned Vulkan 1.3 in Deno, which requires Synchronization2,
+zero-initialized workgroup memory, and the Vulkan memory model. See §1:
+operational model and §2: complete quick start.
 
 Default to the smallest valid form:
 
@@ -160,7 +161,8 @@ emitting unfamiliar math. See §34: literals,
 
 Shared memory is workgroup-local, zero-initialized, top-level in a stage, and
 requires explicit workgroup size. Atomics are `atomic<int32|uint32>` and use
-only atomic operations; buffer atomic state persists across commands. Barriers
+only atomic operations; buffer atomics are queue-family scoped on Vulkan and
+device-scoped on WebGPU, persist across commands, and stay relaxed. Barriers
 synchronize only one workgroup. Every lane must reach each barrier under
 uniform control; neither barrier synchronizes workgroups. Use another ordered
 dispatch for device-wide sequencing. See §42: shared,

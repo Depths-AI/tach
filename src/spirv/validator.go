@@ -160,9 +160,9 @@ func validateArity(op Op, a []uint32) error {
 		}
 		return nil
 	case OpLoad:
-		return exact(a, 3)
+		return exact(a, 5)
 	case OpStore:
-		return exact(a, 2)
+		return exact(a, 4)
 	case OpAccessChain:
 		return atLeast(a, 4)
 	case OpArrayLength:
@@ -462,7 +462,8 @@ func setOnce(dst **uint32, val uint32, name string, id uint32) error {
 
 func (v *validation) validateLayoutAndDefinitions() error {
 	lastSec := 0
-	caps := 0
+	shaderCaps := 0
+	vmmCaps := 0
 	memory := 0
 	inFunc := false
 	var cur *functionInfo
@@ -484,9 +485,13 @@ func (v *validation) validateLayoutAndDefinitions() error {
 		a := in.Operands
 		switch in.Op {
 		case OpCapability:
-			caps++
-			if a[0] != CapabilityShader {
-				return fmt.Errorf("only Shader capability is valid in Tach profile")
+			switch a[0] {
+			case CapabilityShader:
+				shaderCaps++
+			case CapabilityVulkanMemoryModel:
+				vmmCaps++
+			default:
+				return fmt.Errorf("capability %d is outside Tach profile", a[0])
 			}
 		case OpExtInstImport:
 			name, next, err := literalString(a, 1)
@@ -504,8 +509,8 @@ func (v *validation) validateLayoutAndDefinitions() error {
 			v.extImports[a[0]] = name
 		case OpMemoryModel:
 			memory++
-			if a[0] != AddressingLogical || a[1] != MemoryGLSL450 {
-				return fmt.Errorf("tach requires Logical + GLSL450 memory model")
+			if a[0] != AddressingLogical || a[1] != MemoryVulkan {
+				return fmt.Errorf("tach requires Logical + Vulkan memory model")
 			}
 		case OpEntryPoint:
 			if a[0] != ExecutionModelGLCompute {
@@ -666,8 +671,8 @@ func (v *validation) validateLayoutAndDefinitions() error {
 	if inFunc {
 		return fmt.Errorf("unterminated OpFunction")
 	}
-	if caps != 1 {
-		return fmt.Errorf("tach module must declare Shader capability exactly once")
+	if shaderCaps != 1 || vmmCaps != 1 {
+		return fmt.Errorf("tach module must declare Shader and VulkanMemoryModel exactly once each")
 	}
 	if memory != 1 {
 		return fmt.Errorf("tach module must declare one memory model")
@@ -929,6 +934,9 @@ func (v *validation) validateReferencesAndTypes() error {
 			if pt == nil || pt.kind != typePointer || pt.elem != a[0] {
 				return fmt.Errorf("%s load pointer/result mismatch", ctx)
 			}
+			if err := v.validateMemoryAccess(a[3:], pt.storage, pt.elem); err != nil {
+				return fmt.Errorf("%s: %w", ctx, err)
+			}
 			v.valueType[a[1]] = a[0]
 		case OpStore:
 			ptid, err := v.requireValue(a[0], ctx)
@@ -945,6 +953,9 @@ func (v *validation) validateReferencesAndTypes() error {
 			}
 			if pt.elem != vt {
 				return fmt.Errorf("%s store value type mismatch", ctx)
+			}
+			if err := v.validateMemoryAccess(a[2:], pt.storage, pt.elem); err != nil {
+				return fmt.Errorf("%s: %w", ctx, err)
 			}
 			if pt.storage == StorageUniform {
 				return fmt.Errorf("%s attempts to store through Uniform pointer", ctx)
@@ -1223,7 +1234,7 @@ func (v *validation) validateAtomic(in Instruction) error {
 	if err != nil {
 		return err
 	}
-	wantScope := ScopeDevice
+	wantScope := ScopeQueueFamily
 	if pt.storage == StorageWorkgroup {
 		wantScope = ScopeWorkgroup
 	}
@@ -1250,6 +1261,82 @@ func (v *validation) validateAtomic(in Instruction) error {
 	return nil
 }
 
+func (v *validation) validateMemoryAccess(ops []uint32, storage, pointee uint32) error {
+	if len(ops) != 2 {
+		return fmt.Errorf("memory access must be Aligned plus a power-of-two alignment")
+	}
+	mask, align := ops[0], ops[1]
+	if mask&MemoryAccessAligned == 0 {
+		return fmt.Errorf("memory access must be Aligned plus a power-of-two alignment")
+	}
+	want, err := v.accessAlignment(pointee, storage)
+	if err != nil {
+		return err
+	}
+	if align != want {
+		return fmt.Errorf("Aligned %d, want %d", align, want)
+	}
+	shared := storage == StorageStorageBuffer || storage == StorageUniform || storage == StorageWorkgroup
+	if shared {
+		if mask&MemoryAccessNonPrivatePointer == 0 {
+			return fmt.Errorf("shared storage requires NonPrivatePointer")
+		}
+	} else if mask&MemoryAccessNonPrivatePointer != 0 {
+		return fmt.Errorf("Input access cannot use NonPrivatePointer")
+	}
+	if mask&^(MemoryAccessAligned|MemoryAccessNonPrivatePointer) != 0 {
+		return fmt.Errorf("memory access mask 0x%x is outside Tach profile", mask)
+	}
+	return nil
+}
+
+func (v *validation) accessAlignment(id, storage uint32) (uint32, error) {
+	return v.typeAlignment(id, storage == StorageUniform || storage == StorageStorageBuffer, map[uint32]bool{})
+}
+
+func (v *validation) typeAlignment(id uint32, host bool, seen map[uint32]bool) (uint32, error) {
+	if seen[id] {
+		return 0, fmt.Errorf("recursive type %%%d", id)
+	}
+	t := v.types[id]
+	if t == nil {
+		return 0, fmt.Errorf("%%%d is not a type", id)
+	}
+	seen[id] = true
+	defer delete(seen, id)
+	switch t.kind {
+	case typeInt, typeFloat:
+		return 4, nil
+	case typeVector:
+		if t.lanes == 2 {
+			return 8, nil
+		}
+		return 16, nil
+	case typeArray, typeRuntimeArray:
+		return v.typeAlignment(t.elem, host, seen)
+	case typeStruct:
+		if host {
+			return 16, nil
+		}
+		var align uint32
+		for _, member := range t.members {
+			memberAlign, err := v.typeAlignment(member, host, seen)
+			if err != nil {
+				return 0, err
+			}
+			if memberAlign > align {
+				align = memberAlign
+			}
+		}
+		if align == 0 {
+			return 0, fmt.Errorf("struct %%%d has no aligned members", id)
+		}
+		return align, nil
+	default:
+		return 0, fmt.Errorf("type %%%d has no memory alignment", id)
+	}
+}
+
 func (v *validation) validateBarrier(in Instruction) error {
 	a := in.Operands
 	ctx := fmt.Sprintf("word %d OpControlBarrier", in.Offset)
@@ -1268,8 +1355,9 @@ func (v *validation) validateBarrier(in Instruction) error {
 	if exec != ScopeWorkgroup || mem != ScopeWorkgroup {
 		return fmt.Errorf("%s requires Workgroup execution and memory scopes", ctx)
 	}
-	wg := MemorySemanticsAcquireRelease | MemorySemanticsWorkgroupMemory
-	storage := MemorySemanticsAcquireRelease | MemorySemanticsUniformMemory
+	visible := MemorySemanticsAcquireRelease | MemorySemanticsMakeAvailable | MemorySemanticsMakeVisible
+	wg := visible | MemorySemanticsWorkgroupMemory
+	storage := visible | MemorySemanticsUniformMemory
 	if sem != wg && sem != storage {
 		return fmt.Errorf("%s semantics=0x%x outside Tach barrier profile", ctx, sem)
 	}

@@ -340,6 +340,38 @@ export function sharedStruct[i](io: buffer<Pair>) {
 	if !hasLogicalConstruct || !hasLogicalExtract {
 		t.Fatalf("structural host boundary: construct=%v extract=%v", hasLogicalConstruct, hasLogicalExtract)
 	}
+	valueType := map[uint32]uint32{}
+	for _, in := range m.Instructions {
+		a := in.Operands
+		switch in.Op {
+		case spirv.OpVariable, spirv.OpAccessChain, spirv.OpLoad:
+			if len(a) >= 2 {
+				valueType[a[1]] = a[0]
+			}
+		}
+	}
+	var workgroupAccesses int
+	for _, in := range m.Instructions {
+		var ptr, align uint32
+		switch in.Op {
+		case spirv.OpLoad:
+			ptr, align = in.Operands[2], in.Operands[4]
+		case spirv.OpStore:
+			ptr, align = in.Operands[0], in.Operands[3]
+		default:
+			continue
+		}
+		if pointerElem[valueType[ptr]] != workgroupType {
+			continue
+		}
+		workgroupAccesses++
+		if align != 4 {
+			t.Fatalf("Workgroup Pair access Aligned %d, want logical 4", align)
+		}
+	}
+	if workgroupAccesses == 0 {
+		t.Fatal("no Workgroup Pair load/store")
+	}
 }
 
 func TestWorkgroupMemoryIsZeroInitialized(t *testing.T) {
@@ -457,5 +489,97 @@ export function useHelper[i](out: buffer<float32>) { out = twice(2.0); }
 	want := []uint32{spirv.FunctionControlInline | spirv.FunctionControlConst, spirv.FunctionControlNone}
 	if !reflect.DeepEqual(controls, want) {
 		t.Fatalf("function controls %v, want %v", controls, want)
+	}
+}
+
+func TestVulkan13MemorySemantics(t *testing.T) {
+	bin := emitSource(t, "semantics.tach", `
+@workgroup(1)
+export function semantics[i](out: buffer<uint32[]>, counters: buffer<atomic<uint32>[]>, add: uint32) {
+  let scratch: shared<uint32>;
+  scratch = add;
+  workgroupBarrier();
+  if (i < out.length) { out[i] = scratch; }
+  if (i < counters.length) { atomicAdd(counters[i], 1); }
+}`)
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := map[uint32]int{}
+	pointerStorage := map[uint32]uint32{}
+	valueType := map[uint32]uint32{}
+	var memoryModel []uint32
+	var loads, stores, atomics, barriers int
+	for _, in := range m.Instructions {
+		a := in.Operands
+		switch in.Op {
+		case spirv.OpCapability:
+			caps[a[0]]++
+		case spirv.OpMemoryModel:
+			memoryModel = a
+		case spirv.OpTypePointer:
+			pointerStorage[a[0]] = a[1]
+		case spirv.OpVariable, spirv.OpAccessChain, spirv.OpFunctionParameter:
+			if len(a) >= 2 {
+				valueType[a[1]] = a[0]
+			}
+		case spirv.OpLoad:
+			valueType[a[1]] = a[0]
+			loads++
+			storage := pointerStorage[valueType[a[2]]]
+			if a[3]&spirv.MemoryAccessAligned == 0 || a[4] == 0 || a[4]&(a[4]-1) != 0 {
+				t.Fatalf("load missing Aligned: %v", a)
+			}
+			if storage == spirv.StorageInput {
+				if a[3]&spirv.MemoryAccessNonPrivatePointer != 0 {
+					t.Fatalf("input load is NonPrivate: %v", a)
+				}
+			} else if a[3]&spirv.MemoryAccessNonPrivatePointer == 0 {
+				t.Fatalf("shared load missing NonPrivatePointer: %v", a)
+			}
+		case spirv.OpStore:
+			stores++
+			if a[2]&spirv.MemoryAccessAligned == 0 || a[2]&spirv.MemoryAccessNonPrivatePointer == 0 {
+				t.Fatalf("store missing Aligned|NonPrivatePointer: %v", a)
+			}
+		case spirv.OpAtomicIAdd:
+			atomics++
+			scope := uint32(0)
+			for _, inst := range m.Instructions {
+				if inst.Op == spirv.OpConstant && inst.Operands[1] == a[3] {
+					scope = inst.Operands[2]
+				}
+			}
+			storage := pointerStorage[valueType[a[2]]]
+			want := spirv.ScopeQueueFamily
+			if storage == spirv.StorageWorkgroup {
+				want = spirv.ScopeWorkgroup
+			}
+			if scope != want {
+				t.Fatalf("atomic scope=%d storage=%d, want %d", scope, storage, want)
+			}
+		case spirv.OpControlBarrier:
+			barriers++
+			sem := uint32(0)
+			for _, inst := range m.Instructions {
+				if inst.Op == spirv.OpConstant && inst.Operands[1] == a[2] {
+					sem = inst.Operands[2]
+				}
+			}
+			need := spirv.MemorySemanticsAcquireRelease | spirv.MemorySemanticsMakeAvailable | spirv.MemorySemanticsMakeVisible
+			if sem&need != need {
+				t.Fatalf("barrier semantics=0x%x missing availability/visibility", sem)
+			}
+		}
+	}
+	if caps[spirv.CapabilityShader] != 1 || caps[spirv.CapabilityVulkanMemoryModel] != 1 || len(caps) != 2 {
+		t.Fatalf("capabilities = %v", caps)
+	}
+	if len(memoryModel) != 2 || memoryModel[0] != spirv.AddressingLogical || memoryModel[1] != spirv.MemoryVulkan {
+		t.Fatalf("memory model = %v", memoryModel)
+	}
+	if loads == 0 || stores == 0 || atomics == 0 || barriers == 0 {
+		t.Fatalf("coverage loads=%d stores=%d atomics=%d barriers=%d", loads, stores, atomics, barriers)
 	}
 }

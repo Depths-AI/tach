@@ -205,10 +205,11 @@ static int select_device(tv_context *context, int high_performance) {
     VkPhysicalDeviceProperties properties;
     context->GetPhysicalDeviceProperties(devices[index], &properties);
     if (!version_at_least(properties.apiVersion, VK_API_VERSION_1_3)) continue;
-    VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    VkPhysicalDeviceVulkan12Features features12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &features12 };
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13 };
     context->GetPhysicalDeviceFeatures2(devices[index], &features);
-    if (!features.features.robustBufferAccess || !features13.synchronization2 || !features13.shaderZeroInitializeWorkgroupMemory) continue;
+    if (!features.features.robustBufferAccess || !features13.synchronization2 || !features13.shaderZeroInitializeWorkgroupMemory || !features12.vulkanMemoryModel) continue;
     uint32_t family;
     if (!queue_family(context, devices[index], &family)) continue;
     int rank = device_rank(properties.deviceType, high_performance);
@@ -217,7 +218,7 @@ static int select_device(tv_context *context, int high_performance) {
     }
   }
   free(devices);
-  if (!context->physical) return set_error(context, "no Vulkan 1.3 compute device supports robustBufferAccess, synchronization2, and shaderZeroInitializeWorkgroupMemory");
+  if (!context->physical) return set_error(context, "no Vulkan 1.3 compute device supports robustBufferAccess, synchronization2, shaderZeroInitializeWorkgroupMemory, and vulkanMemoryModel");
   context->GetPhysicalDeviceMemoryProperties(context->physical, &context->memory);
   return 1;
 }
@@ -235,7 +236,8 @@ tv_context *tv_open(int high_performance) {
   if (!result(context, "vkCreateInstance", create_instance(&instance_info, NULL, &context->instance)) || !load_instance(context) || !select_device(context, high_performance)) goto fail;
   float priority = 1.0f;
   VkDeviceQueueCreateInfo queue = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = context->queue_family, .queueCount = 1, .pQueuePriorities = &priority };
-  VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .synchronization2 = VK_TRUE, .shaderZeroInitializeWorkgroupMemory = VK_TRUE };
+  VkPhysicalDeviceVulkan12Features features12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .vulkanMemoryModel = VK_TRUE };
+  VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &features12, .synchronization2 = VK_TRUE, .shaderZeroInitializeWorkgroupMemory = VK_TRUE };
   VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13, .features.robustBufferAccess = VK_TRUE };
   VkDeviceCreateInfo device_info = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features, .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue };
   if (!result(context, "vkCreateDevice", context->CreateDevice(context->physical, &device_info, NULL, &context->device)) || !load_device(context)) goto fail;

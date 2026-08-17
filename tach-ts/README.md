@@ -1194,8 +1194,8 @@ deno run --allow-ffi --allow-read app.ts
 ```
 
 The Vulkan host currently ships for x86-64 Windows and Linux. It requires a
-Vulkan 1.3 loader and device with Synchronization2 and
-`shaderZeroInitializeWorkgroupMemory`.
+Vulkan 1.3 loader and device with Synchronization2,
+`shaderZeroInitializeWorkgroupMemory`, and `vulkanMemoryModel`.
 
 The compiler itself is distributed for:
 

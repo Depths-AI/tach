@@ -175,9 +175,10 @@ block, each logical bool leaf becomes one `uint32` word containing `0` or `1`.
 
 ### Structs
 
-Struct alignment is at least 16 bytes. A field begins at its required aligned
-offset. Nested structs reserve a 16-byte-aligned extent. A fixed struct's final
-size is rounded to its alignment.
+Host-visible struct alignment is at least 16 bytes. A field begins at its
+required aligned offset. Nested structs reserve a 16-byte-aligned extent. A
+fixed struct's final size is rounded to its alignment. Workgroup `shared`
+structs use the logical max member alignment and do not inherit this floor.
 
 ```tach
 type Particle = {
@@ -373,7 +374,7 @@ channel <= 0.0031308 ? 12.92 * channel
 Alpha is clamped to `[0, 1]` without transfer. Both targets then quantize
 each channel with `uint32(channel * 255 + 0.5)` and pack R, G, B, A into one
 little-endian `uint32` word. That word is the portable display pixel. WebGPU
-unpacks it to `k / 255` and `textureStore`s an `rgba8unorm` texel so `present`
+unpacks it with `unpack4x8unorm` into an `rgba8unorm` texel so `present`
 can write a 2D image. Vulkan stores the word in packed scratch. This
 conversion is compiler/backend work, never Tach source or a TypeScript
 readback pass.
@@ -424,7 +425,7 @@ interface PublicProgram {
 interface TargetPlan {
   vulkan?: "1.3";
   spirv?: "1.6";
-  features?: Array<"synchronization2" | "shaderZeroInitializeWorkgroupMemory">;
+  features?: Array<"synchronization2" | "shaderZeroInitializeWorkgroupMemory" | "vulkanMemoryModel">;
   kernels: Array<{
     entryPoint: string;
     workgroupSize: [number, number, number];
@@ -658,8 +659,18 @@ The generated package stores this complete module as deterministic gzip in
 
 ## 12. SPIR-V representation
 
-SPIR-V 1.6 uses Logical addressing and the Shader capability under Tach's
-Vulkan 1.3 profile. Host-visible storage and uniform aggregates carry
+SPIR-V 1.6 uses Logical addressing, the Shader and VulkanMemoryModel
+capabilities, and the Vulkan memory model under Tach's Vulkan 1.3 profile.
+`GLSL.std.450` remains the math extended-instruction set, not the memory
+model. `OpLoad`/`OpStore` carry Aligned. Uniform and StorageBuffer use the
+host-ABI alignment, including the 16-byte struct floor. Workgroup and Input
+use the logical pointee alignment (max member or element; `{uint32, uint32}`
+shared is 4, not 16). StorageBuffer, Uniform, and Workgroup also carry
+NonPrivatePointer; Input does not.
+Storage-buffer atomics use QueueFamily scope; workgroup atomics use Workgroup
+scope. Source barriers add MakeAvailable and MakeVisible.
+
+Host-visible storage and uniform aggregates carry
 descriptor, member-offset, and
 array-stride decorations. Logical SSA/helper values and Workgroup memory use
 undecorated logical aggregate types.
@@ -670,7 +681,8 @@ physical boundary field by field. Padding never becomes a logical member.
 Tach guarantees zero-initialized shared memory. Every Workgroup variable has
 an `OpConstantNull` initializer and the host requires
 `shaderZeroInitializeWorkgroupMemory`; no synthetic store loop or barrier is
-inserted. The host also requires Synchronization2 for plan barriers.
+inserted. The host also requires Synchronization2 for plan barriers and
+`vulkanMemoryModel` for that shader memory model.
 
 A native view uses a storage-buffer output with one packed little-endian RGBA8
 `uint32` per pixel. The same fused/fallback distinction and the same pack
@@ -856,9 +868,10 @@ loading one entry point:
     embedding application.
 
 The native boundary rejects incompatible metadata before module creation,
-requires Vulkan API 1.3 plus Synchronization2 and
-`shaderZeroInitializeWorkgroupMemory`, validates buffer sizes and dispatch
-limits, and reports driver failures through the coarse Tach FFI wire. The Deno
+requires Vulkan API 1.3 plus Synchronization2,
+`shaderZeroInitializeWorkgroupMemory`, and `vulkanMemoryModel`, validates
+buffer sizes and dispatch limits, and reports driver failures through the
+coarse Tach FFI wire. The Deno
 correctness harness additionally runs Khronos
 `spirv-val --target-env vulkan1.3` before hardware execution.
 

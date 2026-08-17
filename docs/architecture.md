@@ -344,8 +344,8 @@ All other valid views receive one target-owned projection kernel that reads
 the final float pixel resource. Both targets first lower each pixel to one
 packed RGBA8 `uint32` word: IEC sRGB on RGB, clamp-only alpha, then
 `uint32(channel * 255 + 0.5)` with R, G, B, A in low-to-high bytes. WGSL
-unpacks that word into an `rgba8unorm` storage texture so `present` can write
-a 2D image. SPIR-V stores the word in packed scratch. View commands cannot
+unpacks that word with `unpack4x8unorm` into an `rgba8unorm` storage texture so
+`present` can write a 2D image. SPIR-V stores the word in packed scratch. View commands cannot
 use repeat; repeating a display recipe has no useful externally visible
 intermediate result and complicates the terminal resource contract.
 
@@ -370,7 +370,8 @@ source, Flow IR, or logical Kernel IR.
 
 `src/layout` computes the canonical host-visible representation: scalar/vector
 size and alignment, 16-byte struct alignment, field offsets, nested extents,
-array strides, runtime tails, and checked 32-bit sizes.
+array strides, runtime tails, and checked 32-bit sizes. SPIR-V Workgroup and
+Input `Aligned` operands use logical pointee alignment instead of this floor.
 
 `src/abi` owns private entry names and immutable value blocks. It flattens each
 remaining physical-stage value parameter into numeric leaves, replacing bool
@@ -395,8 +396,8 @@ No target independently recalculates ABI offsets.
 2. emits structs, resources, parameter blocks, helpers, and private entries;
 3. maps structured Kernel IR directly to structured WGSL, including the
    shared view-pack helper;
-4. stores a fused or standalone view by unpacking the packed word into an
-   `rgba8unorm` storage texture; and
+4. stores a fused or standalone view by unpacking the packed word with
+   `unpack4x8unorm` into an `rgba8unorm` storage texture; and
 5. reparses the exact generated WGSL subset with its in-tree validator.
 
 Fixed resources use aligned wrappers; runtime tails retain natural stride.
@@ -410,7 +411,8 @@ harness provides the independent implementation check.
 ## 11. SPIR-V backend
 
 `src/spirv` emits SPIR-V 1.6 for the Vulkan 1.3 floor with Logical addressing,
-Shader capability, and GLSL.std.450 where required. It owns result IDs,
+Shader plus VulkanMemoryModel capabilities, the Vulkan memory model, and
+GLSL.std.450 math where required. It owns result IDs,
 logical/physical types,
 interface variables, decorations, structured CFG construction, phi nodes,
 access chains, atomics, barriers, and extended instructions.
@@ -425,10 +427,13 @@ entry, through the same pack sequence used by WGSL. SPIR-V stores that packed
 `uint32` for the native runtime without importing browser texture semantics
 into logical IR.
 
-Tach requires Vulkan's `shaderZeroInitializeWorkgroupMemory` feature. The
-SPIR-V emitter gives every Workgroup variable an `OpConstantNull` initializer,
-so no synthetic invocation, store loop, or barrier alters the source program.
-Synchronization2 is the corresponding inter-dispatch synchronization floor.
+Tach requires Vulkan's `shaderZeroInitializeWorkgroupMemory` and
+`vulkanMemoryModel` features. The SPIR-V emitter gives every Workgroup
+variable an `OpConstantNull` initializer, so no synthetic invocation, store
+loop, or barrier alters the source program. Shared loads and stores are NonPrivate. Aligned follows the host ABI on
+Uniform/StorageBuffer and the logical pointee on Workgroup/Input.
+Storage-buffer atomics use QueueFamily scope.
+Synchronization2 is the inter-dispatch synchronization floor.
 
 The validator independently decodes the binary and checks header/sections,
 IDs, capabilities, types, layouts, decorations, CFG, predecessors, dominance,
@@ -537,7 +542,8 @@ pipelines, bind groups, aligned uniform arena, scratch by transient color,
 retired buffers, error scopes, uncaptured errors, and device-loss state. The
 Vulkan driver owns the packaged FFI library/session, SPIR-V modules, native
 buffers/submissions, and error translation. Native code owns Vulkan 1.3 device
-selection, device-local storage, staging transfers, lazy pipelines,
+selection (Synchronization2, zero-initialized workgroup memory, Vulkan memory
+model), device-local storage, staging transfers, lazy pipelines,
 descriptor/command/fence pools, a mapped parameter arena, scratch, and
 Synchronization2 barriers. Deno retains one process-wide native-library
 handle because unloading a Go shared runtime is unsafe; logical Tach sessions

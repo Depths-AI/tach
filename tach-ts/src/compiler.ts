@@ -397,7 +397,7 @@ function parseRuntime(source: string): RuntimeMetadata {
   if (
     spirv.vulkan !== "1.3" || spirv.spirv !== "1.6" ||
     spirv.features?.join("\n") !==
-      "synchronization2\nshaderZeroInitializeWorkgroupMemory"
+      "synchronization2\nshaderZeroInitializeWorkgroupMemory\nvulkanMemoryModel"
   ) {
     throw new TypeError("invalid Tach Vulkan 1.3/SPIR-V 1.6 profile");
   }

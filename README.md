@@ -128,7 +128,8 @@ npm install @depths/tach
 
 Tach tooling and native execution use Deno. Browser execution requires WebGPU;
 native execution currently requires x86-64 Windows or Linux with a Vulkan 1.3
-loader and compatible device. The compiler itself is available for x64 and
+loader and a device that supports Synchronization2, zero-initialized workgroup
+memory, and the Vulkan memory model. The compiler itself is available for x64 and
 arm64 Windows and Linux, and Apple-silicon macOS.
 
 The npm package provides both the `tach` command and the `@depths/tach`

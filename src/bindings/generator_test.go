@@ -70,7 +70,7 @@ func TestGenerateCompleteRuntimeMetadata(t *testing.T) {
 		t.Fatalf("entry = %q", got)
 	}
 	spv := metadata.Targets.SPIRV
-	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 2 {
+	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 3 {
 		t.Fatalf("SPIR-V profile = %#v", spv)
 	}
 }

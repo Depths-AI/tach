@@ -22,6 +22,7 @@ const (
 
 	Synchronization2              = "synchronization2"
 	ZeroInitializeWorkgroupMemory = "shaderZeroInitializeWorkgroupMemory"
+	VulkanMemoryModel             = "vulkanMemoryModel"
 )
 
 type Profile struct {

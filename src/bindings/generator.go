@@ -278,7 +278,7 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 	if executable.Target == backend.SPIRV {
 		target.Vulkan = backend.VulkanVersion
 		target.SPIRV = backend.SPIRVVersion
-		target.Features = []string{backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory}
+		target.Features = []string{backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory, backend.VulkanMemoryModel}
 	}
 	for _, kernel := range executable.PhysicalKernels {
 		item := PhysicalKernelMeta{EntryPoint: kernel.Entry, WorkgroupSize: kernel.Workgroup, Bindings: []BindingMeta{}}
@@ -473,7 +473,7 @@ func ValidateMetadata(metadata *Metadata) error {
 		return fmt.Errorf("web target contains a Vulkan profile")
 	}
 	spv := metadata.Targets.SPIRV
-	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 2 || spv.Features[0] != backend.Synchronization2 || spv.Features[1] != backend.ZeroInitializeWorkgroupMemory {
+	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 3 || spv.Features[0] != backend.Synchronization2 || spv.Features[1] != backend.ZeroInitializeWorkgroupMemory || spv.Features[2] != backend.VulkanMemoryModel {
 		return fmt.Errorf("SPIR-V target profile is invalid")
 	}
 	for targetIndex, target := range []*TargetPlanMeta{metadata.Targets.Web, metadata.Targets.SPIRV} {

@@ -772,8 +772,9 @@ write.
 Pixels are linear RGBA. Backend lowering clamps RGB, applies the IEC sRGB
 transfer, clamps alpha, and quantizes every channel with
 `uint32(channel * 255 + 0.5)` into one packed RGBA8 `uint32` word. Both
-targets share that word. WebGPU unpacks it into an `rgba8unorm` texture so
-`present` can write a 2D image; Vulkan stores the word in packed scratch. Tach
+targets share that word. WebGPU unpacks it with `unpack4x8unorm` into an
+`rgba8unorm` texture so `present` can write a 2D image; Vulkan stores the word
+in packed scratch. Tach
 source never packs bytes or names a texture, surface, canvas, WebGPU object,
 or Vulkan object. Target planning may fold projection into a proven final
 one-pixel-per-index dispatch and remove the full-frame float transient;
@@ -1279,8 +1280,10 @@ explain memory-size differences and prevent incorrect typed-array assumptions:
 | three-lane numeric vector | 12 | 16 |
 | four-lane numeric vector | 16 | 16 |
 
-A struct has at least 16-byte alignment. Each field begins at its required
-alignment; the final struct extent is rounded to its alignment. For example:
+A host-visible struct has at least 16-byte alignment. Each field begins at its
+required alignment; the final struct extent is rounded to its alignment. These
+sizes apply to buffers and parameter blocks, not to workgroup `shared` objects.
+For example:
 
 ```tach
 type Particle = {
@@ -1635,9 +1638,12 @@ export function countPositive[i](
 }
 ```
 
-Buffer atomics have device scope; shared atomics have workgroup scope. Atomic
-operations are relaxed. An atomic update makes one location race-safe; it does
-not create a global barrier or make surrounding non-atomic data ordered.
+Buffer atomics use WebGPU device scope and Vulkan queue-family scope; shared
+atomics have workgroup scope. Tach has one compute queue, so those buffer
+scopes are the same visibility: every later dispatch on the device sees the
+update. Atomic operations are relaxed. An atomic update makes one location
+race-safe; it does not create a global barrier or make surrounding non-atomic
+data ordered.
 Buffer atomics persist like all other buffer state: repeated commands continue
 from the previous value. Initialize or clear counters explicitly when a public
 operation requires a fresh accumulation.
@@ -2606,7 +2612,8 @@ view language and ABI with distinct host capabilities, not two generated
 facades or source paths.
 
 The Vulkan host requires an x86-64 Windows or Linux runtime, Vulkan API 1.3,
-robust buffer access, Synchronization2, and zero-initialized workgroup memory.
+robust buffer access, Synchronization2, zero-initialized workgroup memory, and
+the Vulkan memory model.
 Unavailable or incompatible devices fail with structured Tach errors. Do not
 load `kernel.spv` yourself: the managed driver owns profile enforcement,
 pipelines, descriptors, staging, barriers, submission reuse, and readback.

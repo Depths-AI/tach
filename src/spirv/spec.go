@@ -156,12 +156,13 @@ const (
 )
 
 const (
-	CapabilityShader uint32 = 1
+	CapabilityShader            uint32 = 1
+	CapabilityVulkanMemoryModel uint32 = 5345
 )
 
 const (
 	AddressingLogical uint32 = 0
-	MemoryGLSL450     uint32 = 1
+	MemoryVulkan      uint32 = 3
 )
 
 const (
@@ -177,8 +178,8 @@ const (
 )
 
 const (
-	ScopeDevice    uint32 = 1
-	ScopeWorkgroup uint32 = 2
+	ScopeWorkgroup   uint32 = 2
+	ScopeQueueFamily uint32 = 5
 )
 
 const (
@@ -186,6 +187,13 @@ const (
 	MemorySemanticsAcquireRelease  uint32 = 0x8
 	MemorySemanticsUniformMemory   uint32 = 0x40
 	MemorySemanticsWorkgroupMemory uint32 = 0x100
+	MemorySemanticsMakeAvailable   uint32 = 0x2000
+	MemorySemanticsMakeVisible     uint32 = 0x4000
+)
+
+const (
+	MemoryAccessAligned           uint32 = 0x2
+	MemoryAccessNonPrivatePointer uint32 = 0x20
 )
 
 const (
