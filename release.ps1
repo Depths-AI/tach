@@ -1,8 +1,12 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = "Dry")]
 param(
   [Parameter(Mandatory = $true, Position = 0)]
   [string]$Version,
+  [Parameter(Mandatory = $true)]
   [string]$Notes,
+  [Parameter(Mandatory = $true, ParameterSetName = "Dry")]
+  [switch]$Dry,
+  [Parameter(Mandatory = $true, ParameterSetName = "Publish")]
   [switch]$Publish
 )
 
@@ -19,14 +23,9 @@ if ($Version -notmatch $semver) {
   throw "VERSION must be semantic and prefixed with v, for example v0.1.0"
 }
 $packageVersion = $Version.Substring(1)
-if ($Publish -and $PSBoundParameters.ContainsKey("Notes")) {
-  throw "publish uses the notes locked by the dry stage; omit -Notes"
-}
-if (-not $Publish) {
-  $Notes = ([string]$Notes).Trim()
-  if (-not $Notes) {
-    throw "dry release requires meaningful -Notes text"
-  }
+$Notes = $Notes.Trim()
+if (-not $Notes) {
+  throw "release requires meaningful -Notes text"
 }
 $releaseDir = Join-Path $root "dist\releases\$Version"
 $workDir = Join-Path $releaseDir ".work"
@@ -118,6 +117,21 @@ function Assert-VersionCoherence {
   $main = Get-Content -LiteralPath (Join-Path $root "main.go") -Raw
   if ($main -notmatch "var version = `"$([regex]::Escape($packageVersion))`"") {
     throw "main.go fallback version does not match $packageVersion"
+  }
+}
+
+function Assert-PublishGitState {
+  if ((Read-Checked "git" @("branch", "--show-current")) -ne "master") {
+    throw "publish requires the master branch"
+  }
+  if (-not [string]::IsNullOrWhiteSpace(
+      (Read-Checked "git" @("status", "--porcelain", "--untracked-files=all")))) {
+    throw "publish requires a clean tree"
+  }
+  $head = Read-Checked "git" @("rev-parse", "HEAD")
+  $remote = ((Read-Checked "git" @("ls-remote", "origin", "refs/heads/master")) -split '\s+')[0]
+  if ($head -ne $remote) {
+    throw "HEAD is not origin/master"
   }
 }
 
@@ -448,11 +462,9 @@ await compiler.compilerPath();
       Remove-Item -LiteralPath $workDir -Recurse -Force
     }
   }
-  Write-Host "Dry release written to $releaseDir"
+  Write-Host "Verified release artifacts written to $releaseDir"
   if ($dirty) {
-    Write-Warning "The tree was dirty. Commit the release harness and rerun dry mode before publishing."
-  } else {
-    Write-Host "Publish these exact artifacts with: .\release.ps1 $Version -Publish"
+    Write-Warning "The tree was dirty. Commit the changes before publishing."
   }
 }
 
@@ -483,8 +495,10 @@ function Publish-Npm([string]$Archive, [string]$Npmrc) {
       throw "npm publish exited $exitCode"
     }
     Set-Clipboard -Value $approval.Value
-    Write-Host "npm approval URL copied to the clipboard."
-    Write-Host "Open it in the intended npm browser profile; waiting for publication."
+    Write-Host ""
+    Write-Host "NPM APPROVAL REQUIRED" -ForegroundColor Yellow
+    Write-Host $approval.Value -ForegroundColor Cyan
+    Write-Host "The URL is also on the clipboard. Open it in the intended npm browser profile; waiting for publication."
   } finally {
     Pop-Location
   }
@@ -494,18 +508,8 @@ function Publish-Release {
   foreach ($command in @("git", "npm")) {
     Assert-Command $command
   }
-  if ((Read-Checked "git" @("branch", "--show-current")) -ne "master") {
-    throw "publish requires the master branch"
-  }
-  $status = Read-Checked "git" @("status", "--porcelain", "--untracked-files=all")
-  if (-not [string]::IsNullOrWhiteSpace($status)) {
-    throw "publish requires a clean tree"
-  }
+  Assert-PublishGitState
   $head = Read-Checked "git" @("rev-parse", "HEAD")
-  $remote = ((Read-Checked "git" @("ls-remote", "origin", "refs/heads/master")) -split '\s+')[0]
-  if ($head -ne $remote) {
-    throw "HEAD is not origin/master"
-  }
   $manifest = Assert-Stage
   $secrets = Read-Secrets
   $script:githubHeaders = @{
@@ -622,6 +626,8 @@ registry=$registry
 
 Set-Location $root
 if ($Publish) {
+  Assert-PublishGitState
+  New-ReleaseStage
   Publish-Release
 } else {
   New-ReleaseStage
