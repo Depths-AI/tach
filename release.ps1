@@ -459,11 +459,17 @@ await compiler.compilerPath();
 function Publish-Npm([string]$Archive, [string]$Npmrc) {
   Push-Location $root
   try {
-    $output = & npm publish $Archive `
-      --access public `
-      --registry $registry `
-      --userconfig $Npmrc 2>&1
-    $exitCode = $LASTEXITCODE
+    $preference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      $output = & npm publish $Archive `
+        --access public `
+        --registry $registry `
+        --userconfig $Npmrc 2>&1
+      $exitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $preference
+    }
     $output | ForEach-Object { Write-Host $_ }
     if ($exitCode -eq 0) {
       return
