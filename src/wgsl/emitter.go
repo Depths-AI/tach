@@ -100,13 +100,8 @@ func Emit(executable *backend.Executable) (string, error) {
 		e.line("")
 	}
 	for kernelIndex, kernel := range executable.PhysicalKernels {
-		if kernel.Projection {
-			e.emitProjectionResources(kernelIndex, &kernel)
-			e.line("")
-			continue
-		}
 		for bufferIndex, buffer := range kernel.Function.BufferParams {
-			if kernel.FusedView && bufferIndex == kernel.ViewBinding {
+			if kernel.Bindings[bufferIndex].Texture {
 				e.line("@group(0) @binding(%d) var %s: texture_storage_2d<rgba8unorm, write>;", bufferIndex, resourceName(kernelIndex, bufferIndex))
 			} else {
 				e.emitResource(kernelIndex, bufferIndex, buffer)
@@ -116,13 +111,6 @@ func Emit(executable *backend.Executable) (string, error) {
 		if kernel.Parameters != nil {
 			e.emitParameterBlock(kernel.Parameters)
 			e.line("")
-		}
-	}
-	for _, kernel := range executable.PhysicalKernels {
-		if kernel.Projection || kernel.FusedView {
-			e.emitViewSRGB()
-			e.line("")
-			break
 		}
 	}
 	for _, f := range m.Functions {
@@ -152,13 +140,6 @@ func Emit(executable *backend.Executable) (string, error) {
 			e.line("")
 		}
 	}
-	for kernelIndex := range executable.PhysicalKernels {
-		kernel := &executable.PhysicalKernels[kernelIndex]
-		if kernel.Projection {
-			e.emitProjection(kernelIndex, kernel)
-			e.line("")
-		}
-	}
 	out := e.b.String()
 	if err := Validate(out); err != nil {
 		return "", fmt.Errorf("tach WGSL self-validation failed: %w", err)
@@ -166,41 +147,8 @@ func Emit(executable *backend.Executable) (string, error) {
 	return out, nil
 }
 
-func (e *emitter) emitProjectionResources(kernel int, physical *backend.PhysicalKernel) {
-	e.line("struct _tach_view_source_%d {", kernel)
-	e.indent++
-	e.line("data: array<vec4<f32>>,")
-	e.indent--
-	e.line("}")
-	e.line("@group(0) @binding(0) var<storage, read> _tach_view_source_%d_data: _tach_view_source_%d;", kernel, kernel)
-	e.line("@group(0) @binding(1) var _tach_view_target_%d: texture_storage_2d<rgba8unorm, write>;", kernel)
-	e.emitParameterBlock(physical.Parameters)
-}
-
-func (e *emitter) emitProjection(kernel int, physical *backend.PhysicalKernel) {
-	parameters := parameterResourceName(physical.Parameters)
-	e.line("@compute @workgroup_size(%d, %d, %d)", physical.Workgroup[0], physical.Workgroup[1], physical.Workgroup[2])
-	e.line("fn %s(@builtin(global_invocation_id) index: vec3<u32>) {", physical.Entry)
-	e.indent++
-	e.line("let width = %s.f0;", parameters)
-	e.line("let height = %s.f1;", parameters)
-	e.line("if (index.x < width && index.y < height) {")
-	e.indent++
-	e.line("let pixel = _tach_view_source_%d_data.data[index.y * width + index.x];", kernel)
-	e.line("textureStore(_tach_view_target_%d, vec2<u32>(index.xy), vec4<f32>(_tach_view_srgb(pixel.r), _tach_view_srgb(pixel.g), _tach_view_srgb(pixel.b), clamp(pixel.a, 0.0, 1.0)));", kernel)
-	e.indent--
-	e.line("}")
-	e.indent--
-	e.line("}")
-}
-
-func (e *emitter) emitViewSRGB() {
-	e.line("fn _tach_view_srgb(value: f32) -> f32 {")
-	e.indent++
-	e.line("let bounded = clamp(value, 0.0, 1.0);")
-	e.line("return select(1.055 * pow(bounded, 0.416666667) - 0.055, 12.92 * bounded, bounded <= 0.0031308);")
-	e.indent--
-	e.line("}")
+func viewTexture(physical *backend.PhysicalKernel, buffer int) bool {
+	return physical != nil && buffer >= 0 && buffer < len(physical.Bindings) && physical.Bindings[buffer].Texture
 }
 
 func (e *emitter) line(s string, args ...any) {
@@ -546,7 +494,12 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		}
 	case *ir.PlaceRoot:
 		kernel := s.e.kernelIndex[s.f]
-		s.places[x.Result] = placeExpr{expr: resourceName(kernel, x.Buffer) + ".data", ty: x.Type, resource: x.Buffer}
+		name := resourceName(kernel, x.Buffer)
+		if viewTexture(s.e.p.kernels[s.f], x.Buffer) {
+			s.places[x.Result] = placeExpr{expr: name, ty: x.Type, resource: x.Buffer}
+		} else {
+			s.places[x.Result] = placeExpr{expr: name + ".data", ty: x.Type, resource: x.Buffer}
+		}
 	case *ir.PlaceWorkgroup:
 		if x.Workgroup < 0 || x.Workgroup >= len(s.f.WorkgroupVars) {
 			return fmt.Errorf("invalid workgroup place %d", x.Workgroup)
@@ -578,12 +531,15 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 			return fmt.Errorf("unknown store place &p%d", x.Place)
 		}
 		physical := s.e.p.kernels[s.f]
-		if physical.FusedView && p.resource == physical.ViewBinding {
+		if viewTexture(physical, p.resource) {
 			if p.index == "" {
-				return fmt.Errorf("fused view store has no pixel index")
+				return fmt.Errorf("view store has no pixel index")
 			}
-			pixel, width := v(x.Value), v(physical.ViewWidth)
-			e.line("textureStore(%s, vec2<u32>(%s %% %s, %s / %s), vec4<f32>(_tach_view_srgb(%s.r), _tach_view_srgb(%s.g), _tach_view_srgb(%s.b), clamp(%s.a, 0.0, 1.0)));", resourceName(s.e.kernelIndex[s.f], p.resource), p.index, width, p.index, width, pixel, pixel, pixel, pixel)
+			xCoord, yCoord := p.index+" % "+v(physical.ViewWidth), p.index+" / "+v(physical.ViewWidth)
+			if physical.Projection && len(s.f.Indices) >= 2 {
+				xCoord, yCoord = v(s.f.Indices[0].ID), v(s.f.Indices[1].ID)
+			}
+			e.line("textureStore(%s, vec2<u32>(%s, %s), unpack4x8unorm(%s));", resourceName(s.e.kernelIndex[s.f], p.resource), xCoord, yCoord, v(x.Value))
 		} else {
 			e.line("%s = %s;", p.expr, v(x.Value))
 		}
@@ -641,7 +597,7 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 			return fmt.Errorf("unknown array length place &p%d", x.Place)
 		}
 		physical := s.e.p.kernels[s.f]
-		if physical.FusedView && p.resource == physical.ViewBinding {
+		if viewTexture(physical, p.resource) {
 			e.line("let %s: u32 = %s * %s;", v(x.Result), v(physical.ViewWidth), v(physical.ViewHeight))
 		} else {
 			e.line("let %s: u32 = arrayLength(&%s);", v(x.Result), p.expr)

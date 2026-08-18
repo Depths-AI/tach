@@ -376,3 +376,53 @@ export function structMemory[i](out: buffer<uint32>) {
 		t.Fatalf("Validate error = %v, want Workgroup Offset rejection", err)
 	}
 }
+
+func TestValidatorRejectsHostAlignmentOnWorkgroupStruct(t *testing.T) {
+	bin := append([]byte(nil), compileSourceForMutation(t, `
+type Pair = { x: uint32, y: uint32 };
+@workgroup(1)
+export function sharedStruct[i](io: buffer<Pair>) {
+  let pair: shared<Pair>;
+  pair = io;
+}`)...)
+	m, err := Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointee := map[uint32]uint32{}
+	valueType := map[uint32]uint32{}
+	root := uint32(0)
+	for _, in := range m.Instructions {
+		a := in.Operands
+		switch in.Op {
+		case OpTypePointer:
+			pointee[a[0]] = a[2]
+		case OpVariable:
+			valueType[a[1]] = a[0]
+			if a[2] == StorageWorkgroup {
+				root = pointee[a[0]]
+			}
+		case OpAccessChain, OpLoad:
+			valueType[a[1]] = a[0]
+		}
+	}
+	if root == 0 {
+		t.Fatal("test module has no Workgroup variable")
+	}
+	patched := false
+	for _, in := range m.Instructions {
+		if in.Op != OpStore || pointee[valueType[in.Operands[0]]] != root || in.Operands[3] != 4 {
+			continue
+		}
+		binary.LittleEndian.PutUint32(bin[(in.Offset+4)*4:], 16)
+		patched = true
+		break
+	}
+	if !patched {
+		t.Fatal("test module emitted no Workgroup Pair store with Aligned 4")
+	}
+	err = Validate(bin)
+	if err == nil || !strings.Contains(err.Error(), "aligned 16, want 4") {
+		t.Fatalf("Validate error = %v, want host-ABI alignment rejection", err)
+	}
+}

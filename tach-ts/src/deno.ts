@@ -137,7 +137,8 @@ function moduleDescription(command: PreparedCommand): Uint8Array {
   if (
     target.vulkan !== "1.3" || target.spirv !== "1.6" ||
     !target.features?.includes("synchronization2") ||
-    !target.features.includes("shaderZeroInitializeWorkgroupMemory")
+    !target.features.includes("shaderZeroInitializeWorkgroupMemory") ||
+    !target.features.includes("vulkanMemoryModel")
   ) {
     throw new TachError(
       "vulkan-profile",

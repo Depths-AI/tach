@@ -22,6 +22,8 @@ const (
 
 	Synchronization2              = "synchronization2"
 	ZeroInitializeWorkgroupMemory = "shaderZeroInitializeWorkgroupMemory"
+	VulkanMemoryModel             = "vulkanMemoryModel"
+	srgbHelper                    = "$tach_srgb"
 )
 
 type Profile struct {
@@ -170,12 +172,10 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 			executable.KernelModule.Functions = append(executable.KernelModule.Functions, cloneFunction(function))
 		}
 	}
-	if profile.Target == SPIRV {
-		for _, program := range cloned.Programs {
-			if program.View != nil {
-				executable.KernelModule.Functions = append(executable.KernelModule.Functions, srgbFunction())
-				break
-			}
+	for _, program := range cloned.Programs {
+		if program.View != nil {
+			executable.KernelModule.Functions = append(executable.KernelModule.Functions, srgbFunction())
+			break
 		}
 	}
 	viewKernel := -1
@@ -205,10 +205,11 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 			values = pruneUnusedParameters(function, values)
 			var viewWidth, viewHeight ir.ValueID
 			if dispatchIndex == fusedDispatch {
+				if err := fuseView(function, fusedBinding); err != nil {
+					return nil, err
+				}
 				if profile.Target == Web {
 					viewWidth, viewHeight = appendViewExtent(function, &values, program.View)
-				} else if err := fuseSPIRVView(function, fusedBinding); err != nil {
-					return nil, err
 				}
 			}
 			valuesForDispatch[dispatchIndex] = values
@@ -305,9 +306,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 					kernel.Entry = abi.PrivateEntry(viewKernel)
 					kernel.Function.Name = kernel.Entry
 					executable.PhysicalKernels = append(executable.PhysicalKernels, kernel)
-					if profile.Target == SPIRV {
-						executable.KernelModule.Functions = append(executable.KernelModule.Functions, kernel.Function)
-					}
+					executable.KernelModule.Functions = append(executable.KernelModule.Functions, kernel.Function)
 				}
 				resource := program.Resource(view.Source)
 				source := ResourceSource{Binding: 0, Resource: resourceIndex(program, resource, omitted), Kind: ExternalSource}
@@ -706,7 +705,7 @@ func appendViewExtent(function *ir.Function, values *[]flow.ValueArgument, view 
 	return width, height
 }
 
-func fuseSPIRVView(function *ir.Function, binding int) error {
+func fuseView(function *ir.Function, binding int) error {
 	output := types.Runtime(types.TU32)
 	function.BufferParams[binding].Type = output
 	places := map[ir.PlaceID]bool{}
@@ -788,13 +787,14 @@ func projectionKernel(target Target) (PhysicalKernel, error) {
 		Workgroup: ir.WorkgroupConstraint{Explicit: true, Size: [3]uint32{16, 16, 1}},
 	}
 	function.Body = projectionBody(pixel)
+	outputBytes := uint32(4)
+	if target == Web {
+		outputBytes = 0
+	}
 	physical := PhysicalKernel{Function: function, Workgroup: function.Workgroup.Size, Projection: true}
 	physical.Bindings = []StorageBinding{
 		{Buffer: 0, Binding: 0, Access: ir.Read, Type: pixels, MinimumByteSize: 16},
-		{Buffer: 1, Binding: 1, Access: ir.Mutable, Type: output, MinimumByteSize: 4, Texture: target == Web},
-	}
-	if target == Web {
-		physical.Bindings[1].MinimumByteSize = 0
+		{Buffer: 1, Binding: 1, Access: ir.Mutable, Type: output, MinimumByteSize: outputBytes, Texture: target == Web},
 	}
 	var err error
 	physical.Parameters, err = abi.PlanParameters(function, 2)
@@ -810,7 +810,7 @@ func projectionKernel(target Target) (PhysicalKernel, error) {
 
 func srgbFunction() *ir.Function {
 	return &ir.Function{
-		Name:   "__tach_srgb",
+		Name:   srgbHelper,
 		Kind:   ir.Helper,
 		Params: []ir.Param{{Name: "value", ID: 1, Type: types.TF32}},
 		Return: types.TF32,
@@ -878,7 +878,7 @@ func packRGBA(value ir.ValueID, next *ir.ValueID) ([]ir.Instr, ir.ValueID) {
 	}
 	for index := range 3 {
 		encoded := newValue()
-		instructions = append(instructions, &ir.Call{Result: encoded, Type: types.TF32, Function: "__tach_srgb", Args: []ir.ValueID{channels[index]}})
+		instructions = append(instructions, &ir.Call{Result: encoded, Type: types.TF32, Function: srgbHelper, Args: []ir.ValueID{channels[index]}})
 		channels[index] = encoded
 	}
 	zero, one, alpha := newValue(), newValue(), newValue()

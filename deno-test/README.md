@@ -1,9 +1,10 @@
 # Tach Deno/Vulkan correctness harness
 
-This private npm workspace proves that the canonical `examples/` Tach project
-works in Deno through Tach's Vulkan 1.3 host. It imports the same generated
-functions and `tach` API as the browser harness. Application code never
-selects shader files, descriptor bindings, memory types, or Vulkan pipelines.
+This private workspace asks the same product question as the browser
+harness, on the other host: do the eleven public programs in `examples/`
+work from the published `@depths/tach` API in Deno through Tach's Vulkan
+1.3 runtime? Application TypeScript is the same. It never chooses a
+shader file, a descriptor, or a Vulkan pipeline.
 
 ## Build and validation boundary
 
@@ -13,7 +14,7 @@ generated package into ignored `generated/`. Both `kernel.wgsl.gz` and
 executes SPIR-V. Before hardware execution, the test independently validates
 the binary with Khronos `spirv-val --target-env vulkan1.3`.
 
-`examples.ts` then imports all nine public programs from one generated
+`examples.ts` then imports all eleven public programs from one generated
 `index.js`. Host detection selects the packaged Tach-owned native library and
 Vulkan plan. The TypeScript calls, generated declarations, structured values,
 buffer handles, recipe objects, and ordering rules are identical to the WebGPU
@@ -21,29 +22,30 @@ path.
 
 ## What it proves
 
-The ordinary language corpus checks:
+The language programs check the same everyday surface as the browser
+harness: shared counters, 32-bit bit ops, loops and math, a type imported
+from another file, several recipes on one buffer, and `prepare` before
+`submit`.
 
-- workgroup memory and atomics;
-- bitwise and unsigned semantics;
-- branches, loops, compound assignment, vectors, and intrinsics;
-- cross-file imports, struct layout, and explicit orchestration;
-- runtime arrays, batching, repeat, and distinct parameter blocks; and
-- eager `prepare` followed by real execution.
+The view programs compute pictures without copying a frame to the CPU:
 
-The view corpus checks both physical plans without copying a frame to the CPU:
+- `gradient(params)` paints a frame from width, height, and a bias only.
+  Tach keeps that picture on the GPU. Any session can run the recipe
+  because it holds no buffer.
+- `gradientInto(pixels, params)` writes the same gradient into a buffer
+  you own, then converts it for display. You can still `read()` the
+  linear floats.
+- `swatch()` and `swatchInto(pixels)` do the same pair on a 2 x 2 of
+  known colors, so the linear source of the fallback can be checked.
+- The same `gradient` recipe is reused in a second Tach session, proving
+  recipes are not tied to a session the way buffers are.
 
-- `gradient(params)` has no public buffer. Its transient final frame is folded
-  into packed RGBA8 output, proving scalar-only procedural recipes;
-- `gradientInto(pixels, params)` writes a session-owned float buffer, then uses
-  standalone projection; and
-- one scalar `ComputeView` recipe is reused across two separate Tach sessions,
-  proving that recipes are owner-neutral while buffers remain session-owned.
-
-Each session executes one prepared scalar view, a batch of 32 alternating
-fused/fallback views, and one final fallback whose source buffer is read only
-to verify its write. The complete language and view corpus runs twice. The
-reported 68 projected frames are offscreen Vulkan compute results, not native
-surface presentation; Deno intentionally has no `present` surface today.
+Each session runs the prepared gradient, both swatches, 32 alternating
+gradient recipes, and one last fallback whose source is read only to
+confirm the write. The whole corpus runs twice. The reported 72 frames
+are offscreen Vulkan results, not a window. Deno has no `present`
+surface today. The display bytes are the same math the browser shows;
+this host cannot yet put them on a screen.
 
 Running two scoped sessions also proves that closing one releases its buffers
 and Vulkan objects while the process-wide Deno FFI library remains safe for the
@@ -53,7 +55,8 @@ next session.
 
 - Deno;
 - Khronos `spirv-val`;
-- a Vulkan 1.3 loader and compatible x86-64 Windows or Linux device; and
+- a Vulkan 1.3 loader and x86-64 Windows or Linux device with Synchronization2,
+  zero-initialized workgroup memory, and the Vulkan memory model; and
 - the matching Tach native library in the local `@depths/tach` workspace.
 
 The repository builds the native library against official Vulkan SDK headers
@@ -70,7 +73,7 @@ npm test --workspace=@tach/deno-test
 ```
 
 The test grants Deno only FFI and read access beyond npm resolution. It prints
-the selected physical adapter, nine-program count, and 68 projected frames.
+the selected physical adapter, eleven-program count, and 72 projected frames.
 Assertion failures and process status are authoritative; no test report is
 generated.
 

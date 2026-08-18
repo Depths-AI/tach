@@ -7,9 +7,9 @@ with one workload profile, five samples, raw observations, and no pass/fail
 budget.
 
 The showcase answers a practical beginner question: what useful work can a
-TypeScript application describe in Tach while GPU APIs, shader modules,
-bindings, scratch allocation, synchronization, color conversion, and host
-selection remain compiler/runtime responsibilities?
+TypeScript application describe in Tach while shaders, bindings, scratch,
+color conversion, and "am I on WebGPU or Vulkan?" stay out of application
+code?
 
 ## One project, two hosts
 
@@ -19,9 +19,9 @@ whole-file project imports. One `tach build` merges all seven files into one
 JavaScript facade, one declaration file, compressed WGSL, and SPIR-V 1.6.
 
 The shared TypeScript workload implementation imports all six generated
-recipes through `build/index.js`. Browser and Deno runners open one persistent
-Tach session and call the same functions. WebGPU/Vulkan selection, physical
-entry points, bindings, and view output are absent from application code.
+recipes through `build/index.js`. Browser and Deno runners open one
+persistent Tach session and call the same functions. Application code
+never names a shader entry, a bind group, or a canvas format.
 
 ## Workloads
 
@@ -41,11 +41,12 @@ normal/material reconstruction, lighting, and post-processing. The mesh is a
 heterogeneous world of arbitrary curved elements rather than a regular proxy
 grid.
 
-Both rendering programs return `view<srgb8>` from linear `float32x4` final
-pixels. They never pack display bytes in Tach source. Their final per-pixel
-stage is eligible for terminal projection fusion, so WebGPU can write the
-canvas storage texture directly and Vulkan can write packed RGBA8 scratch
-without materializing another full-frame float output or using CPU conversion.
+Both rendering programs return `view<srgb8>` from linear `float32x4`
+pixels. They never pack display bytes in Tach source. Tach converts those
+floats to 8-bit sRGB. The browser draws that picture on a canvas; Deno
+computes the same bytes offscreen. When the last pixel stage already
+writes each pixel once, conversion happens there and the extra full-frame
+float buffer disappears.
 
 The renderer paths differ only at the real host capability boundary:
 

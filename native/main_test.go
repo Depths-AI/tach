@@ -103,7 +103,7 @@ func TestVulkan13Contract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(source)
-	for _, required := range []string{"VK_API_VERSION_1_3", "shaderZeroInitializeWorkgroupMemory", "synchronization2", "X(CmdPipelineBarrier2)", "X(QueueSubmit2)", "VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT"} {
+	for _, required := range []string{"VK_API_VERSION_1_3", "shaderZeroInitializeWorkgroupMemory", "synchronization2", "vulkanMemoryModel", "X(CmdPipelineBarrier2)", "X(QueueSubmit2)", "VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT"} {
 		if !strings.Contains(text, required) {
 			t.Errorf("native runtime lacks %s", required)
 		}

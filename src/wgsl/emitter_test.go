@@ -113,13 +113,13 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"texture_storage_2d<rgba8unorm, write>", "fn _tach_view_srgb", "textureStore(", "@workgroup_size(256, 1, 1)"} {
+	for _, want := range []string{"texture_storage_2d<rgba8unorm, write>", "255.0", "0.5", "unpack4x8unorm(", "textureStore(", "@workgroup_size(256, 1, 1)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("view WGSL missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Count(out, "@compute") != 1 || strings.Contains(out, "_tach_view_source_") {
-		t.Fatalf("view was not fused into its pixel stage:\n%s", out)
+	if strings.Count(out, "@compute") != 1 || strings.Contains(out, "_tach_view_srgb") || strings.Contains(out, "_tach_view_source_") {
+		t.Fatalf("view was not fused through shared pack math:\n%s", out)
 	}
 	if err := wgsl.Validate(out); err != nil {
 		t.Fatal(err)
@@ -144,8 +144,8 @@ export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(out, "@compute") != 2 || !strings.Contains(out, "_tach_view_source_") || !strings.Contains(out, "@workgroup_size(16, 16, 1)") {
-		t.Fatalf("standalone projection missing:\n%s", out)
+	if strings.Count(out, "@compute") != 2 || !strings.Contains(out, "@workgroup_size(16, 16, 1)") || !strings.Contains(out, "unpack4x8unorm(") || !strings.Contains(out, "255.0") || strings.Contains(out, "_tach_view_srgb") {
+		t.Fatalf("standalone projection missing shared pack math:\n%s", out)
 	}
 }
 

@@ -1,11 +1,14 @@
 # Tach browser correctness harness
 
-This private npm workspace proves that the canonical `examples/` Tach project
-works through the public `@depths/tach` API in Chromium WebGPU. It is a
-self-contained Deno harness: it owns project generation, bundling, its
-loopback-only server, Chrome launch, DevTools Protocol client, GPU assertions,
-canvas capture, and cleanup. It shares no runner or shader fixture with the
-native harness.
+This private workspace asks a product question: do the eleven public
+programs in `examples/` work from the published `@depths/tach` API in
+real Chrome WebGPU? It is not a unit-test framework. A Deno script
+builds the example project, serves one page, launches Chromium, and
+checks results the way an application would: generated functions,
+`submit`, `present`, buffer `read()`, and a PNG of the canvas.
+
+It shares no runner or handwritten shader with the native harness. Both
+harnesses import the same generated `index.js`.
 
 ## Build boundary
 
@@ -22,37 +25,40 @@ creates pipelines, and executes the same recipe facade used by Deno/Vulkan.
 
 ## What it proves
 
-The nine canonical programs cover:
+The eleven canonical programs cover the language a TypeScript app will
+actually call. In everyday terms:
 
-- shared workgroup memory and integer atomics;
-- shifts, masks, complements, and unsigned behavior;
-- branches, loops, compound assignment, vectors, and math intrinsics;
-- direct imports, project-global types, structs, and orchestration;
-- runtime-array launch inference, batching, repeat, and parameter isolation;
-- explicit `prepare` followed by submission;
-- a scalar-only `view<srgb8>` whose final transient writer is fused with
-  texture projection; and
-- a caller-owned pixel-buffer view using standalone projection.
+- workers sharing a counter;
+- 32-bit shifts and masks;
+- loops, branches, vectors, and math;
+- a type imported from another file;
+- several recipes on one buffer, including `prepare` then `submit`;
+- a picture the program paints itself, drawn in one step;
+- the same picture written into a buffer you still own, then drawn;
+- a 2 x 2 of known colors on both of those paths, decoded from the
+  presented PNG with `colorSpaceConversion: "none"` so the 8-bit
+  channels can be checked exactly.
 
 One scoped session first checks exact integer results and tolerance-bounded
 floating results through decoded buffer readback. It then prepares and submits
-the owner-neutral scalar view offscreen, presents the caller-owned fallback,
-and verifies that its linear float buffer was actually written.
+the owner-neutral scalar view offscreen, presents both swatches, presents the
+caller-owned gradient fallback, and verifies that each caller-owned linear
+float buffer was actually written.
 
 The sustained display seam constructs 32 CPU-selected recipes, alternating
 the scalar/transient and caller-owned forms, and invokes `present` concurrently
 on one 128 x 72 canvas. Session serialization preserves call order;
 completion-backed presentation prevents unbounded GPU queueing. The final
-canvas is captured as PNG and must be non-empty. Together with the initial
-fallback presentation, success reports 33 displayed frames and nine public
-programs.
+canvas is captured as PNG and must be non-empty. Together with the two swatch
+frames and the initial gradient fallback, success reports 35 displayed frames
+and eleven public programs.
 
 This distinguishes three contracts that are easy to conflate:
 
 ```text
-generated call       opaque recipe, no execution
-submit(view)          offscreen GPU projection, no CPU readback
-present(canvas, view) full GPU recipe, direct canvas output, frame completion
+generated call       describe the picture, do not run it
+submit(view)          compute it, leave it on the GPU
+present(canvas, view) compute it onto this canvas, then wait
 ```
 
 ## Browser runner
@@ -62,7 +68,7 @@ the local page, and polls one promise through the DevTools Protocol. It has no
 browser-test framework or bundler dependency. Set `CHROME_BIN` only when the
 browser is outside the standard platform locations.
 
-The runner requires exactly nine programs, 33 presented frames, and a
+The runner requires exactly eleven programs, 35 presented frames, and a
 non-trivial PNG. It prints the selected adapter and those counts, then closes
 Chrome, aborts the server, and removes its temporary profile even after
 failure. Process status and assertion diagnostics are the test contract; the

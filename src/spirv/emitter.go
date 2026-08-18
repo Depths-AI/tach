@@ -185,7 +185,8 @@ func encodeString(s string) []uint32 {
 
 func (b *builder) build() error {
 	emit(&b.capabilities, OpCapability, CapabilityShader)
-	emit(&b.memoryModel, OpMemoryModel, AddressingLogical, MemoryGLSL450)
+	emit(&b.capabilities, OpCapability, CapabilityVulkanMemoryModel)
+	emit(&b.memoryModel, OpMemoryModel, AddressingLogical, MemoryVulkan)
 
 	// Function IDs must exist before entry-point declarations and forward calls.
 	for _, f := range b.m.Functions {
@@ -817,7 +818,9 @@ func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int,
 		return 0, err
 	}
 	loaded := s.b.id()
-	emit(&s.b.functions, OpLoad, typeID, loaded, address)
+	if err := s.emitLoad(typeID, loaded, address, StorageUniform, field.Physical); err != nil {
+		return 0, err
+	}
 	if logical.Kind != types.Bool {
 		return loaded, nil
 	}
@@ -868,7 +871,9 @@ func (s *fnEmitter) emitCoordinates() error {
 				return err
 			}
 			loaded = s.b.id()
-			emit(&s.b.functions, OpLoad, typeID, loaded, variable)
+			if err := s.emitLoad(typeID, loaded, variable, StorageInput, t); err != nil {
+				return err
+			}
 			s.inputs[input] = loaded
 		}
 		if input == inputLocalLinear {
@@ -1058,7 +1063,9 @@ func (s *fnEmitter) loadPlace(p spvPlace, t *types.Type) (uint32, error) {
 		return 0, fmt.Errorf("place type %s requires structural loading", t)
 	}
 	id := s.b.id()
-	emit(&s.b.functions, OpLoad, logical, id, p.ptr)
+	if err := s.emitLoad(logical, id, p.ptr, p.storage, t); err != nil {
+		return 0, err
+	}
 	return id, nil
 }
 
@@ -1101,8 +1108,7 @@ func (s *fnEmitter) storePlace(p spvPlace, value uint32) error {
 	if physical != logical {
 		return fmt.Errorf("place type %s requires structural storage", t)
 	}
-	emit(&s.b.functions, OpStore, p.ptr, value)
-	return nil
+	return s.emitStore(p.ptr, value, p.storage, t)
 }
 
 func (s *fnEmitter) emitInstr(in ir.Instr) error {
@@ -1385,7 +1391,7 @@ func (s *fnEmitter) emitAtomic(x *ir.Atomic) error {
 	if p.storage != StorageWorkgroup && p.storage != StorageStorageBuffer {
 		return fmt.Errorf("atomic place uses invalid storage class %d", p.storage)
 	}
-	scopeValue := ScopeDevice
+	scopeValue := ScopeQueueFamily // QueueFamily avoids vulkanMemoryModelDeviceScope.
 	if p.storage == StorageWorkgroup {
 		scopeValue = ScopeWorkgroup
 	}
@@ -1462,7 +1468,7 @@ func (s *fnEmitter) emitBarrier(x *ir.Barrier) error {
 		return err
 	}
 	memoryScope := execScope
-	sem := MemorySemanticsAcquireRelease
+	sem := MemorySemanticsAcquireRelease | MemorySemanticsMakeAvailable | MemorySemanticsMakeVisible
 	switch x.Kind {
 	case ir.BarrierWorkgroup:
 		sem |= MemorySemanticsWorkgroupMemory
@@ -1546,6 +1552,81 @@ func scalarKind(t *types.Type) types.Kind {
 		return types.Invalid
 	}
 	return t.Kind
+}
+
+func memoryAlignment(storage uint32, t *types.Type) (uint32, error) {
+	if storage == StorageUniform || storage == StorageStorageBuffer {
+		l, err := layout.Of(t)
+		if err != nil {
+			return 0, err
+		}
+		return l.Align, nil
+	}
+	return logicalAlignment(t)
+}
+
+func logicalAlignment(t *types.Type) (uint32, error) {
+	if t == nil {
+		return 0, fmt.Errorf("nil type has no memory alignment")
+	}
+	switch t.Kind {
+	case types.I32, types.U32, types.F32, types.Atomic:
+		return 4, nil
+	case types.Vector:
+		if t.Lanes == 2 {
+			return 8, nil
+		}
+		return 16, nil
+	case types.FixedArray:
+		return logicalAlignment(t.Elem)
+	case types.Struct:
+		var align uint32
+		for _, field := range t.Fields {
+			fieldAlign, err := logicalAlignment(field.Type)
+			if err != nil {
+				return 0, err
+			}
+			if fieldAlign > align {
+				align = fieldAlign
+			}
+		}
+		if align == 0 {
+			return 0, fmt.Errorf("struct %s has no aligned members", t)
+		}
+		return align, nil
+	default:
+		return 0, fmt.Errorf("type %s has no memory alignment", t)
+	}
+}
+
+func (s *fnEmitter) memoryAccess(storage uint32, t *types.Type) (mask, align uint32, err error) {
+	align, err = memoryAlignment(storage, t)
+	if err != nil {
+		return 0, 0, err
+	}
+	mask = MemoryAccessAligned
+	if storage == StorageStorageBuffer || storage == StorageUniform || storage == StorageWorkgroup {
+		mask |= MemoryAccessNonPrivatePointer
+	}
+	return mask, align, nil
+}
+
+func (s *fnEmitter) emitLoad(resultType, result, ptr, storage uint32, t *types.Type) error {
+	mask, align, err := s.memoryAccess(storage, t)
+	if err != nil {
+		return err
+	}
+	emit(&s.b.functions, OpLoad, resultType, result, ptr, mask, align)
+	return nil
+}
+
+func (s *fnEmitter) emitStore(ptr, value, storage uint32, t *types.Type) error {
+	mask, align, err := s.memoryAccess(storage, t)
+	if err != nil {
+		return err
+	}
+	emit(&s.b.functions, OpStore, ptr, value, mask, align)
+	return nil
 }
 
 func (s *fnEmitter) emitUnary(x *ir.Unary) error {

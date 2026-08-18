@@ -1,13 +1,14 @@
 # Tach program, memory, and runtime ABI
 
+This is the byte-and-lifetime contract between the compiler and the two
+runtimes. Application code does not implement it. You consume generated
+modules and `@depths/tach`. Read this when a generated signature, a
+buffer layout, or a view's on-GPU storage has to be exact.
+
 Tach owns one external contract across a complete source project, generated
 JavaScript/TypeScript, WebGPU/WGSL, Vulkan/SPIR-V, and reflection metadata.
 This document defines names, resource identity, bytes, physical dispatch
 plans, launch geometry, lifetime, and synchronization.
-
-Application code normally consumes generated modules and `@depths/tach`; it
-does not implement this ABI. The Tach-owned WebGPU/Vulkan drivers and compiler
-contributors need the complete contract.
 
 See [the language guide](language.md) for source semantics and
 [the IR guide](ir.md) for logical programs, kernel templates, and executable
@@ -15,13 +16,13 @@ plans.
 
 ## 1. Three connected boundaries
 
-The ABI separates three identities that a one-function example can make look
-the same:
+The ABI separates three identities that `export function scale[i]` can
+make look like one name:
 
 ```text
-public program       host-callable generated function
-logical stage        indexed portable GPU operation
-physical kernel      target entry created for one dispatch
+public program       the TypeScript function you call
+logical stage        the portable per-index GPU work
+physical kernel      the private shader entry created for one launch
 ```
 
 For baseline shorthand:
@@ -174,9 +175,10 @@ block, each logical bool leaf becomes one `uint32` word containing `0` or `1`.
 
 ### Structs
 
-Struct alignment is at least 16 bytes. A field begins at its required aligned
-offset. Nested structs reserve a 16-byte-aligned extent. A fixed struct's final
-size is rounded to its alignment.
+Host-visible struct alignment is at least 16 bytes. A field begins at its
+required aligned offset. Nested structs reserve a 16-byte-aligned extent. A
+fixed struct's final size is rounded to its alignment. Workgroup `shared`
+structs use the logical max member alignment and do not inherit this floor.
 
 ```tach
 type Particle = {
@@ -360,7 +362,8 @@ checks that `width * height` is a positive safe product and that an unfused
 source contains at least that many complete 16-byte pixels. Extra source
 elements are ignored.
 
-Each source pixel is linear `(red, green, blue, alpha)`. For each RGB channel,
+Each source pixel is linear `(red, green, blue, alpha)`: the color space a
+renderer thinks in, not the bytes a monitor wants. For each RGB channel,
 target lowering first clamps to `[0, 1]`, then applies:
 
 ```text
@@ -368,11 +371,13 @@ channel <= 0.0031308 ? 12.92 * channel
                      : 1.055 * pow(channel, 1 / 2.4) - 0.055
 ```
 
-Alpha is clamped to `[0, 1]` without transfer. Native packing converts each
-channel with `uint32(channel * 255 + 0.5)` and places R, G, B, A in successive
-low-to-high bytes. Web writes the equivalent normalized values to
-`rgba8unorm`. This conversion is compiler/backend work, never Tach source or a
-TypeScript readback pass.
+Alpha is clamped to `[0, 1]` without transfer. Both targets then quantize
+each channel with `uint32(channel * 255 + 0.5)` and pack R, G, B, A into one
+little-endian `uint32` word. That word is the portable display pixel. WebGPU
+unpacks it with `unpack4x8unorm` into an `rgba8unorm` texel so `present`
+can write a 2D image. Vulkan stores the word in packed scratch. This
+conversion is compiler/backend work, never Tach source or a TypeScript
+readback pass.
 
 ## 10. Runtime metadata schema 2
 
@@ -420,7 +425,7 @@ interface PublicProgram {
 interface TargetPlan {
   vulkan?: "1.3";
   spirv?: "1.6";
-  features?: Array<"synchronization2" | "shaderZeroInitializeWorkgroupMemory">;
+  features?: Array<"synchronization2" | "shaderZeroInitializeWorkgroupMemory" | "vulkanMemoryModel">;
   kernels: Array<{
     entryPoint: string;
     workgroupSize: [number, number, number];
@@ -646,15 +651,26 @@ emitted.
 The runtime builds layouts from metadata and never parses WGSL.
 
 A Web view output binding is `texture_storage_2d<rgba8unorm, write>`. A fused
-terminal entry converts and stores its own final pixel. A fallback entry reads
-the final `float32x4[]` resource over `[width, height]` and writes the texture.
+terminal entry packs its own final pixel and unpacks that word into the
+texture. A fallback entry reads the final `float32x4[]` resource over
+`[width, height]`, applies the same pack, and writes the texture.
 The generated package stores this complete module as deterministic gzip in
 `kernel.wgsl.gz`; the browser driver decompresses it before module creation.
 
 ## 12. SPIR-V representation
 
-SPIR-V 1.6 uses Logical addressing and the Shader capability under Tach's
-Vulkan 1.3 profile. Host-visible storage and uniform aggregates carry
+SPIR-V 1.6 uses Logical addressing, the Shader and VulkanMemoryModel
+capabilities, and the Vulkan memory model under Tach's Vulkan 1.3 profile.
+`GLSL.std.450` remains the math extended-instruction set, not the memory
+model. `OpLoad`/`OpStore` carry Aligned. Uniform and StorageBuffer use the
+host-ABI alignment, including the 16-byte struct floor. Workgroup and Input
+use the logical pointee alignment (max member or element; `{uint32, uint32}`
+shared is 4, not 16). StorageBuffer, Uniform, and Workgroup also carry
+NonPrivatePointer; Input does not.
+Storage-buffer atomics use QueueFamily scope; workgroup atomics use Workgroup
+scope. Source barriers add MakeAvailable and MakeVisible.
+
+Host-visible storage and uniform aggregates carry
 descriptor, member-offset, and
 array-stride decorations. Logical SSA/helper values and Workgroup memory use
 undecorated logical aggregate types.
@@ -665,12 +681,13 @@ physical boundary field by field. Padding never becomes a logical member.
 Tach guarantees zero-initialized shared memory. Every Workgroup variable has
 an `OpConstantNull` initializer and the host requires
 `shaderZeroInitializeWorkgroupMemory`; no synthetic store loop or barrier is
-inserted. The host also requires Synchronization2 for plan barriers.
+inserted. The host also requires Synchronization2 for plan barriers and
+`vulkanMemoryModel` for that shader memory model.
 
 A native view uses a storage-buffer output with one packed little-endian RGBA8
-`uint32` per pixel. The same fused/fallback distinction applies, with shared
-compiler-generated IEC sRGB conversion and alpha clamping. This is an
-offscreen compute result; it does not imply a Vulkan surface or swapchain.
+`uint32` per pixel. The same fused/fallback distinction and the same pack
+sequence apply; only the container differs. This is an offscreen compute
+result; it does not imply a Vulkan surface or swapchain.
 
 ## 13. Host values and materialization
 
@@ -851,9 +868,10 @@ loading one entry point:
     embedding application.
 
 The native boundary rejects incompatible metadata before module creation,
-requires Vulkan API 1.3 plus Synchronization2 and
-`shaderZeroInitializeWorkgroupMemory`, validates buffer sizes and dispatch
-limits, and reports driver failures through the coarse Tach FFI wire. The Deno
+requires Vulkan API 1.3 plus Synchronization2,
+`shaderZeroInitializeWorkgroupMemory`, and `vulkanMemoryModel`, validates
+buffer sizes and dispatch limits, and reports driver failures through the
+coarse Tach FFI wire. The Deno
 correctness harness additionally runs Khronos
 `spirv-val --target-env vulkan1.3` before hardware execution.
 

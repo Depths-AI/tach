@@ -102,6 +102,15 @@ const reusableView = programs.gradient({ width, height, bias: 0 });
 async function verifyViews(gpu: Tach): Promise<void> {
   await gpu.prepare(reusableView);
   await gpu.submit(reusableView);
+  await gpu.submit(programs.swatch());
+  const swatch = gpu.buffer(new Float32Array(16));
+  await gpu.submit(programs.swatchInto(swatch));
+  equal(Array.from(await swatch.read()), [
+    0, 0, 0, 1,
+    1, 0, 0, 1,
+    0, 1, 0, 1,
+    1, 1, 0, 1,
+  ], "external swatch source");
   const pixels = gpu.buffer(new Float32Array(width * height * 4));
   const [first, ...rest] = Array.from(
     { length: 32 },
@@ -134,6 +143,8 @@ const first = await tach(async (gpu) => {
     "math",
     "reduceLanes",
     "scale",
+    "swatch",
+    "swatchInto",
     "transform",
   ], "public programs");
   await verifyLanguage(gpu);
@@ -145,4 +156,4 @@ const second = await tach(async (gpu) => {
   return gpu.adapter.name;
 });
 equal(second, first, "owner-neutral scalar view across sessions");
-console.log(`Vulkan execution: ${first}; 9 programs; 68 projected frames`);
+console.log(`Vulkan execution: ${first}; 11 programs; 72 projected frames`);
