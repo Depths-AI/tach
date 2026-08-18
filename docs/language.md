@@ -772,7 +772,7 @@ A normal `total += 1` from many runs can lose updates. `atomicAdd` cannot.
 line, then continues with shared memory visible.
 `bufferBarrier()` does the same for buffer memory inside that team.
 Everyone must arrive. Tach rejects a barrier inside a branch that
-different runs might take differently — for example anything derived from
+different runs might take differently - for example anything derived from
 the coordinate `i`, from a buffer load, or from an atomic result. *Uniform*
 here means "the same decision for every run in the team," not a type.
 

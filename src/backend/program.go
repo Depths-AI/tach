@@ -23,6 +23,7 @@ const (
 	Synchronization2              = "synchronization2"
 	ZeroInitializeWorkgroupMemory = "shaderZeroInitializeWorkgroupMemory"
 	VulkanMemoryModel             = "vulkanMemoryModel"
+	srgbHelper                    = "$tach_srgb"
 )
 
 type Profile struct {
@@ -809,7 +810,7 @@ func projectionKernel(target Target) (PhysicalKernel, error) {
 
 func srgbFunction() *ir.Function {
 	return &ir.Function{
-		Name:   "__tach_srgb",
+		Name:   srgbHelper,
 		Kind:   ir.Helper,
 		Params: []ir.Param{{Name: "value", ID: 1, Type: types.TF32}},
 		Return: types.TF32,
@@ -877,7 +878,7 @@ func packRGBA(value ir.ValueID, next *ir.ValueID) ([]ir.Instr, ir.ValueID) {
 	}
 	for index := range 3 {
 		encoded := newValue()
-		instructions = append(instructions, &ir.Call{Result: encoded, Type: types.TF32, Function: "__tach_srgb", Args: []ir.ValueID{channels[index]}})
+		instructions = append(instructions, &ir.Call{Result: encoded, Type: types.TF32, Function: srgbHelper, Args: []ir.ValueID{channels[index]}})
 		channels[index] = encoded
 	}
 	zero, one, alpha := newValue(), newValue(), newValue()

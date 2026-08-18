@@ -854,7 +854,7 @@ across commands.
 ### 12.3 Barriers
 
 `workgroupBarrier()` waits until every run in this team has reached that
-line, then lets them all continue, with shared memory visible. 
+line, then lets them all continue, with shared memory visible.
 `bufferBarrier()` does the same for buffer memory inside that team.
 
 Every run in the team must reach the barrier. A barrier inside

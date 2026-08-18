@@ -422,7 +422,7 @@ export function sharedStruct[i](io: buffer<Pair>) {
 		t.Fatal("test module emitted no Workgroup Pair store with Aligned 4")
 	}
 	err = Validate(bin)
-	if err == nil || !strings.Contains(err.Error(), "Aligned 16, want 4") {
+	if err == nil || !strings.Contains(err.Error(), "aligned 16, want 4") {
 		t.Fatalf("Validate error = %v, want host-ABI alignment rejection", err)
 	}
 }

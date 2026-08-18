@@ -22,7 +22,7 @@ func packsDisplayPixel(function *ir.Function) bool {
 		for _, instruction := range block.Instrs {
 			switch x := instruction.(type) {
 			case *ir.Call:
-				if x.Function == "__tach_srgb" {
+				if x.Function == "$tach_srgb" {
 					srgb = true
 				}
 			case *ir.Convert:

@@ -1274,7 +1274,7 @@ func (v *validation) validateMemoryAccess(ops []uint32, storage, pointee uint32)
 		return err
 	}
 	if align != want {
-		return fmt.Errorf("Aligned %d, want %d", align, want)
+		return fmt.Errorf("aligned %d, want %d", align, want)
 	}
 	shared := storage == StorageStorageBuffer || storage == StorageUniform || storage == StorageWorkgroup
 	if shared {
@@ -1282,7 +1282,7 @@ func (v *validation) validateMemoryAccess(ops []uint32, storage, pointee uint32)
 			return fmt.Errorf("shared storage requires NonPrivatePointer")
 		}
 	} else if mask&MemoryAccessNonPrivatePointer != 0 {
-		return fmt.Errorf("Input access cannot use NonPrivatePointer")
+		return fmt.Errorf("input access cannot use NonPrivatePointer")
 	}
 	if mask&^(MemoryAccessAligned|MemoryAccessNonPrivatePointer) != 0 {
 		return fmt.Errorf("memory access mask 0x%x is outside Tach profile", mask)

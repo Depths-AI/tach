@@ -109,7 +109,7 @@ The names `paint`, `stamp`, and `integrateParticle` are private. They are
 helpers the public functions call. You will not import them from
 JavaScript.
 
-## `scale` — start here
+## `scale` - start here
 
 `core/scalars.tach` is the whole mental model in one screen.
 
@@ -131,7 +131,7 @@ This file is first because every other example reuses its shape: a
 coordinate, a buffer, a small constant from TypeScript, and a bounds
 check. If `scale` makes sense, you can read the rest.
 
-## `bitwise` — 32-bit integers are not JavaScript numbers
+## `bitwise` - 32-bit integers are not JavaScript numbers
 
 JavaScript has one number type. Bit shifts on it are defined, but they are
 defined for JS, not for a 32-bit GPU lane. `core/bitwise.tach` writes one
@@ -149,7 +149,7 @@ expects an exact match, no epsilon. This file is here so you see that
 "integer" in Tach means a real 32-bit word, not a `number` that happens
 to be whole.
 
-## `transform` — loops and branches are normal
+## `transform` - loops and branches are normal
 
 `core/control.tach` looks like ordinary structured code: a `while`, an
 `if` / `else`, a `bool` flag from the host.
@@ -170,7 +170,7 @@ The `@workgroup(64)` above the function is the team size those 64-apart
 strides are built for. You can ignore workgroups until you need this kind
 of teamwork. `scale` never mentions them.
 
-## `reduceLanes` — vectors and `for`
+## `reduceLanes` - vectors and `for`
 
 A `uint32x4` is four unsigned integers in one value. `core/for.tach`
 loads four neighbors, then sums them with a `for` loop that indexes the
@@ -186,7 +186,7 @@ The harness puts `1, 2, 3, 4` at the front of a long zeroed array and
 expects `10` at index 0. One complete group, one number you can check in
 your head.
 
-## `math` — the functions you already know
+## `math` - the functions you already know
 
 `core/math.tach` is a tour of Tach's math library: `sin`, `cos`, `sqrt`,
 `length`, `normalize`, `dot`, `cross`, `pow`, rounding, and integer
@@ -207,7 +207,7 @@ a GPU does not have to match `Math.sin` bit for bit. It has to be the
 same function closely enough that you can trust the kernel is doing math,
 not skipping it.
 
-## `view.tach` — making a picture without reading pixels
+## `view.tach` - making a picture without reading pixels
 
 This is the file frontend developers usually came for.
 
@@ -264,7 +264,7 @@ A note on alpha: the swatch uses alpha `1` because a browser canvas
 presented by Tach is opaque. A zero alpha would test the compositor, not
 Tach's color conversion.
 
-## `types.tach` and `integrate` — sharing a type across files
+## `types.tach` and `integrate` - sharing a type across files
 
 Real projects do not put every type next to every kernel.
 
@@ -297,7 +297,7 @@ runs must not move the unused slots. The harness places two particles,
 steps `dt = 0.5`, and checks that each position moved by half of its
 velocity. You can do that arithmetic on paper.
 
-## `accumulate` — when workers must meet
+## `accumulate` - when workers must meet
 
 Until this file, every invocation owns a different slot and never talks
 to its neighbors. That is the easy, fast case.
