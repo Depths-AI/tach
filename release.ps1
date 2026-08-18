@@ -120,13 +120,9 @@ function Assert-VersionCoherence {
   }
 }
 
-function Assert-PublishGitState {
+function Assert-PublishCommit {
   if ((Read-Checked "git" @("branch", "--show-current")) -ne "master") {
     throw "publish requires the master branch"
-  }
-  if (-not [string]::IsNullOrWhiteSpace(
-      (Read-Checked "git" @("status", "--porcelain", "--untracked-files=all")))) {
-    throw "publish requires a clean tree"
   }
   $head = Read-Checked "git" @("rev-parse", "HEAD")
   $remote = ((Read-Checked "git" @("ls-remote", "origin", "refs/heads/master")) -split '\s+')[0]
@@ -469,46 +465,17 @@ await compiler.compilerPath();
 }
 
 function Publish-Npm([string]$Archive, [string]$Npmrc) {
-  Push-Location $root
-  try {
-    $preference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-      $output = & npm publish $Archive `
-        --access public `
-        --registry $registry `
-        --userconfig $Npmrc 2>&1
-      $exitCode = $LASTEXITCODE
-    } finally {
-      $ErrorActionPreference = $preference
-    }
-    $output | ForEach-Object { Write-Host $_ }
-    if ($exitCode -eq 0) {
-      return
-    }
-    $message = $output -join [Environment]::NewLine
-    $approval = [regex]::Match(
-      $message,
-      'https://www\.npmjs\.com/auth/cli/[0-9A-Za-z_-]+'
-    )
-    if ($message -notmatch '\bEOTP\b' -or -not $approval.Success) {
-      throw "npm publish exited $exitCode"
-    }
-    Set-Clipboard -Value $approval.Value
-    Write-Host ""
-    Write-Host "NPM APPROVAL REQUIRED" -ForegroundColor Yellow
-    Write-Host $approval.Value -ForegroundColor Cyan
-    Write-Host "The URL is also on the clipboard. Open it in the intended npm browser profile; waiting for publication."
-  } finally {
-    Pop-Location
-  }
+  Invoke-Checked "npm" @(
+    "publish", $Archive, "--access", "public",
+    "--registry", $registry, "--userconfig", $Npmrc
+  )
 }
 
 function Publish-Release {
   foreach ($command in @("git", "npm")) {
     Assert-Command $command
   }
-  Assert-PublishGitState
+  Assert-PublishCommit
   $head = Read-Checked "git" @("rev-parse", "HEAD")
   $manifest = Assert-Stage
   $secrets = Read-Secrets
@@ -534,6 +501,21 @@ registry=$registry
     Write-Host "Authenticated GitHub as $($githubUser.login)"
     Write-Host "Authenticated npm as $npmUser"
 
+    $published = Get-PublishedNpmVersion
+    if ($null -eq $published) {
+      $archive = Join-Path $releaseDir "depths-tach-$packageVersion.tgz"
+      Publish-Npm $archive $npmrc
+      for ($attempt = 0; $attempt -lt 300 -and $null -eq $published; $attempt++) {
+        $published = Get-PublishedNpmVersion
+        if ($null -eq $published) {
+          Start-Sleep -Seconds 2
+        }
+      }
+    }
+    if ($published -ne $packageVersion) {
+      throw "npm did not publish $packageName@$packageVersion"
+    }
+
     $release = Get-GitHubRelease
     if ($null -eq $release) {
       $release = Invoke-GitHub "Post" "/repos/$repository/releases" @{
@@ -541,18 +523,12 @@ registry=$registry
         target_commitish = $head
         name = "Tach $Version"
         body = [string]$manifest.notes
-        draft = $true
+        draft = $false
         prerelease = $packageVersion.Contains("-")
       }
-      Write-Host "Created draft GitHub release $Version"
-    } elseif ($release.target_commitish -ne $head) {
-      if (-not $release.draft -or @($release.assets).Count -ne 0) {
-        throw "existing GitHub release targets $($release.target_commitish), not $head"
-      }
-      $release = Invoke-GitHub "Patch" "/repos/$repository/releases/$($release.id)" @{
-        target_commitish = $head
-      }
-      Write-Host "Retargeted empty draft release $Version"
+      Write-Host "Published GitHub release $Version"
+    } elseif ($release.draft -or $release.target_commitish -ne $head) {
+      throw "existing GitHub release is not the published release for $head"
     }
     if ($release.name -ne "Tach $Version" -or
         $release.body -ne [string]$manifest.notes) {
@@ -582,38 +558,10 @@ registry=$registry
       }
       $upload = $release.upload_url -replace '\{\?name,label\}$', ""
       $uri = "${upload}?name=$([Uri]::EscapeDataString($name))"
-      $uploadParameters = @{
-        Uri = $uri
-        Method = "Post"
-        Headers = $script:githubHeaders
-        ContentType = "application/octet-stream"
-        InFile = $path
-        UseBasicParsing = $true
-      }
-      Invoke-WebRequest @uploadParameters | Out-Null
+      Invoke-WebRequest -Uri $uri -Method Post -Headers $script:githubHeaders `
+        -ContentType "application/octet-stream" -InFile $path -UseBasicParsing | Out-Null
       Write-Host "Uploaded $name"
       $release = Invoke-GitHub "Get" "/repos/$repository/releases/$($release.id)"
-    }
-    $published = Get-PublishedNpmVersion
-    if ($null -eq $published) {
-      $archive = Join-Path $releaseDir "depths-tach-$packageVersion.tgz"
-      Write-Host "npm will require interactive browser/2FA approval."
-      Publish-Npm $archive $npmrc
-      for ($attempt = 0; $attempt -lt 300 -and $null -eq $published; $attempt++) {
-        $published = Get-PublishedNpmVersion
-        if ($null -eq $published) {
-          Start-Sleep -Seconds 2
-        }
-      }
-    }
-    if ($published -ne $packageVersion) {
-      throw "npm did not publish $packageName@$packageVersion"
-    }
-    if ($release.draft) {
-      $release = Invoke-GitHub "Patch" "/repos/$repository/releases/$($release.id)" @{
-        draft = $false
-      }
-      Write-Host "Published GitHub release $Version"
     }
     Write-Host "Released $packageName@$packageVersion from commit $head"
   } finally {
@@ -626,8 +574,17 @@ registry=$registry
 
 Set-Location $root
 if ($Publish) {
-  Assert-PublishGitState
-  New-ReleaseStage
+  Assert-PublishCommit
+  $manifest = try { Assert-Stage } catch { $null }
+  if ($null -eq $manifest -or [string]$manifest.notes -ne $Notes) {
+    if (-not [string]::IsNullOrWhiteSpace(
+        (Read-Checked "git" @("status", "--porcelain", "--untracked-files=all")))) {
+      throw "publish requires a clean tree when building release artifacts"
+    }
+    New-ReleaseStage
+  } else {
+    Write-Host "Reusing the verified release artifacts in $releaseDir"
+  }
   Publish-Release
 } else {
   New-ReleaseStage

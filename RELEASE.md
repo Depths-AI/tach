@@ -12,13 +12,13 @@ Dry mode runs every validation gate, builds all release artifacts, verifies the 
 
 ## Actual mode
 
-Actual mode requires a clean `master` equal to `origin/master`. It performs the complete dry-mode work itself, creates the draft GitHub release and uploads its verified artifacts, then submits the npm package.
+Actual mode requires `master` equal to `origin/master`. It performs the complete dry-mode work itself, or reuses the same verified clean artifacts when resuming an interrupted release. It publishes the npm package, waits for npm publication, then creates the published GitHub release and uploads its verified artifacts. It never creates a GitHub draft.
 
 ```powershell
 .\release.ps1 v0.1.2 -Publish -Notes "Meaningful release notes"
 ```
 
-npm prints a browser approval URL near the end. The script displays the full URL, copies it to the clipboard, and waits. Open the URL in the intended npm browser profile and approve the publication. Once npm reports the version publicly, the script publishes the GitHub draft and reports completion.
+Near the end, npm requests browser approval through its interactive CLI. Run actual mode in a visible PowerShell window; npm opens the one-time approval page and waits for approval before completing publication. The script then verifies the public npm version, creates the published GitHub release, uploads its artifacts, and reports completion.
 
 The npm package version, compiler version, VS Code extension version, and local harness dependencies must already match the requested release version. A published npm name/version pair cannot be reused, even after unpublishing.
 
