@@ -394,10 +394,24 @@ function parseRuntime(source: string): RuntimeMetadata {
     throw new TypeError("invalid Tach runtime metadata");
   }
   const spirv = runtime.targets.spirv;
+  const webFeatures = runtime.targets.web.features ?? [],
+    spirvFeatures = spirv.features ?? [],
+    optional = [
+      "shaderFloat16",
+      "storageBuffer16BitAccess",
+      "uniformAndStorageBuffer16BitAccess",
+    ],
+    extra = spirvFeatures.slice(3);
   if (
+    new Set(webFeatures).size !== webFeatures.length ||
+    webFeatures.some((feature) => feature !== "shader-f16") ||
     spirv.vulkan !== "1.3" || spirv.spirv !== "1.6" ||
-    spirv.features?.join("\n") !==
-      "synchronization2\nshaderZeroInitializeWorkgroupMemory\nvulkanMemoryModel"
+    spirvFeatures.slice(0, 3).join("\n") !==
+      "synchronization2\nshaderZeroInitializeWorkgroupMemory\nvulkanMemoryModel" ||
+    new Set(spirvFeatures).size !== spirvFeatures.length ||
+    extra.join("\n") !==
+      optional.filter((feature) => extra.includes(feature)).join("\n") ||
+    extra.length > 0 && extra[0] !== "shaderFloat16"
   ) {
     throw new TypeError("invalid Tach Vulkan 1.3/SPIR-V 1.6 profile");
   }

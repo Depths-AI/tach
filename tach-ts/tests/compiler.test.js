@@ -15,6 +15,7 @@ const source = `
 @docs(summary("A scale configuration."), field(factor, "Multiplier."))
 type Options = { factor: float32 };
 type ComputeBuffer = { value: float32 };
+type Half = { value: float16 };
 @docs(summary("Gets the multiplier."), param(options, "Scale configuration."), returns("The configured multiplier."))
 function multiplier(options: Options): float32 { return options.factor; }
 @docs(summary("Scales every value."), coordinate(i, "Value index."), param(values, "Values to update."), param(options, "Scaling options."))
@@ -23,6 +24,9 @@ export function scale[i](values: buffer<float32[]>, options: Options) {
 }
 export function tach[i](gpu: buffer<ComputeBuffer[]>) {
   if (i < gpu.length) { gpu[i].value *= 2.0; }
+}
+export function half[i](values: buffer<float16[]>, factor: float16) {
+  if (i < values.length) { values[i] *= factor; }
 }
 `;
 
@@ -169,8 +173,11 @@ Deno.test("one build emits the complete dual-backend package", async () => {
       const pattern of [
         /export type Options/u,
         /export type ComputeBuffer/u,
+        /export type Half/u,
         /export function scale/u,
         /export function tach/u,
+        /export function half/u,
+        /ComputeBuffer<Float16Array \| readonly number\[\]>/u,
         /ComputeBuffer as \$ComputeBuffer/u,
       ]
     ) assert.match(declarations, pattern);
@@ -183,7 +190,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
         type: "module",
         sideEffects: false,
         exports: { ".": { types: "./index.d.ts", default: "./index.js" } },
-        dependencies: { "@depths/tach": "0.1.2" },
+        dependencies: { "@depths/tach": "0.1.3" },
       },
     );
     const artifacts = [

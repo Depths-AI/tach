@@ -168,6 +168,7 @@ const (
 	ValueBool
 	ValueI32
 	ValueU32
+	ValueF16Bits
 	ValueF32Bits
 	ValueShape
 	ValueRepeat

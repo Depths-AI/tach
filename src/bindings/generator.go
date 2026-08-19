@@ -275,10 +275,10 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 		return nil, err
 	}
 	target := &TargetPlanMeta{Kernels: []PhysicalKernelMeta{}, Programs: []ProgramPlanMeta{}}
+	target.Features = backend.RequiredFeatures(executable)
 	if executable.Target == backend.SPIRV {
 		target.Vulkan = backend.VulkanVersion
 		target.SPIRV = backend.SPIRVVersion
-		target.Features = []string{backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory, backend.VulkanMemoryModel}
 	}
 	for _, kernel := range executable.PhysicalKernels {
 		item := PhysicalKernelMeta{EntryPoint: kernel.Entry, WorkgroupSize: kernel.Workgroup, Bindings: []BindingMeta{}}
@@ -450,6 +450,8 @@ func valueSource(program *flow.Program, argument flow.ValueArgument, fieldPath [
 		return ValueSource{Kind: "i32", Value: int32(argument.Bits)}, nil
 	case flow.ValueU32:
 		return ValueSource{Kind: "u32", Value: argument.Bits}, nil
+	case flow.ValueF16Bits:
+		return ValueSource{Kind: "f16Bits", Value: argument.Bits}, nil
 	case flow.ValueF32Bits:
 		return ValueSource{Kind: "f32Bits", Value: argument.Bits}, nil
 	case flow.ValueShape:
@@ -469,12 +471,15 @@ func ValidateMetadata(metadata *Metadata) error {
 	if metadata.Targets.Web == nil || metadata.Targets.SPIRV == nil {
 		return fmt.Errorf("metadata must contain web and SPIR-V target plans")
 	}
-	if metadata.Targets.Web.Vulkan != "" || metadata.Targets.Web.SPIRV != "" || len(metadata.Targets.Web.Features) != 0 {
+	if metadata.Targets.Web.Vulkan != "" || metadata.Targets.Web.SPIRV != "" || !validFeatures(metadata.Targets.Web.Features, backend.ShaderF16) {
 		return fmt.Errorf("web target contains a Vulkan profile")
 	}
 	spv := metadata.Targets.SPIRV
-	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 3 || spv.Features[0] != backend.Synchronization2 || spv.Features[1] != backend.ZeroInitializeWorkgroupMemory || spv.Features[2] != backend.VulkanMemoryModel {
+	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || !validFeatures(spv.Features, backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory, backend.VulkanMemoryModel, backend.ShaderFloat16, backend.StorageBuffer16BitAccess, backend.UniformAndStorage16BitAccess) || len(spv.Features) < 3 || spv.Features[0] != backend.Synchronization2 || spv.Features[1] != backend.ZeroInitializeWorkgroupMemory || spv.Features[2] != backend.VulkanMemoryModel || len(spv.Features) > 3 && spv.Features[3] != backend.ShaderFloat16 {
 		return fmt.Errorf("SPIR-V target profile is invalid")
+	}
+	if (len(metadata.Targets.Web.Features) > 0) != (len(spv.Features) > 3) {
+		return fmt.Errorf("target Float16 requirements differ")
 	}
 	for targetIndex, target := range []*TargetPlanMeta{metadata.Targets.Web, metadata.Targets.SPIRV} {
 		if target == nil {
@@ -536,6 +541,24 @@ func ValidateMetadata(metadata *Metadata) error {
 	return nil
 }
 
+func validFeatures(features []string, allowed ...string) bool {
+	last := -1
+	for _, feature := range features {
+		index := -1
+		for i, candidate := range allowed {
+			if feature == candidate {
+				index = i
+				break
+			}
+		}
+		if index <= last {
+			return false
+		}
+		last = index
+	}
+	return true
+}
+
 func describeHostLayout(t *types.Type) (*HostLayout, error) {
 	if t.Kind == types.Atomic {
 		return describeHostLayout(t.Elem)
@@ -553,6 +576,8 @@ func describeHostLayout(t *types.Type) (*HostLayout, error) {
 		out.Kind = "i32"
 	case types.U32:
 		out.Kind = "u32"
+	case types.F16:
+		out.Kind = "f16"
 	case types.F32:
 		out.Kind = "f32"
 	case types.Vector:

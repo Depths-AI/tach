@@ -222,6 +222,8 @@ func validValue(p *Program, value ValueArgument, want *types.Type) bool {
 		return want.Kind == types.I32
 	case ValueU32, ValueRepeat:
 		return want.Kind == types.U32
+	case ValueF16Bits:
+		return want.Kind == types.F16 && value.Bits <= 0xffff
 	case ValueF32Bits:
 		return want.Kind == types.F32
 	case ValueShape:

@@ -101,7 +101,7 @@ That focus also explains how Tach relates to several nearby projects:
 | [CubeCL](https://github.com/tracel-ai/cubecl) | A Rust language extension, JIT compiler, and runtime family aimed at high-performance compute across a broad set of backends | CubeCL offers more backends and more scope for device-specific specialization. Tach offers a standalone, ahead-of-time language, a simpler baseline-kernel entry point, and npm/Deno ergonomics for TypeScript applications. Tach's optimizer and backend range are younger and deliberately narrower. |
 | [wgpu](https://wgpu.rs/) | A Rust implementation of the WebGPU API for native and web applications | wgpu gives applications direct control over devices, resources, pipelines, and shader modules. Tach generates the shader and ABI and manages routine dispatch plumbing. That removes substantial ceremony, but it also exposes less low-level control and fewer backend-specific features. |
 | [zgpu](https://github.com/zig-gamedev/zgpu) | A Zig helper layer over Dawn native WebGPU, shaped for Zig game and graphics development | zgpu makes direct WebGPU integration convenient for Zig programs and fits naturally into a graphics engine. Tach starts from typed compute kernels and exposes commands to TypeScript without application-owned WebGPU objects. Tach is less suitable when the program needs to control the surrounding graphics pipeline itself. |
-| [PyTorch](https://pytorch.org/) | A tensor and machine-learning framework with a large operator ecosystem, automatic differentiation, and accelerator runtimes | PyTorch is vastly richer for standard tensor and ML work, and its mature operators are usually the right choice there. Tach has no tensor framework, model stack, autograd, or comparable library ecosystem. It instead allows the custom parallel operation itself-including irregular, simulation, and non-ML workloads-to be expressed directly. |
+| [PyTorch](https://pytorch.org/) | A tensor and machine-learning framework with a large operator ecosystem, automatic differentiation, and accelerator runtimes | PyTorch is vastly richer for standard tensor and ML work, and its mature operators are usually the right choice there. Tach has no tensor framework, model stack, autograd, or comparable library ecosystem. It instead allows the custom parallel operation itself, including irregular, simulation, and non-ML workloads, to be expressed directly. |
 
 These are not interchangeable products and the distinctions are intentional.
 Choose PyTorch when the problem is fundamentally tensor and ML work. Choose
@@ -297,7 +297,10 @@ await gpu.submit(image(pixels, { size: [1920, 1080] }));
 Tach rounds logical sizes to complete workgroups, so kernels guard edge
 invocations before indexing. Parameters are either `buffer<T>` GPU storage or
 immutable values packed by the compiler. The core value types are `bool`,
-`int32`, `uint32`, `float32`, and two-, three-, or four-lane numeric vectors.
+`int32`, `uint32`, `float16`, `float32`, and two-, three-, or four-lane numeric
+vectors. Binary16 stays binary16 in buffers, arithmetic, WGSL, and SPIR-V;
+generated modules record and enforce its optional GPU requirements. Projects
+without `float16` keep the ordinary feature floor.
 Struct types are always emitted into the TypeScript API.
 
 Files import other project files by extensionless module/kernel identity:
@@ -323,7 +326,9 @@ function multiply[i](
   scratch: buffer<float32[]>,
   factor: float32,
 ) {
-  scratch[i] = input[i] * factor;
+  if (i < input.length && i < scratch.length) {
+    scratch[i] = input[i] * factor;
+  }
 }
 
 function addBias[i](
@@ -331,7 +336,9 @@ function addBias[i](
   output: buffer<float32[]>,
   bias: float32,
 ) {
-  output[i] = scratch[i] + bias;
+  if (i < scratch.length && i < output.length) {
+    output[i] = scratch[i] + bias;
+  }
 }
 
 export function transform(

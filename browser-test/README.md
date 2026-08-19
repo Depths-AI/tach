@@ -1,6 +1,6 @@
 # Tach browser correctness harness
 
-This private workspace asks a product question: do the eleven public
+This private workspace asks a product question: do the fourteen public
 programs in `examples/` work from the published `@depths/tach` API in
 real Chrome WebGPU? It is not a unit-test framework. A Deno script
 builds the example project, serves one page, launches Chromium, and
@@ -25,12 +25,14 @@ creates pipelines, and executes the same recipe facade used by Deno/Vulkan.
 
 ## What it proves
 
-The eleven canonical programs cover the language a TypeScript app will
+The fourteen canonical programs cover the language a TypeScript app will
 actually call. In everyday terms:
 
 - workers sharing a counter;
 - 32-bit shifts and masks;
 - loops, branches, vectors, and math;
+- binary16 storage, parameters, arithmetic, readback through `Float16Array`,
+  and exact `.length` for both direct and struct-tail padding cases;
 - a type imported from another file;
 - several recipes on one buffer, including `prepare` then `submit`;
 - a picture the program paints itself, drawn in one step;
@@ -51,7 +53,7 @@ on one 128 x 72 canvas. Session serialization preserves call order;
 completion-backed presentation prevents unbounded GPU queueing. The final
 canvas is captured as PNG and must be non-empty. Together with the two swatch
 frames and the initial gradient fallback, success reports 35 displayed frames
-and eleven public programs.
+and fourteen public programs.
 
 This distinguishes three contracts that are easy to conflate:
 
@@ -68,7 +70,7 @@ the local page, and polls one promise through the DevTools Protocol. It has no
 browser-test framework or bundler dependency. Set `CHROME_BIN` only when the
 browser is outside the standard platform locations.
 
-The runner requires exactly eleven programs, 35 presented frames, and a
+The runner requires exactly fourteen programs, 35 presented frames, and a
 non-trivial PNG. It prints the selected adapter and those counts, then closes
 Chrome, aborts the server, and removes its temporary profile even after
 failure. Process status and assertion diagnostics are the test contract; the

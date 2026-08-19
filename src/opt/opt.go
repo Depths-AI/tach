@@ -410,7 +410,7 @@ func zeroValue(t *types.Type, span source.Span, fresh func() ir.ValueID, out []i
 		raw := "0"
 		if t.Kind == types.Bool {
 			raw = "false"
-		} else if t.Kind == types.F32 {
+		} else if types.IsFloatLike(t) {
 			raw = "0.0"
 		}
 		return id, append(out, &ir.Const{Result: id, Type: t, Raw: raw, Span: span})

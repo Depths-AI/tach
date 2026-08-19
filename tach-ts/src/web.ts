@@ -214,12 +214,16 @@ class WebDriver implements Driver {
 
   writeBuffer(buffer: DriverBuffer, bytes: Uint8Array): void {
     this.#healthy("buffer.write");
+    const upload = bytes.byteLength % 4 === 0
+      ? bytes
+      : new Uint8Array(align(bytes.byteLength, 4));
+    if (upload !== bytes) upload.set(bytes);
     this.device.queue.writeBuffer(
       gpuBuffer(buffer),
       0,
-      bytes.buffer,
-      bytes.byteOffset,
-      bytes.byteLength,
+      upload.buffer,
+      upload.byteOffset,
+      upload.byteLength,
     );
   }
 
@@ -243,7 +247,7 @@ class WebDriver implements Driver {
           0,
           readback,
           0,
-          byteLength,
+          align(byteLength, 4),
         );
         this.device.queue.submit([encoder.finish()]);
         await readback.mapAsync(1);
@@ -274,13 +278,31 @@ class WebDriver implements Driver {
     if (!pending) {
       const kernel = command.target.kernels[index];
       if (!kernel) throw new TypeError(`invalid WebGPU kernel ${index}`);
+      for (const feature of command.target.features ?? []) {
+        if (!this.device.features.has(feature as GPUFeatureName)) {
+          throw new TachError(
+            "device-request-failed",
+            `GPU does not support required feature ${feature}`,
+            { operation: kernel.entryPoint },
+          );
+        }
+      }
       pending = this.#capture(kernel.entryPoint, "kernel", async () => {
-        cache!.module ??= shaderSource(command.shader).then((code) =>
-          this.device.createShaderModule({
+        cache!.module ??= shaderSource(command.shader).then(async (code) => {
+          const module = this.device.createShaderModule({
             label: "Tach shader module",
             code,
-          })
-        );
+          });
+          const errors = (await module.getCompilationInfo()).messages.filter(
+            (message) => message.type === "error",
+          );
+          if (errors.length) {
+            throw new Error(
+              errors.map((message) => message.message).join("\n"),
+            );
+          }
+          return module;
+        });
         return this.#compilePipeline(await cache!.module, kernel);
       });
       cache.pipelines.set(index, pending);
@@ -515,7 +537,7 @@ class WebDriver implements Driver {
         buffer: resource.buffer === undefined
           ? scratch.get(resource.scratch!)!
           : gpuBuffer(resource.buffer),
-        size: resource.byteSize,
+        size: align(resource.byteSize, 4),
       },
     }));
     entries.push({ binding: view.output, resource: target.createView() });
@@ -580,7 +602,7 @@ class WebDriver implements Driver {
         buffer: resource.buffer === undefined
           ? scratch.get(resource.scratch!)!
           : gpuBuffer(resource.buffer),
-        size: resource.byteSize,
+        size: align(resource.byteSize, 4),
       },
     }));
     const dynamic: number[] = [];
@@ -789,7 +811,12 @@ export async function openWeb(
     );
   }
   try {
-    return new WebDriver(adapter, await adapter.requestDevice());
+    const requiredFeatures: GPUFeatureName[] = [];
+    if (adapter.features.has("shader-f16")) requiredFeatures.push("shader-f16");
+    return new WebDriver(
+      adapter,
+      await adapter.requestDevice({ requiredFeatures }),
+    );
   } catch (cause) {
     throw normalizeError(cause, "device-request-failed", "requestDevice");
   }

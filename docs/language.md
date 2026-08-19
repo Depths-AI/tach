@@ -71,7 +71,7 @@ simulation/
 
 An immediate directory containing `.tach` files is a module; each immediate
 `.tach` file is a kernel file. Root-level or more deeply nested Tach sources
-are errors. The filesystem defines the module set-there is no source list,
+are errors. The filesystem defines the module set; there is no source list,
 glob, or output path in the manifest.
 
 The manifest separates Tach identity from the name of the generated JavaScript
@@ -182,7 +182,9 @@ An indexed function is GPU work for one logical coordinate:
 
 ```tach
 function copy[i](input: buffer<float32[]>, output: buffer<float32[]>) {
-  output[i] = input[i];
+  if (i < input.length && i < output.length) {
+    output[i] = input[i];
+  }
 }
 
 export function copyAll(input: buffer<float32[]>, output: buffer<float32[]>) {
@@ -210,7 +212,9 @@ function multiply[i](
   scratch: buffer<float32[]>,
   factor: float32,
 ) {
-  scratch[i] = input[i] * factor;
+  if (i < input.length && i < scratch.length) {
+    scratch[i] = input[i] * factor;
+  }
 }
 
 function addBias[i](
@@ -218,7 +222,9 @@ function addBias[i](
   output: buffer<float32[]>,
   bias: float32,
 ) {
-  output[i] = scratch[i] + bias;
+  if (i < scratch.length && i < output.length) {
+    output[i] = scratch[i] + bias;
+  }
 }
 
 export function transform(
@@ -358,7 +364,7 @@ whitespace is accepted. Tach has no block-comment form.
 
 A coordinate is the index of this run: `i` for a line, `[x, y]` for an
 image, `[x, y, z]` for a volume. Each one is an immutable `uint32`. Names
-are local to the stage:
+are local to the stage.
 
 Hardware groups runs into **workgroups**. You can ignore that word until
 you need a small scratchpad that only one team shares. Tach picks a
@@ -432,7 +438,10 @@ A `run` domain is one size for a 1D stage or a bracketed list for 2D/3D:
 
 ```tach
 function fill[x, y](out: buffer<uint32[]>, width: uint32) {
-  out[y * width + x] = x + y;
+  const index = y * width + x;
+  if (index < out.length) {
+    out[index] = x + y;
+  }
 }
 
 export function fillImage(out: buffer<uint32[]>, width: uint32, height: uint32) {
@@ -458,11 +467,15 @@ The same shapes also define view width and height:
 
 ```tach
 function write[i](scratch: buffer<float32[]>) {
-  scratch[i] = float32(i);
+  if (i < scratch.length) {
+    scratch[i] = float32(i);
+  }
 }
 
 function read[i](scratch: buffer<float32[]>, output: buffer<float32[]>) {
-  output[i] = scratch[i];
+  if (i < scratch.length && i < output.length) {
+    output[i] = scratch[i];
+  }
 }
 
 export function roundTrip(output: buffer<float32[]>, count: uint32) {
@@ -501,6 +514,7 @@ changes physical work, not source meaning.
 | `bool` | `true` or `false`; value-only outside parameter blocks |
 | `int32` | signed 32-bit integer |
 | `uint32` | unsigned 32-bit integer |
+| `float16` | IEEE 754 binary16 |
 | `float32` | IEEE 754 single precision |
 | `void` | absence of a helper result |
 
@@ -515,6 +529,7 @@ source type.
 Numeric vectors have two, three, or four lanes:
 
 ```text
+float16x2  float16x3  float16x4
 float32x2  float32x3  float32x4
 int32x2    int32x3    int32x4
 uint32x2   uint32x3   uint32x4
@@ -555,6 +570,8 @@ determines the named type. Structs are value types and cannot contain a cycle.
 `T[]` is a runtime array. It may appear directly in a buffer or as the final
 field of one struct. It exposes `.length` through a place and cannot be loaded,
 constructed, passed, or returned as a whole value.
+Backend-required padding never contributes another logical element, including
+for a scalar `float16[]` after a fixed struct prefix.
 
 `T[N]` is a positive-literal fixed array. Fixed arrays currently belong to
 shared memory, not host values or buffers.
@@ -602,9 +619,12 @@ concrete type. Without context, a non-negative whole number is `uint32`, a
 fraction or exponent is `float32`, and unary `-` gives a whole literal
 `int32` context. Mixed literal pairs infer independent of operand order.
 
-`int32(value)`, `uint32(value)`, and `float32(value)` perform explicit numeric
-conversion. Integer-to-integer conversion preserves the low 32-bit pattern.
-General implicit conversions do not exist.
+`int32(value)`, `uint32(value)`, `float16(value)`, and `float32(value)` perform
+explicit numeric conversion. Integer-to-integer conversion preserves the low
+32-bit pattern. A literal used in a `float16` context must be finite and within
+binary16's `-65504` to `65504` range. Fractions still infer `float32` when no
+context exists, so use an annotation or `float16(...)` when binary16 is
+intended. General implicit conversions do not exist.
 
 ## 9. Variables, expressions, and assignment
 
@@ -696,7 +716,7 @@ A helper returns its declared type. A void helper or indexed stage may use
 
 Intrinsic names are reserved free functions.
 
-These preserve a `float32` scalar or vector type:
+These preserve their `float16` or `float32` scalar/vector type:
 
 ```text
 floor  ceil  trunc
@@ -705,19 +725,28 @@ exp    exp2  log  log2
 sqrt   rsqrt
 ```
 
-`abs` accepts `int32` or `float32` scalar/vector values. `pow` accepts matching
-floating values and may broadcast a scalar exponent across a vector base.
+`abs` accepts `int32`, `float16`, or `float32` scalar/vector values. `pow`
+accepts matching floating values and may broadcast a scalar exponent across a
+vector base.
 
 `min`, `max`, and `clamp` accept integer scalars/vectors. Their floating forms
 remain unavailable until Tach defines one portable NaN and signed-zero policy.
 
 | Function | Input | Result |
 |---|---|---|
-| `dot(a, b)` | matching `float32xN` | `float32` |
-| `length(value)` | `float32xN` | `float32` |
-| `distance(a, b)` | matching `float32xN` | `float32` |
-| `cross(a, b)` | two `float32x3` | `float32x3` |
-| `normalize(value)` | `float32xN` | same vector type |
+| `dot(a, b)` | matching `float16xN` or `float32xN` | component type |
+| `length(value)` | floating vector | component type |
+| `distance(a, b)` | matching floating vectors | component type |
+| `cross(a, b)` | matching three-lane floating vectors | same vector type |
+| `normalize(value)` | floating vector | same vector type |
+
+`float16` is an optional hardware feature, not an emulated storage format.
+`tach build` emits both targets and records the exact requirement. Opening a
+WebGPU session requests `shader-f16` when the adapter exposes it; preparing a
+Float16 command fails clearly if it is unavailable. The Vulkan host likewise
+enables and checks `shaderFloat16` plus the 16-bit storage/uniform features
+actually required by the compiled project. Projects that use no `float16` do
+not acquire these requirements.
 
 `ceilDiv` is not a stage/helper intrinsic; it exists only in public-program
 shape expressions.
@@ -781,7 +810,7 @@ here means "the same decision for every run in the team," not a type.
 Identifiers begin with a Unicode letter or `_`, then contain Unicode letters,
 digits, or `_`. Type names, exported function names, and parameters of exported
 functions must also be portable ASCII JavaScript/TypeScript identifiers and
-avoid TypeScript keywords. Type names additionally cannot be `Float32Array`,
+avoid TypeScript keywords. Type names additionally cannot be `Float16Array`, `Float32Array`,
 `Int32Array`, `Uint32Array`, or `ReadonlyArray`, because those spellings retain
 their host-collection meanings in generated signatures. Runtime API names such
 as `ComputeBuffer` remain safe because declarations import them through

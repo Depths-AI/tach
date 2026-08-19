@@ -94,6 +94,9 @@ function writeValue(
       view.setUint32(offset, scalar, true);
       return;
     }
+    case "f16":
+      view.setFloat16(offset, number(value, path), true);
+      return;
     case "f32":
       view.setFloat32(offset, number(value, path), true);
       return;
@@ -107,7 +110,7 @@ function writeValue(
       for (let index = 0; index < count; index++) {
         writeValue(
           view,
-          offset + index * 4,
+          offset + index * required(element.size, `${path} element size`),
           element,
           values[index],
           `${path}[${index}]`,
@@ -183,6 +186,8 @@ function readValue(
       return view.getInt32(offset, true);
     case "u32":
       return view.getUint32(offset, true);
+    case "f16":
+      return view.getFloat16(offset, true);
     case "f32":
       return view.getFloat32(offset, true);
     case "vector": {
@@ -190,7 +195,10 @@ function readValue(
         element = required(type.elem, "vector element");
       return Array.from(
         { length: count },
-        (_, index) => readValue(view, offset + index * 4, element, 4),
+        (_, index) => {
+          const size = required(element.size, "vector element size");
+          return readValue(view, offset + index * size, element, size);
+        },
       );
     }
     case "array": {
@@ -235,6 +243,7 @@ function bytesOf(source: ArrayBuffer | ArrayBufferView): Uint8Array {
 
 const littleEndian = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 const scalarArrays = {
+  f16: Float16Array,
   f32: Float32Array,
   i32: Int32Array,
   u32: Uint32Array,
@@ -242,16 +251,25 @@ const scalarArrays = {
 
 function typedArrayConstructor(
   type: HostLayout,
-): typeof Float32Array | typeof Int32Array | typeof Uint32Array | undefined {
+):
+  | typeof Float16Array
+  | typeof Float32Array
+  | typeof Int32Array
+  | typeof Uint32Array
+  | undefined {
   if (type.kind !== "runtime") return undefined;
   let element = type.elem;
   if (element?.kind === "vector") {
-    if (element.count === undefined || type.stride !== element.count * 4) {
+    if (
+      element.count === undefined || element.elem?.size === undefined ||
+      type.stride !== element.count * element.elem.size
+    ) {
       return undefined;
     }
     element = element.elem;
   }
-  return element?.kind === "f32" || element?.kind === "i32" ||
+  return element?.kind === "f16" || element?.kind === "f32" ||
+      element?.kind === "i32" ||
       element?.kind === "u32"
     ? scalarArrays[element.kind]
     : undefined;
@@ -536,6 +554,13 @@ function valueOf(
       return new Float32Array(
         new Uint32Array([checkedU32(source.value, "f32 bits")]).buffer,
       )[0];
+    case "f16Bits": {
+      const bits = checkedU32(source.value, "f16 bits");
+      if (bits > 0xffff) throw new RangeError("f16 bits exceed uint16");
+      const bytes = new ArrayBuffer(2);
+      new DataView(bytes).setUint16(0, bits, true);
+      return new DataView(bytes).getFloat16(0, true);
+    }
     case "shape":
       return shapeValue(
         required(source.expression, "shape expression"),

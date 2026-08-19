@@ -87,6 +87,41 @@ func TestPlannerInternalizesSafeRepeatAndPrunesDeadValues(t *testing.T) {
 	}
 }
 
+func TestLogicalFloat16LengthFollowsStructTail(t *testing.T) {
+	const source = `
+type HalfSeries = { offset: float16, values: float16[] };
+export function inspect[i](data: buffer<HalfSeries>, out: buffer<uint32[]>) {
+  if (i < out.length) { out[i] = data.values.length; }
+}`
+	web := lower(t, source, backend.WebProfile)
+	kernel := web.PhysicalKernels[0]
+	if got := kernel.Bindings[0].MinimumByteSize; got != 4 {
+		t.Fatalf("runtime-tail minimum byte size = %d, want 4", got)
+	}
+	length, ok := kernel.LogicalLengths[0]
+	if !ok {
+		t.Fatal("Web plan omitted the logical Float16 tail length")
+	}
+	formal := -1
+	for index, parameter := range kernel.Function.Params {
+		if parameter.ID == length {
+			formal = index
+		}
+	}
+	if formal < 0 || formal >= len(web.Programs[0].Steps[0].Parameters) {
+		t.Fatalf("logical length parameter = %d; params = %#v", length, kernel.Function.Params)
+	}
+	argument := web.Programs[0].Steps[0].Parameters[formal]
+	shape := web.Logical.Programs[0].Shape(argument.Shape)
+	if argument.Kind != flow.ValueShape || shape == nil || len(shape.Path) != 1 || shape.Path[0] != "values" {
+		t.Fatalf("logical length source = %#v; shape = %#v", argument, shape)
+	}
+	spirv := lower(t, source, backend.SPIRVProfile)
+	if len(spirv.PhysicalKernels[0].LogicalLengths) != 1 {
+		t.Fatalf("SPIR-V logical lengths = %#v, want Float16 tail", spirv.PhysicalKernels[0].LogicalLengths)
+	}
+}
+
 func TestSPIRVPlanKeepsCrossInvocationRepeatAndBarrier(t *testing.T) {
 	executable := lower(t, `
 function first[i](data: buffer<uint32[]>) { data[i] += uint32(1); }

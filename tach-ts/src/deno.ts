@@ -27,7 +27,7 @@ interface DenoAPI {
   readFile(path: URL): Promise<Uint8Array>;
 }
 
-const abi = 2, textDecoder = new TextDecoder(), textEncoder = new TextEncoder();
+const abi = 3, textDecoder = new TextDecoder(), textEncoder = new TextEncoder();
 let nativeLibrary: ReturnType<DenoAPI["dlopen"]> | undefined;
 const symbols = {
   tach_abi_version: { parameters: [], result: "u32" },
@@ -146,8 +146,25 @@ function moduleDescription(command: PreparedCommand): Uint8Array {
       { operation: "module" },
     );
   }
+  const optional = {
+    shaderFloat16: 1,
+    storageBuffer16BitAccess: 2,
+    uniformAndStorageBuffer16BitAccess: 4,
+  } as const;
+  let features = 0;
+  for (const feature of target.features ?? []) {
+    if (
+      feature === "synchronization2" ||
+      feature === "shaderZeroInitializeWorkgroupMemory" ||
+      feature === "vulkanMemoryModel"
+    ) continue;
+    const bit = optional[feature as keyof typeof optional];
+    if (!bit) throw new TypeError(`unknown Vulkan feature ${feature}`);
+    features |= bit;
+  }
   const output = new Writer();
   output.u32(abi);
+  output.u32(features);
   output.u32(target.kernels.length);
   for (const kernel of target.kernels) {
     output.text(kernel.entryPoint);

@@ -21,7 +21,9 @@ const compressedShader = new URL(
   "data:application/gzip;base64,H4sIAAAAAAAEAFMAAEXPbOkBAAAA",
 );
 
-function defineModule({ shader = compressedShader, resources, kernels }) {
+function defineModule(
+  { shader = compressedShader, features = [], resources, kernels },
+) {
   const kernel = kernels[0];
   const publicParameters = kernel.parameters.map((parameter) =>
     parameter.resource === undefined
@@ -50,7 +52,9 @@ function defineModule({ shader = compressedShader, resources, kernels }) {
     binding: kernel.parameterBlock.binding,
     byteSize: kernel.parameterBlock.byteSize,
     fields: kernel.parameterBlock.fields.map((field) => ({
-      type: field.layout.kind === "f32"
+      type: field.layout.kind === "f16"
+        ? "float16"
+        : field.layout.kind === "f32"
         ? "float32"
         : field.layout.kind === "bool"
         ? "bool"
@@ -65,6 +69,7 @@ function defineModule({ shader = compressedShader, resources, kernels }) {
     path: field.path,
   })) ?? [];
   const target = {
+    features,
     kernels: [{
       entryPoint: kernel.entryPoint,
       workgroupSize: kernel.workgroupSize,
@@ -116,6 +121,7 @@ function fakeWebGPU({
   failCopyUndefined = false,
   failReadbackCleanup = false,
   failWork = false,
+  features = [],
   scopeErrors = [],
   shaderError,
 } = {}) {
@@ -129,6 +135,7 @@ function fakeWebGPU({
     dynamicOffsets: [],
     passes: 0,
     pipelines: 0,
+    requiredFeatures: [],
     scopesPopped: 0,
     scopesPushed: 0,
     shaders: 0,
@@ -143,6 +150,7 @@ function fakeWebGPU({
     writes: 0,
   };
   const device = {
+    features: new Set(),
     limits: { minUniformBufferOffsetAlignment: 256 },
     lost: new Promise(() => {}),
     queue: {
@@ -181,7 +189,10 @@ function fakeWebGPU({
       if (shaderError) throw shaderError;
       calls.shaders++;
       calls.shaderSources.push(descriptor.code);
-      return { descriptor };
+      return {
+        descriptor,
+        getCompilationInfo: () => Promise.resolve({ messages: [] }),
+      };
     },
     createBindGroupLayout(descriptor) {
       return { descriptor };
@@ -269,8 +280,11 @@ function fakeWebGPU({
     },
   };
   const adapter = {
+    features: new Set(features),
     info: { description: "test adapter" },
-    requestDevice() {
+    requestDevice(descriptor) {
+      device.features = new Set(descriptor.requiredFeatures);
+      calls.requiredFeatures = [...descriptor.requiredFeatures];
       return Promise.resolve(device);
     },
   };
@@ -436,6 +450,48 @@ const vectors = defineModule({
     dimensions: 1,
     workgroupSize: [1, 1, 1],
     parameters: [{ name: "values", resource: 0 }],
+  }],
+});
+
+const halves = defineModule({
+  features: ["shader-f16"],
+  resources: [{
+    name: "values",
+    group: 0,
+    binding: 0,
+    kind: "storage",
+    access: "read_write",
+    minimumByteSize: 8,
+    runtime: true,
+    layout: {
+      kind: "runtime",
+      stride: 8,
+      runtime: true,
+      elem: {
+        kind: "vector",
+        count: 4,
+        size: 8,
+        elem: { kind: "f16", size: 2 },
+      },
+    },
+  }],
+  kernels: [{
+    name: "halves",
+    entryPoint: "halves",
+    dimensions: 1,
+    workgroupSize: [1, 1, 1],
+    parameters: [{ name: "values", resource: 0 }, { name: "factor" }],
+    parameterBlock: {
+      group: 0,
+      binding: 1,
+      byteSize: 16,
+      fields: [{
+        parameter: 1,
+        path: [],
+        offset: 0,
+        layout: { kind: "f16", size: 2 },
+      }],
+    },
   }],
 });
 
@@ -813,6 +869,33 @@ test("packed vector arrays stay flat typed arrays across upload and readback", a
     );
   } finally {
     gpu.close();
+  }
+});
+
+test("Float16 buffers, parameters, and device features stay binary16 end to end", async () => {
+  const fake = fakeWebGPU({ features: ["shader-f16"] });
+  const gpu = await tach({ gpu: fake.gpu });
+  try {
+    const values = new Float16Array([1, 1.5, -2, 65504]);
+    const buffer = gpu.buffer(values);
+    await gpu.submit(halves.command(0, [buffer, 0.5], { size: 1 }));
+    const result = await buffer.read();
+    assert.equal(result instanceof Float16Array, true);
+    assert.deepEqual(result, values);
+    assert.deepEqual(fake.calls.requiredFeatures, ["shader-f16"]);
+  } finally {
+    gpu.close();
+  }
+
+  const unsupported = await tach({ gpu: fakeWebGPU().gpu });
+  try {
+    const buffer = unsupported.buffer(new Float16Array([1, 1, 1, 1]));
+    await assert.rejects(
+      unsupported.submit(halves.command(0, [buffer, 1], { size: 1 })),
+      /required feature shader-f16/u,
+    );
+  } finally {
+    unsupported.close();
   }
 });
 

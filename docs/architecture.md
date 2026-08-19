@@ -388,6 +388,18 @@ The plan drives:
 
 No target independently recalculates ABI offsets.
 
+Binary16 follows this same path: the logical type remains `float16`, canonical
+host layout assigns 2-byte scalar storage and vector-derived alignment, and
+metadata carries `f16`/exact `f16Bits`. The TypeScript codec uses
+`Float16Array` and little-endian `DataView` binary16 operations rather than
+widening the storage contract. The only provider alignment wrinkle is a scalar
+`float16[]` whose logical byte extent is not divisible by four, either directly
+or after a struct prefix. WebGPU/Vulkan transfers need four-byte capacity and
+WebGPU buffer bindings need a four-byte size. Drivers pad physical capacity,
+while target planning injects the metadata-derived logical length and
+runtime-tail path for source `.length`. Both lowerings consume that exact value,
+so physical padding cannot become a phantom logical element.
+
 ## 10. WGSL backend
 
 `src/wgsl` receives a verified Web `Executable` and:
@@ -400,13 +412,21 @@ No target independently recalculates ABI offsets.
    `unpack4x8unorm` into an `rgba8unorm` storage texture; and
 5. reparses the exact generated WGSL subset with its in-tree validator.
 
-Fixed resources use aligned wrappers; runtime tails retain natural stride.
+Fixed resources use aligned wrappers. A direct runtime array uses a
+natural-alignment wrapper; a runtime-tail struct is the storage root in WGSL
+and the decorated `Block` in SPIR-V, because neither representation may nest it
+inside another resource struct.
 Plain values are reconstructed from one uniform block at entry. Values become
 expressions or compiler locals; places become access expressions; `If` and
 `Loop` stay structured.
 
 The in-tree validator checks Tach's serialization contract. The Chromium
 harness provides the independent implementation check.
+
+If Kernel IR contains `float16`, emission adds `enable f16;` and target
+metadata requires `shader-f16`. The browser host requests this optional feature
+when the adapter offers it and rejects preparation otherwise. Float32-only
+projects emit neither the directive nor the requirement.
 
 ## 11. SPIR-V backend
 
@@ -434,6 +454,15 @@ loop, or barrier alters the source program. Shared loads and stores are NonPriva
 Uniform/StorageBuffer and the logical pointee on Workgroup/Input.
 Storage-buffer atomics use QueueFamily scope.
 Synchronization2 is the inter-dispatch synchronization floor.
+
+Binary16 emission uses 16-bit `OpTypeFloat`, exact binary16 constants, and
+`OpFConvert` for explicit `float16`/`float32` conversion. The emitter derives
+`Float16`, `StorageBuffer16BitAccess`, and
+`UniformAndStorageBuffer16BitAccess` capabilities from actual IR/interface
+use. The Vulkan host enables supported Vulkan 1.1/1.2 optional feature fields
+once at device creation, while the native module wire carries the exact subset
+each module requires. Unsupported Float16 work fails before shader-module
+creation; ordinary modules retain the existing Vulkan 1.3 floor.
 
 The validator independently decodes the binary and checks header/sections,
 IDs, capabilities, types, layouts, decorations, CFG, predecessors, dominance,
@@ -623,16 +652,18 @@ Tests mirror ownership:
 - SPIR-V mutation tests corrupt valid modules and require rejection;
 - `browser-test` builds the example project once and checks every generated
   endpoint through its exact generated WGSL in WebGPU, including fused and
-  fallback views, exact 8-bit swatch presentation, and sustained CPU-selected
-  canvas presentation;
+  fallback views, exact 8-bit swatch presentation, sustained CPU-selected
+  canvas presentation, Float16 math/storage/parameters, an odd direct f16
+  array, and a prefixed f16 runtime tail;
 - `deno-test` independently builds the same example project, validates its
   SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
   including fused/fallback offscreen projection, the same swatch pair,
-  owner-neutral recipes, and repeated logical sessions;
-- `showcase-ts` builds one six-kernel project and runs the same host-neutral
-  renderers, mathematical workloads, and physics simulations through both
-  WebGPU and Vulkan; browser renderers use direct canvas presentation while
-  native renderers exercise packed view projection;
+  owner-neutral recipes, repeated logical sessions, and the same Float16 seams;
+- `showcase-ts` builds seven workload kernels plus one shared color file and
+  runs nine host-neutral rendering, mathematical, and physics workloads through
+  both WebGPU and Vulkan, including matched FP32/FP16 matrix and
+  arithmetic-dense oscillator pairs; browser renderers use direct canvas
+  presentation while native renderers exercise packed view projection;
   and
 - `dupl`, `deadcode`, and `staticcheck` provide structural duplication,
   whole-program reachability, and correctness audits beyond behavioral tests.

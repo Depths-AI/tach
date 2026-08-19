@@ -23,6 +23,7 @@ func (w *wireWriter) raw(value string) {
 func validModuleWire() []byte {
 	var wire wireWriter
 	wire.u32(nativeABI)
+	wire.u32(7)
 	wire.u32(1)
 	wire.raw("kernel")
 	wire.u32(2)
@@ -37,14 +38,16 @@ func validModuleWire() []byte {
 }
 
 func TestModuleWire(t *testing.T) {
-	kernels, err := parseModule(reader{data: validModuleWire()})
-	if err != nil || len(kernels) != 1 || kernels[0].entry != "kernel" || len(kernels[0].bindings) != 2 || kernels[0].parameterBinding != 2 {
+	features, kernels, err := parseModule(reader{data: validModuleWire()})
+	if err != nil || features != 7 || len(kernels) != 1 || kernels[0].entry != "kernel" || len(kernels[0].bindings) != 2 || kernels[0].parameterBinding != 2 {
 		t.Fatalf("parseModule() = %#v, %v", kernels, err)
 	}
 	for name, mutate := range map[string]func([]byte){
-		"version":           func(wire []byte) { wire[0]++ },
-		"duplicate binding": func(wire []byte) { binary.LittleEndian.PutUint32(wire[32:], 0) },
-		"trailing data":     func(wire []byte) { wire = append(wire, 0); _ = wire },
+		"version":            func(wire []byte) { wire[0]++ },
+		"features":           func(wire []byte) { wire[4] = 8 },
+		"feature dependency": func(wire []byte) { wire[4] = 2 },
+		"duplicate binding":  func(wire []byte) { binary.LittleEndian.PutUint32(wire[36:], 0) },
+		"trailing data":      func(wire []byte) { wire = append(wire, 0); _ = wire },
 	} {
 		t.Run(name, func(t *testing.T) {
 			wire := append([]byte(nil), validModuleWire()...)
@@ -53,7 +56,7 @@ func TestModuleWire(t *testing.T) {
 			} else {
 				mutate(wire)
 			}
-			if _, err := parseModule(reader{data: wire}); err == nil {
+			if _, _, err := parseModule(reader{data: wire}); err == nil {
 				t.Fatal("malformed module wire was accepted")
 			}
 		})
@@ -103,7 +106,7 @@ func TestVulkan13Contract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(source)
-	for _, required := range []string{"VK_API_VERSION_1_3", "shaderZeroInitializeWorkgroupMemory", "synchronization2", "vulkanMemoryModel", "X(CmdPipelineBarrier2)", "X(QueueSubmit2)", "VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT"} {
+	for _, required := range []string{"VK_API_VERSION_1_3", "shaderZeroInitializeWorkgroupMemory", "synchronization2", "vulkanMemoryModel", "shaderFloat16", "storageBuffer16BitAccess", "uniformAndStorageBuffer16BitAccess", "X(CmdPipelineBarrier2)", "X(QueueSubmit2)", "VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT"} {
 		if !strings.Contains(text, required) {
 			t.Errorf("native runtime lacks %s", required)
 		}

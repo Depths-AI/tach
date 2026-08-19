@@ -113,8 +113,9 @@ terminal view conversion alone may fold into its proven final writer. See
 
 ## 5. Types and ordinary computation
 
-Scalars are `bool`, `int32`, `uint32`, `float32`, and helper-only `void`.
-Numeric vectors are `int32xN`, `uint32xN`, or `float32xN`, where `N` is 2–4.
+Scalars are `bool`, `int32`, `uint32`, `float16`, `float32`, and helper-only
+`void`. Numeric vectors use any numeric scalar with `N` lanes, where `N` is
+2–4.
 Vector constructors flatten exact lane counts; one scalar splats. Structs are
 named value types with exact fields; literal order is irrelevant, declaration
 order affects storage. Runtime `T[]` occurs only directly in a buffer or as a
@@ -136,7 +137,12 @@ buffer parameters must receive distinct handles. Express in-place work with one
 parameter. Host values must match generated `index.d.ts`: numeric scalars are
 numbers, vectors are tuples, structs are readonly objects, compatible arrays
 may be typed arrays, and three-lane vector arrays must be tuple arrays because
-of padding. Never add source padding or hand-pack buffers. See
+of padding. `float16[]` uses `Float16Array` and remains binary16 across both
+backends. It has roughly three decimal digits of precision and a maximum finite
+magnitude of 65504, so use it only with an explicit error/range budget. Hosts
+enable supported optional Float16 functionality; each generated module records
+its exact WebGPU/Vulkan requirements, and unsupported commands fail preparation.
+Never add source padding or hand-pack buffers. See
 §30: buffers,
 §31: non-aliasing,
 §32: host shapes, and
@@ -144,8 +150,9 @@ of padding. Never add source padding or hand-pack buffers. See
 
 Numbers have no shader suffix. Unconstrained nonnegative integers infer
 `uint32`, fractions/exponents `float32`, and negative whole literals `int32`.
-Use explicit `int32(...)`, `uint32(...)`, or `float32(...)`; do not expect
-JavaScript coercion. Prefer `const`; `let` is mutable; shadowing is forbidden.
+Use explicit `int32(...)`, `uint32(...)`, `float16(...)`, or `float32(...)`;
+binary16 is never inferred without context and is never silently widened. Do
+not expect JavaScript coercion. Prefer `const`; `let` is mutable; shadowing is forbidden.
 Operators, precedence, assignments, `if`/`while`/`for`, returns, and intrinsics
 are deliberately narrower than TypeScript. Check the exact tables before
 emitting unfamiliar math. See §34: literals,

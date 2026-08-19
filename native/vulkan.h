@@ -11,6 +11,10 @@ typedef struct tv_module tv_module;
 typedef struct tv_buffer tv_buffer;
 typedef struct tv_submission tv_submission;
 
+#define TV_FEATURE_FLOAT16 1u
+#define TV_FEATURE_STORAGE16 2u
+#define TV_FEATURE_UNIFORM16 4u
+
 typedef struct {
   uint32_t binding;
   uint32_t minimum_size;
@@ -30,7 +34,7 @@ uint32_t tv_vendor_id(tv_context *context);
 uint32_t tv_device_type(tv_context *context);
 void tv_close(tv_context *context);
 
-tv_module *tv_module_create(tv_context *context, const uint8_t *spirv, size_t length, uint32_t kernel_count);
+tv_module *tv_module_create(tv_context *context, const uint8_t *spirv, size_t length, uint32_t features, uint32_t kernel_count);
 int tv_module_kernel(tv_module *module, uint32_t index, const char *entry, const tv_binding *bindings,
                      uint32_t binding_count, int has_parameters, uint32_t parameter_binding, uint32_t parameter_size);
 int tv_module_prepare(tv_module *module, uint32_t index);

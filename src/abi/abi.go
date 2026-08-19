@@ -44,7 +44,7 @@ func ValidateExportTypeName(name string) error {
 	if err := ValidateExportName(name); err != nil {
 		return err
 	}
-	if name == "Float32Array" || name == "Int32Array" || name == "Uint32Array" || name == "ReadonlyArray" {
+	if name == "Float16Array" || name == "Float32Array" || name == "Int32Array" || name == "Uint32Array" || name == "ReadonlyArray" {
 		return fmt.Errorf("%q collides with a generated host collection type", name)
 	}
 	return nil

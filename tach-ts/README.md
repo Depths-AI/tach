@@ -661,8 +661,9 @@ A source file has one canonical order:
 2. one contiguous block of imports; and
 3. type and function declarations.
 
-Module, file, type, function, parameter, field, and coordinate names use
-portable identifiers. In particular, source filenames cannot contain dashes.
+Type, function, parameter, field, and coordinate names use portable
+identifiers. Module and kernel identities are import strings, so their folder
+and source filenames may contain dashes.
 `tach fmt` supplies the canonical whitespace, punctuation, and line breaking.
 The language accepts `//` comments only; block comments do not exist.
 
@@ -691,10 +692,12 @@ package.
 | `bool` | Boolean | `boolean` |
 | `int32` | signed 32-bit integer | `number` |
 | `uint32` | unsigned 32-bit integer | `number` |
+| `float16` | IEEE 754 binary16 | `number` |
 | `float32` | 32-bit floating point | `number` |
 | `void` | absence of a helper result | no host value |
 | `int32x2..4` | signed vector | readonly numeric tuple |
 | `uint32x2..4` | unsigned vector | readonly numeric tuple |
+| `float16x2..4` | binary16 floating vector | readonly numeric tuple |
 | `float32x2..4` | floating vector | readonly numeric tuple |
 
 Vector constructors either flatten the exact required lanes or splat one
@@ -756,9 +759,11 @@ Scalar arrays use matching typed arrays naturally:
 
 | Tach buffer element | Convenient host storage |
 |---|---|
+| `float16[]` | `Float16Array` |
 | `float32[]` | `Float32Array` |
 | `int32[]` | `Int32Array` |
 | `uint32[]` | `Uint32Array` |
+| `float16x2[]`, `float16x4[]` | flat `Float16Array` or tuple array |
 | `float32x2[]`, `float32x4[]` | flat `Float32Array` or tuple array |
 | three-lane vector array | tuple array |
 | struct array | readonly object array |
@@ -768,6 +773,11 @@ instead of pretending a tightly packed typed array has the same layout.
 Boolean values are available to helpers and parameter blocks, but are not
 ordinary storage-buffer elements.
 
+An odd-length direct `float16[]` remains logically exact even though WebGPU
+requires four-byte physical buffer and copy alignment. Tach handles that
+padding privately; `.length` never includes a phantom element.
+The same guarantee applies to a final scalar `float16[]` after a struct prefix.
+
 ### 10.4 Numbers and conversion
 
 Tach has no shader-style numeric suffixes:
@@ -775,11 +785,17 @@ Tach has no shader-style numeric suffixes:
 - unconstrained nonnegative whole literals infer `uint32`;
 - negative whole literals infer `int32`;
 - fractions and exponents infer `float32`; and
-- explicit `int32(...)`, `uint32(...)`, and `float32(...)` conversions resolve
-  ambiguity.
+- explicit `int32(...)`, `uint32(...)`, `float16(...)`, and `float32(...)`
+  conversions resolve ambiguity.
 
-Do not assume JavaScript coercion. Values are range-checked and packed against
-the generated signature.
+Unconstrained fractions infer `float32`; binary16 is chosen by a `float16`
+annotation, parameter/result context, or explicit constructor. Float16
+literals must be finite and within `-65504` to `65504`. Tach does not silently
+widen Float16 buffers or arithmetic to float32.
+
+Do not assume JavaScript coercion. Values are packed against the generated
+signature; integer ranges, exact fields, vector widths, and array shapes are
+validated.
 
 ## 11. Variables, control flow, and math
 
@@ -809,19 +825,22 @@ Portable scalar/vector intrinsics include:
 | vector geometry | `dot`, `cross`, `length`, `distance`, `normalize` |
 
 `floor`, `ceil`, `trunc`, trigonometric, exponential, `sqrt`, and `rsqrt`
-preserve a `float32` scalar or vector type. `abs` accepts signed integer or
-floating scalar/vector values. `pow` accepts matching floating values and can
-broadcast a scalar exponent across a vector base.
+preserve a `float16` or `float32` scalar/vector type. `abs` accepts signed
+integer or floating scalar/vector values. `pow` accepts matching floating
+values and can broadcast a scalar exponent across a vector base.
 
 `min`, `max`, and `clamp` currently accept integer scalar/vector values so Tach
 does not silently choose a cross-backend floating-point NaN policy. `cross`
-accepts `float32x3`; the other geometry operations accept matching floating
-vectors. Tach has no `break` or `continue`, function values, methods, or
+accepts a matching `float16x3` or `float32x3`; the other geometry operations
+accept matching floating vectors and return their component width. Tach has no
+`break` or `continue`, function values, methods, or
 recursion.
 
-Use `tach check` as the authority for exact overloads. `float32` has less
-precision and range than JavaScript's number type, and parallel floating-point
-reductions need not reproduce serial CPU order bit for bit.
+Use `tach check` as the authority for exact overloads. `float32` has about
+seven decimal digits of precision; `float16` has roughly three and a maximum
+finite magnitude of 65504. Both have less precision and range than
+JavaScript's number type, and parallel floating-point reductions need not
+reproduce serial CPU order bit for bit.
 
 ## 12. Parallel correctness
 
@@ -1196,6 +1215,13 @@ deno run --allow-ffi --allow-read app.ts
 The Vulkan host currently ships for x86-64 Windows and Linux. It requires a
 Vulkan 1.3 loader and device with Synchronization2,
 `shaderZeroInitializeWorkgroupMemory`, and `vulkanMemoryModel`.
+
+Float16 is genuinely optional hardware functionality. A host session enables
+supported Float16 functionality when it opens. Each generated module records
+whether it needs WebGPU `shader-f16` and Vulkan `shaderFloat16`, plus only the
+16-bit storage/uniform features its interfaces use. Command preparation fails
+with a typed error when the selected adapter cannot satisfy those exact module
+requirements. Projects without `float16` carry no optional Float16 requirement.
 
 The compiler itself is distributed for:
 

@@ -96,6 +96,27 @@ func TestFixedArrayStride(t *testing.T) {
 	}
 }
 
+func TestFloat16Layout(t *testing.T) {
+	for _, test := range []struct {
+		type_               *types.Type
+		size, align, stride uint32
+	}{
+		{types.TF16, 2, 2, 0},
+		{types.Vec(types.TF16, 2), 4, 4, 0},
+		{types.Vec(types.TF16, 3), 6, 8, 0},
+		{types.Vec(types.TF16, 4), 8, 8, 0},
+		{types.Runtime(types.Vec(types.TF16, 3)), 0, 8, 8},
+	} {
+		got, err := Of(test.type_)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Size != test.size || got.Align != test.align || got.Stride != test.stride {
+			t.Errorf("%s layout = %d/%d/%d, want %d/%d/%d", test.type_, got.Size, got.Align, got.Stride, test.size, test.align, test.stride)
+		}
+	}
+}
+
 func TestFixedArraySizeCannotOverflow(t *testing.T) {
 	if _, err := Of(types.Array(types.TU32, ^uint32(0))); err == nil {
 		t.Fatal("expected an overflowing fixed array layout to be rejected")

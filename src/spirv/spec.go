@@ -53,6 +53,7 @@ const (
 	OpConvertFToS          Op = 110
 	OpConvertSToF          Op = 111
 	OpConvertUToF          Op = 112
+	OpFConvert             Op = 115
 	OpBitcast              Op = 124
 	OpSNegate              Op = 126
 	OpFNegate              Op = 127
@@ -156,8 +157,11 @@ const (
 )
 
 const (
-	CapabilityShader            uint32 = 1
-	CapabilityVulkanMemoryModel uint32 = 5345
+	CapabilityShader                       uint32 = 1
+	CapabilityFloat16                      uint32 = 9
+	CapabilityStorageBuffer16BitAccess     uint32 = 4433
+	CapabilityUniformAndStorage16BitAccess uint32 = 4434
+	CapabilityVulkanMemoryModel            uint32 = 5345
 )
 
 const (
@@ -237,7 +241,7 @@ var opNames = map[Op]string{
 	OpMemberDecorate: "OpMemberDecorate", OpCompositeConstruct: "OpCompositeConstruct",
 	OpVectorExtractDynamic: "OpVectorExtractDynamic", OpCompositeExtract: "OpCompositeExtract",
 	OpConvertFToU: "OpConvertFToU", OpConvertFToS: "OpConvertFToS",
-	OpConvertSToF: "OpConvertSToF", OpConvertUToF: "OpConvertUToF", OpBitcast: "OpBitcast",
+	OpConvertSToF: "OpConvertSToF", OpConvertUToF: "OpConvertUToF", OpFConvert: "OpFConvert", OpBitcast: "OpBitcast",
 	OpSNegate: "OpSNegate", OpFNegate: "OpFNegate", OpIAdd: "OpIAdd", OpFAdd: "OpFAdd",
 	OpISub: "OpISub", OpFSub: "OpFSub", OpIMul: "OpIMul", OpFMul: "OpFMul", OpUDiv: "OpUDiv",
 	OpSDiv: "OpSDiv", OpFDiv: "OpFDiv", OpUMod: "OpUMod", OpSRem: "OpSRem", OpFRem: "OpFRem",

@@ -40,7 +40,7 @@ shader entry is private, currently `_tach_k0`. A multi-stage public program has
 several private physical entries. Host code must execute the generated plan;
 it must not infer a shader entry from the public name.
 
-The contract has six parts:
+The contract has seven parts:
 
 1. **Program ABI:** public parameters, resources, and optional launch input.
 2. **Plan ABI:** ordered dispatches, target kernels, transients, barriers, and
@@ -60,7 +60,8 @@ Every source-named struct type and every exported program becomes a
 JavaScript/TypeScript export in the project's single package entry point.
 Their names and public parameter names must be portable ASCII identifiers and
 must avoid reserved JavaScript/TypeScript and generated names. Struct names
-also exclude `Float32Array`, `Int32Array`, `Uint32Array`, and `ReadonlyArray`,
+also exclude `Float16Array`, `Float32Array`, `Int32Array`, `Uint32Array`, and
+`ReadonlyArray`,
 which retain their host-collection meanings in generated signatures. Runtime
 API names remain available because all runtime types use compiler-private
 `$...` aliases. Private helpers, stages, physical entries, wrappers, and fields
@@ -164,11 +165,13 @@ boundary.
 
 | Tach type | Size | Alignment |
 |---|---:|---:|
+| `float16` | 2 | 2 |
 | `int32`, `uint32`, `float32` | 4 | 4 |
 | `atomic<int32>`, `atomic<uint32>` | 4 | 4 |
-| two-lane numeric vector | 8 | 8 |
-| three-lane numeric vector | 12 | 16 |
-| four-lane numeric vector | 16 | 16 |
+| `float16x2`, `float16x3`, `float16x4` | 4 / 6 / 8 | 4 / 8 / 8 |
+| 32-bit two-lane numeric vector | 8 | 8 |
+| 32-bit three-lane numeric vector | 12 | 16 |
+| 32-bit four-lane numeric vector | 16 | 16 |
 
 `bool` has no direct storage-buffer representation. In a physical parameter
 block, each logical bool leaf becomes one `uint32` word containing `0` or `1`.
@@ -229,6 +232,16 @@ actualByteSize  = runtimeOffset + elementCount * runtimeStride
 ```
 
 Partial and zero-element runtime resources are rejected.
+
+A scalar `float16[]` may have a logical byte extent not divisible by four,
+either from an odd direct element count or from its position after a struct
+prefix. Transfer APIs still require four-byte units. Drivers privately round
+physical transfer capacity up to four while preserving the logical
+codec/readback length. Target planning supplies the logical element count and
+runtime-tail path as a private parameter source whenever a stage reads
+`.length`; both lowerings use that value instead of deriving source semantics
+from a physical byte range. Padding never becomes a source-visible or
+dispatch-inferred element.
 
 ### Fixed resource wrapper size
 
@@ -306,8 +319,8 @@ from the materialized byte length, runtime-tail offset, and stride. A dispatch
 axis or transient length must be positive.
 
 Parameter-block value sources can reference public values/paths, literal bool,
-`int32`, `uint32`, or exact `float32` bits, a shape expression, or the command
-repeat count.
+`int32`, `uint32`, exact `float16` bits, or exact `float32` bits, a shape
+expression, or the command repeat count.
 
 ## 8. Transient allocation and synchronization
 
@@ -425,7 +438,15 @@ interface PublicProgram {
 interface TargetPlan {
   vulkan?: "1.3";
   spirv?: "1.6";
-  features?: Array<"synchronization2" | "shaderZeroInitializeWorkgroupMemory" | "vulkanMemoryModel">;
+  features?: Array<
+    | "shader-f16"
+    | "synchronization2"
+    | "shaderZeroInitializeWorkgroupMemory"
+    | "vulkanMemoryModel"
+    | "shaderFloat16"
+    | "storageBuffer16BitAccess"
+    | "uniformAndStorageBuffer16BitAccess"
+  >;
   kernels: Array<{
     entryPoint: string;
     workgroupSize: [number, number, number];
@@ -505,7 +526,7 @@ interface Shape {
 }
 
 interface ValueSource {
-  kind: "parameter" | "bool" | "i32" | "u32" | "f32Bits"
+  kind: "parameter" | "bool" | "i32" | "u32" | "f16Bits" | "f32Bits"
     | "shape" | "repeat";
   parameter: number;
   path?: string[];
@@ -514,7 +535,7 @@ interface ValueSource {
 }
 
 interface HostLayout {
-  kind: "bool" | "i32" | "u32" | "f32" | "vector"
+  kind: "bool" | "i32" | "u32" | "f16" | "f32" | "vector"
     | "array" | "runtime" | "struct";
   size?: number;
   stride?: number;
@@ -526,7 +547,11 @@ interface HostLayout {
 ```
 
 Both targets are mandatory and contain parallel `kernels` and `programs`
-arrays. Only `targets.spirv` carries the exact Vulkan/SPIR-V feature profile:
+arrays. `targets.web.features` is absent unless the module needs `shader-f16`.
+`targets.spirv` always records the three Vulkan 1.3 baseline features and adds
+`shaderFloat16`, `storageBuffer16BitAccess`, and/or
+`uniformAndStorageBuffer16BitAccess` exactly when emitted types and interfaces
+require them:
 
 ```text
 targets.web.kernels[]       physical entry, workgroup, bindings, value block
@@ -614,7 +639,7 @@ interface DocumentedType {
 interface TypeRef {
   tach: string;
   kind:
-    | "void" | "bool" | "i32" | "u32" | "f32"
+    | "void" | "bool" | "i32" | "u32" | "f16" | "f32"
     | "vector" | "struct" | "atomic"
     | "fixedArray" | "runtimeArray" | "view";
   name?: string;
@@ -642,13 +667,22 @@ WGSL contains all physical kernels for the WebGPU plan. Each has its own
 group-0 storage variables, wrappers, optional uniform block, selected builtin
 inputs, and private entry name.
 
-Fixed resources use an aligned wrapper; runtime tails preserve natural
-stride. Parameter blocks use the `uniform` address space and reconstruct
+Fixed resources use an aligned wrapper. A direct runtime array uses a
+natural-alignment wrapper, while a struct with a runtime tail is itself the
+storage root because WGSL does not permit nesting such a struct. Parameter
+blocks use the `uniform` address space and reconstruct
 logical values at entry. Storage access is `read` or `read_write` from the
 stage proof. Only coordinate inputs still used after backend optimization are
 emitted.
 
 The runtime builds layouts from metadata and never parses WGSL.
+When the logical module contains binary16, WGSL begins with `enable f16;` and
+the Web target records `shader-f16`. `openWeb` requests that optional adapter
+feature, and module preparation rejects a device that did not enable it.
+For a scalar `float16[]` whose byte range may need four-byte binding padding,
+whether direct or after a struct prefix, the entry's private parameter block
+also carries the metadata-derived logical length; generated `arrayLength` use
+is replaced by that parameter.
 
 A Web view output binding is `texture_storage_2d<rgba8unorm, write>`. A fused
 terminal entry packs its own final pixel and unpacks that word into the
@@ -684,6 +718,20 @@ an `OpConstantNull` initializer and the host requires
 inserted. The host also requires Synchronization2 for plan barriers and
 `vulkanMemoryModel` for that shader memory model.
 
+A binary16 module declares `Float16`. It additionally declares
+`StorageBuffer16BitAccess` and/or `UniformAndStorageBuffer16BitAccess` exactly
+when an f16 value crosses those interfaces. The Vulkan host queries and enables
+the matching Vulkan 1.1/1.2 feature fields at device creation, and rejects a
+module whose recorded feature mask is not available before creating its shader
+module.
+
+When source reads the length of a scalar binary16 runtime array, the entry's
+private parameter block carries the metadata-derived logical length. The
+generated stage uses that value instead of `OpArrayLength`, so transfer or
+allocation granularity cannot alter Tach `.length`. A struct with a runtime
+tail is the decorated storage `Block` itself; it is not nested in another
+resource block.
+
 A native view uses a storage-buffer output with one packed little-endian RGBA8
 `uint32` per pixel. The same fused/fallback distinction and the same pack
 sequence apply; only the container differs. This is an offscreen compute
@@ -707,8 +755,10 @@ a different layout; create a new handle.
 Packing checks integer ranges, vector/array counts, struct fields, offsets,
 and strides. Multi-byte values are little-endian. On little-endian hosts,
 matching scalar and tightly packed vector typed arrays can cross without
-element-wise packing. Three-lane vector arrays use structured tuples because
-their element stride includes padding.
+element-wise packing. `float16` uses native `Float16Array` and `DataView`
+binary16 operations; it is never widened to `Float32Array` storage. Three-lane
+vector arrays use structured tuples because their element stride includes
+padding.
 
 ```ts
 interface ComputeBuffer<T> {

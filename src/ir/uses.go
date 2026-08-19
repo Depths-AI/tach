@@ -1,6 +1,82 @@
 package ir
 
-import "fmt"
+import (
+	"fmt"
+
+	"tach/src/types"
+)
+
+// UsesKind reports whether a type kind occurs anywhere in a module's declared
+// or instruction-level type surface.
+func UsesKind(module *Module, kind types.Kind) bool {
+	for _, item := range module.Structs {
+		if types.Contains(item, kind) {
+			return true
+		}
+	}
+	var block func(*Block) bool
+	block = func(body *Block) bool {
+		for _, instruction := range body.Instrs {
+			if value, ok := instruction.(ValueDef); ok && types.Contains(value.ResultType(), kind) {
+				return true
+			}
+			if place, ok := instruction.(PlaceDef); ok && types.Contains(place.PlaceType(), kind) {
+				return true
+			}
+			switch item := instruction.(type) {
+			case *If:
+				for _, result := range item.Results {
+					if types.Contains(result.Type, kind) {
+						return true
+					}
+				}
+				if block(item.Then) || block(item.Else) {
+					return true
+				}
+			case *Loop:
+				for _, result := range item.Results {
+					if types.Contains(result.Type, kind) {
+						return true
+					}
+				}
+				for _, parameter := range item.Params {
+					if types.Contains(parameter.Type, kind) {
+						return true
+					}
+				}
+				if block(item.Cond) || block(item.Body) {
+					return true
+				}
+			case *Scope:
+				if block(item.Body) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, function := range module.Functions {
+		for _, parameter := range function.BufferParams {
+			if types.Contains(parameter.Type, kind) {
+				return true
+			}
+		}
+		for _, parameter := range function.Params {
+			if types.Contains(parameter.Type, kind) {
+				return true
+			}
+		}
+		for _, variable := range function.WorkgroupVars {
+			if types.Contains(variable.Type, kind) {
+				return true
+			}
+		}
+		if types.Contains(function.Return, kind) || block(function.Body) {
+			return true
+		}
+	}
+	return false
+}
 
 // UseCounts returns every SSA-value and place read in f. Optimizers share this
 // accounting so a new IR instruction cannot silently disappear in one stage.
