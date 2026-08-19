@@ -37,6 +37,23 @@ function expectedMath(index: number): number[] {
   ];
 }
 
+function expectedFloat16Math(index: number): number[] {
+  const x = index + 1,
+    value = [x, 2, 3],
+    length = Math.hypot(...value),
+    unit = value.map((lane) => lane / length),
+    distance = Math.hypot(...value.map((lane, i) => lane - unit[i]!)),
+    crossX = value[1]! * unit[2]! - value[2]! * unit[1]!,
+    geometry = value.reduce((sum, lane, i) => sum + lane * unit[i]!, 0) +
+      length + distance + crossX,
+    wave = Math.sin(x) + Math.cos(x) + Math.tan(0.25),
+    shaped = Math.sqrt(Math.abs(wave)) + 1 / Math.sqrt(x + 1),
+    exponential = 2 ** Math.log2(x + 1) + Math.exp(Math.log(x + 1)),
+    rounded = Math.floor((x + 1) ** 2) + Math.ceil(geometry) +
+      Math.trunc(shaped);
+  return [...unit, shaped + exponential + rounded];
+}
+
 async function verifyLanguage(gpu: Tach): Promise<void> {
   const counters = gpu.buffer({ total: 0 }),
     accumulation = programs.accumulate(counters);
@@ -94,6 +111,28 @@ async function verifyLanguage(gpu: Tach): Promise<void> {
   await gpu.submit(programs.scale(values, 2), programs.scale(values, 3));
   await gpu.submit(programs.scale(values, 4));
   equal(Array.from(await values.read()), [24, 48, 72, 96], "parameter arena");
+
+  const halves = gpu.buffer(new Float16Array([1, 2, 3, 4]));
+  await gpu.submit(programs.scaleFloat16(halves, 0.5));
+  equal(Array.from(await halves.read()), [0.5, 1, 1.5, 2], "float16");
+  const singleHalf = gpu.buffer(new Float16Array([2]));
+  await gpu.submit(programs.scaleFloat16(singleHalf, 0.5));
+  equal(Array.from(await singleHalf.read()), [1], "odd-sized float16 buffer");
+  await gpu.submit(programs.halveFloat16(singleHalf));
+  equal(Array.from(await singleHalf.read()), [0.5], "float16 plan constant");
+
+  const halfInput = gpu.buffer({
+    offset: 0,
+    values: new Float16Array([4, 8, 12, 16]),
+  });
+  const halfMath = gpu.buffer(new Float16Array(16));
+  await gpu.submit(programs.float16Math(halfInput, halfMath));
+  Array.from(await halfMath.read()).forEach((value, index) => {
+    const expected = expectedFloat16Math(Math.floor(index / 4))[index % 4]!;
+    if (Math.abs(value - expected) > (index % 4 === 3 ? 1 : 0.01)) {
+      throw new Error(`float16 math[${index}]: ${value} != ${expected}`);
+    }
+  });
 }
 
 const width = 128, height = 72;
@@ -106,10 +145,22 @@ async function verifyViews(gpu: Tach): Promise<void> {
   const swatch = gpu.buffer(new Float32Array(16));
   await gpu.submit(programs.swatchInto(swatch));
   equal(Array.from(await swatch.read()), [
-    0, 0, 0, 1,
-    1, 0, 0, 1,
-    0, 1, 0, 1,
-    1, 1, 0, 1,
+    0,
+    0,
+    0,
+    1,
+    1,
+    0,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1,
+    1,
+    1,
+    0,
+    1,
   ], "external swatch source");
   const pixels = gpu.buffer(new Float32Array(width * height * 4));
   const [first, ...rest] = Array.from(
@@ -137,12 +188,15 @@ const first = await tach(async (gpu) => {
   equal(Object.keys(programs).sort(), [
     "accumulate",
     "bitwise",
+    "float16Math",
     "gradient",
     "gradientInto",
+    "halveFloat16",
     "integrate",
     "math",
     "reduceLanes",
     "scale",
+    "scaleFloat16",
     "swatch",
     "swatchInto",
     "transform",
@@ -156,4 +210,4 @@ const second = await tach(async (gpu) => {
   return gpu.adapter.name;
 });
 equal(second, first, "owner-neutral scalar view across sessions");
-console.log(`Vulkan execution: ${first}; 11 programs; 72 projected frames`);
+console.log(`Vulkan execution: ${first}; 14 programs; 72 projected frames`);

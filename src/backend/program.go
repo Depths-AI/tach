@@ -23,6 +23,10 @@ const (
 	Synchronization2              = "synchronization2"
 	ZeroInitializeWorkgroupMemory = "shaderZeroInitializeWorkgroupMemory"
 	VulkanMemoryModel             = "vulkanMemoryModel"
+	ShaderF16                     = "shader-f16"
+	ShaderFloat16                 = "shaderFloat16"
+	StorageBuffer16BitAccess      = "storageBuffer16BitAccess"
+	UniformAndStorage16BitAccess  = "uniformAndStorageBuffer16BitAccess"
 	srgbHelper                    = "$tach_srgb"
 )
 
@@ -48,17 +52,18 @@ type StorageBinding struct {
 }
 
 type PhysicalKernel struct {
-	Entry       string
-	Function    *ir.Function
-	Workgroup   [3]uint32
-	Bindings    []StorageBinding
-	Parameters  *abi.ParameterBlock
-	Coordinates *Coordinates
-	Projection  bool
-	FusedView   bool
-	ViewBinding int
-	ViewWidth   ir.ValueID
-	ViewHeight  ir.ValueID
+	Entry          string
+	Function       *ir.Function
+	Workgroup      [3]uint32
+	Bindings       []StorageBinding
+	Parameters     *abi.ParameterBlock
+	Coordinates    *Coordinates
+	Projection     bool
+	FusedView      bool
+	ViewBinding    int
+	ViewWidth      ir.ValueID
+	ViewHeight     ir.ValueID
+	LogicalLengths map[int]ir.ValueID
 }
 
 type ResourceSourceKind uint8
@@ -140,6 +145,34 @@ type Executable struct {
 	Programs        []ProgramPlan
 }
 
+func RequiredFeatures(executable *Executable) []string {
+	if executable.Target == Web {
+		if ir.UsesKind(executable.KernelModule, types.F16) {
+			return []string{ShaderF16}
+		}
+		return nil
+	}
+	features := []string{Synchronization2, ZeroInitializeWorkgroupMemory, VulkanMemoryModel}
+	if !ir.UsesKind(executable.KernelModule, types.F16) {
+		return features
+	}
+	features = append(features, ShaderFloat16)
+	storage, uniform := false, false
+	for _, kernel := range executable.PhysicalKernels {
+		for _, binding := range kernel.Bindings {
+			storage = storage || types.Contains(binding.Type, types.F16)
+		}
+		uniform = uniform || kernel.Parameters != nil && types.Contains(kernel.Parameters.Type, types.F16)
+	}
+	if storage {
+		features = append(features, StorageBuffer16BitAccess)
+	}
+	if uniform {
+		features = append(features, UniformAndStorage16BitAccess)
+	}
+	return features
+}
+
 func (e *Executable) IndexFunctions() (map[*ir.Function]*Coordinates, map[*ir.Function]*PhysicalKernel, error) {
 	coordinates := map[*ir.Function]*Coordinates{}
 	kernels := map[*ir.Function]*PhysicalKernel{}
@@ -203,6 +236,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 				values = append(values, flow.ValueArgument{Formal: len(values), Kind: flow.ValueRepeat})
 			}
 			values = pruneUnusedParameters(function, values)
+			logicalLengths := appendLogicalLengths(function, &values, program, &dispatch)
 			var viewWidth, viewHeight ir.ValueID
 			if dispatchIndex == fusedDispatch {
 				if err := fuseView(function, fusedBinding); err != nil {
@@ -219,7 +253,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 			if err != nil {
 				return nil, err
 			}
-			physical := PhysicalKernel{Entry: function.Name, Function: function, Workgroup: workgroup}
+			physical := PhysicalKernel{Entry: function.Name, Function: function, Workgroup: workgroup, LogicalLengths: logicalLengths}
 			for buffer, parameter := range function.BufferParams {
 				minimum, err := minimumByteSize(parameter.Type)
 				if err != nil {
@@ -324,6 +358,73 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 		return nil, err
 	}
 	return executable, nil
+}
+
+func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, program *flow.Program, dispatch *flow.Dispatch) map[int]ir.ValueID {
+	lengths := map[int]ir.ValueID{}
+	next := maxValue(function) + 1
+	for buffer, parameter := range function.BufferParams {
+		path, ok := f16RuntimePath(parameter.Type)
+		if !ok || !usesBufferLength(function.Body, buffer, map[ir.PlaceID]bool{}) {
+			continue
+		}
+		for _, argument := range dispatch.Buffers {
+			if argument.Formal != buffer {
+				continue
+			}
+			shape := program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: argument.Resource, Path: path, Span: dispatch.Span})
+			formal := len(function.Params)
+			function.Params = append(function.Params, ir.Param{Name: fmt.Sprintf("__tach_length_%d", buffer), ID: next, Type: types.TU32})
+			function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: function.Params[formal].Name, Kind: ir.SourceValue, Value: next, Buffer: -1})
+			*values = append(*values, flow.ValueArgument{Formal: formal, Kind: flow.ValueShape, Shape: shape})
+			lengths[buffer], next = next, next+1
+			break
+		}
+	}
+	return lengths
+}
+
+func f16RuntimePath(t *types.Type) ([]string, bool) {
+	if t.Kind == types.RuntimeArray {
+		return nil, t.Elem.Kind == types.F16
+	}
+	if t.Kind == types.Struct && len(t.Fields) > 0 {
+		tail := t.Fields[len(t.Fields)-1]
+		if tail.Type.Kind == types.RuntimeArray && tail.Type.Elem.Kind == types.F16 {
+			return []string{tail.Name}, true
+		}
+	}
+	return nil, false
+}
+
+func usesBufferLength(block *ir.Block, buffer int, places map[ir.PlaceID]bool) bool {
+	for _, instruction := range block.Instrs {
+		switch item := instruction.(type) {
+		case *ir.PlaceRoot:
+			places[item.Result] = item.Buffer == buffer
+		case *ir.PlaceField:
+			places[item.Result] = places[item.Base]
+		case *ir.PlaceIndex:
+			places[item.Result] = places[item.Base]
+		case *ir.ArrayLength:
+			if places[item.Place] {
+				return true
+			}
+		case *ir.If:
+			if usesBufferLength(item.Then, buffer, places) || usesBufferLength(item.Else, buffer, places) {
+				return true
+			}
+		case *ir.Loop:
+			if usesBufferLength(item.Cond, buffer, places) || usesBufferLength(item.Body, buffer, places) {
+				return true
+			}
+		case *ir.Scope:
+			if usesBufferLength(item.Body, buffer, places) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func canInternalizeRepeat(function *ir.Function) bool {
@@ -552,8 +653,12 @@ func minimumByteSize(t *types.Type) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	if t.Kind == types.RuntimeArray {
-		return l.Stride, nil
+	if l.Runtime {
+		if t.Kind == types.RuntimeArray {
+			return l.Stride, nil
+		}
+		tail := l.Fields[len(l.Fields)-1]
+		return tail.Offset + tail.Layout.Stride, nil
 	}
 	return l.Size, nil
 }

@@ -75,6 +75,70 @@ func TestGenerateCompleteRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestGenerateFloat16Contract(t *testing.T) {
+	_, metadata := generateSource(t, `export function half[i](values: buffer<float16x3[]>, factor: float16) { if (i < values.length) { values[i] *= float16x3(factor); } }`)
+	if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != backend.ShaderF16 {
+		t.Fatalf("web features = %v", got)
+	}
+	want := []string{backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory, backend.VulkanMemoryModel, backend.ShaderFloat16, backend.StorageBuffer16BitAccess, backend.UniformAndStorage16BitAccess}
+	if got := metadata.Targets.SPIRV.Features; len(got) != len(want) {
+		t.Fatalf("SPIR-V features = %v, want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("SPIR-V features = %v, want %v", got, want)
+			}
+		}
+	}
+	resource := metadata.Programs[0].Resources[0]
+	if resource.RuntimeStride != 8 || resource.Alignment != 8 || resource.Layout.Elem.Kind != "vector" || resource.Layout.Elem.Size != 6 || resource.Layout.Elem.Elem.Kind != "f16" {
+		t.Fatalf("Float16 resource = %#v", resource)
+	}
+	parameter := metadata.Targets.Web.Kernels[0].ParameterBlock.Fields[0]
+	if parameter.Layout.Kind != "f16" || parameter.Layout.Size != 2 {
+		t.Fatalf("Float16 parameter = %#v", parameter)
+	}
+}
+
+func TestFloat16FeaturesMatchInterfacesExactly(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+		extra        []string
+	}{
+		{"computation", `export function half[i](out: buffer<uint32[]>) { let value: float16 = 1.0; if (i < out.length) { out[i] = uint32(value); } }`, []string{backend.ShaderFloat16}},
+		{"storage", `export function half[i](out: buffer<float16[]>) { if (i < out.length) { out[i] = 1.0; } }`, []string{backend.ShaderFloat16, backend.StorageBuffer16BitAccess}},
+		{"uniform", `export function half[i](out: buffer<uint32[]>, value: float16) { if (i < out.length) { out[i] = uint32(value); } }`, []string{backend.ShaderFloat16, backend.UniformAndStorage16BitAccess}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, metadata := generateSource(t, test.source)
+			if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != backend.ShaderF16 {
+				t.Fatalf("web features = %v", got)
+			}
+			got := metadata.Targets.SPIRV.Features[3:]
+			if len(got) != len(test.extra) {
+				t.Fatalf("SPIR-V optional features = %v, want %v", got, test.extra)
+			}
+			for i := range got {
+				if got[i] != test.extra[i] {
+					t.Fatalf("SPIR-V optional features = %v, want %v", got, test.extra)
+				}
+			}
+		})
+	}
+}
+
+func TestFloat16PlanConstantKeepsExactBits(t *testing.T) {
+	_, metadata := generateSource(t, `
+function half[i](values: buffer<float16[]>, factor: float16) { if (i < values.length) { values[i] *= factor; } }
+export function halve(values: buffer<float16[]>) { run half(values, 0.5) over values.length; }`)
+	for name, target := range map[string]*TargetPlanMeta{"web": metadata.Targets.Web, "spirv": metadata.Targets.SPIRV} {
+		source := target.Programs[0].Steps[0].Parameters[0]
+		if source.Kind != "f16Bits" || source.Value != float64(0x3800) {
+			t.Fatalf("%s Float16 value source = %#v", name, source)
+		}
+	}
+}
+
 func TestGenerateOrchestrationPlansForBothBackends(t *testing.T) {
 	_, metadata := generateSource(t, `
 function copy[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i]; }
@@ -130,15 +194,19 @@ func TestValidateMetadataRejectsCorruptRuntimeSeams(t *testing.T) {
 		"vulkan version": func(m *Metadata) { m.Targets.SPIRV.Vulkan = "1.2" },
 		"spirv version":  func(m *Metadata) { m.Targets.SPIRV.SPIRV = "1.3" },
 		"feature":        func(m *Metadata) { m.Targets.SPIRV.Features = nil },
-		"program count":  func(m *Metadata) { m.Targets.Web.Programs = nil },
-		"program index":  func(m *Metadata) { m.Targets.Web.Programs[0].Program = 1 },
-		"repeat":         func(m *Metadata) { m.Targets.Web.Programs[0].Repeat = "invalid" },
-		"step kind":      func(m *Metadata) { m.Targets.Web.Programs[0].Steps[0].Kind = "invalid" },
-		"kernel link":    func(m *Metadata) { m.Targets.Web.Programs[0].Steps[0].Kernel = 99 },
-		"entry point":    func(m *Metadata) { m.Targets.Web.Kernels[0].EntryPoint = "wrong" },
-		"workgroup":      func(m *Metadata) { m.Targets.Web.Kernels[0].WorkgroupSize[0] = 0 },
-		"binding group":  func(m *Metadata) { m.Targets.Web.Kernels[0].Bindings[0].Group = 1 },
-		"binding index":  func(m *Metadata) { m.Targets.Web.Kernels[0].Bindings[0].Binding = 2 },
+		"optional order": func(m *Metadata) {
+			m.Targets.SPIRV.Features = append(m.Targets.SPIRV.Features, backend.StorageBuffer16BitAccess)
+		},
+		"target feature split": func(m *Metadata) { m.Targets.Web.Features = []string{backend.ShaderF16} },
+		"program count":        func(m *Metadata) { m.Targets.Web.Programs = nil },
+		"program index":        func(m *Metadata) { m.Targets.Web.Programs[0].Program = 1 },
+		"repeat":               func(m *Metadata) { m.Targets.Web.Programs[0].Repeat = "invalid" },
+		"step kind":            func(m *Metadata) { m.Targets.Web.Programs[0].Steps[0].Kind = "invalid" },
+		"kernel link":          func(m *Metadata) { m.Targets.Web.Programs[0].Steps[0].Kernel = 99 },
+		"entry point":          func(m *Metadata) { m.Targets.Web.Kernels[0].EntryPoint = "wrong" },
+		"workgroup":            func(m *Metadata) { m.Targets.Web.Kernels[0].WorkgroupSize[0] = 0 },
+		"binding group":        func(m *Metadata) { m.Targets.Web.Kernels[0].Bindings[0].Group = 1 },
+		"binding index":        func(m *Metadata) { m.Targets.Web.Kernels[0].Bindings[0].Binding = 2 },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {

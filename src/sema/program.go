@@ -340,6 +340,11 @@ func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, 
 			if err == nil {
 				return flow.ValueArgument{Kind: flow.ValueU32, Bits: uint32(value)}, nil
 			}
+		case types.F16:
+			value, err := strconv.ParseFloat(raw, 64)
+			if bits, ok := types.Float16bits(value); err == nil && ok {
+				return flow.ValueArgument{Kind: flow.ValueF16Bits, Bits: uint32(bits)}, nil
+			}
 		case types.F32:
 			value, err := strconv.ParseFloat(raw, 32)
 			if err == nil {

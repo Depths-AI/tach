@@ -21,7 +21,7 @@ import (
 	"unsafe"
 )
 
-const nativeABI = 2
+const nativeABI = 3
 
 type nativeModule struct {
 	value   *C.tv_module
@@ -152,24 +152,28 @@ type kernelDescription struct {
 }
 type bindingDescription struct{ binding, minimumByteSize uint32 }
 
-func parseModule(r reader) ([]kernelDescription, error) {
+func parseModule(r reader) (uint32, []kernelDescription, error) {
 	version, err := r.u32()
 	if err != nil || version != nativeABI {
-		return nil, errors.New("unsupported native module wire version")
+		return 0, nil, errors.New("unsupported native module wire version")
+	}
+	features, err := r.u32()
+	if err != nil || features > 7 || features&6 != 0 && features&1 == 0 {
+		return 0, nil, errors.New("invalid native module features")
 	}
 	count, err := r.u32()
 	if err != nil || count == 0 || count > 1<<20 {
-		return nil, errors.New("invalid physical kernel count")
+		return 0, nil, errors.New("invalid physical kernel count")
 	}
 	kernels := make([]kernelDescription, count)
 	for index := range kernels {
 		entry, err := r.text()
 		if err != nil || entry == "" {
-			return nil, errors.New("invalid physical kernel entry point")
+			return 0, nil, errors.New("invalid physical kernel entry point")
 		}
 		bindingCount, err := r.u32()
 		if err != nil || bindingCount == 0 || bindingCount > 1<<20 {
-			return nil, fmt.Errorf("kernel %s has an invalid binding count", entry)
+			return 0, nil, fmt.Errorf("kernel %s has an invalid binding count", entry)
 		}
 		bindings := make([]bindingDescription, bindingCount)
 		seen := map[uint32]bool{}
@@ -179,13 +183,13 @@ func parseModule(r reader) ([]kernelDescription, error) {
 				bindings[binding].minimumByteSize, err = r.u32()
 			}
 			if err != nil || seen[bindings[binding].binding] {
-				return nil, fmt.Errorf("kernel %s has invalid bindings", entry)
+				return 0, nil, fmt.Errorf("kernel %s has invalid bindings", entry)
 			}
 			seen[bindings[binding].binding] = true
 		}
 		hasParameters, err := r.u32()
 		if err != nil || hasParameters > 1 {
-			return nil, fmt.Errorf("kernel %s has an invalid parameter declaration", entry)
+			return 0, nil, fmt.Errorf("kernel %s has an invalid parameter declaration", entry)
 		}
 		kernels[index] = kernelDescription{entry: entry, bindings: bindings}
 		if hasParameters == 1 {
@@ -194,11 +198,11 @@ func parseModule(r reader) ([]kernelDescription, error) {
 				kernels[index].parameterByteSize, err = r.u32()
 			}
 			if err != nil || kernels[index].parameterByteSize == 0 || seen[kernels[index].parameterBinding] {
-				return nil, fmt.Errorf("kernel %s has an invalid parameter block", entry)
+				return 0, nil, fmt.Errorf("kernel %s has an invalid parameter block", entry)
 			}
 		}
 	}
-	return kernels, r.end()
+	return features, kernels, r.end()
 }
 
 type wireResource struct {
@@ -404,7 +408,7 @@ func tach_module(pointer unsafe.Pointer, spirv *C.uint8_t, spirvLength C.size_t,
 	if s == nil || output == nil {
 		return -1
 	}
-	kernels, err := parseModule(newReader(description, descriptionLength))
+	features, kernels, err := parseModule(newReader(description, descriptionLength))
 	if err != nil {
 		s.Lock()
 		defer s.Unlock()
@@ -417,7 +421,7 @@ func tach_module(pointer unsafe.Pointer, spirv *C.uint8_t, spirvLength C.size_t,
 	if len(spirvBytes) > 0 {
 		spirvPointer = (*C.uint8_t)(unsafe.Pointer(&spirvBytes[0]))
 	}
-	module := C.tv_module_create(s.context, spirvPointer, C.size_t(len(spirvBytes)), C.uint32_t(len(kernels)))
+	module := C.tv_module_create(s.context, spirvPointer, C.size_t(len(spirvBytes)), C.uint32_t(features), C.uint32_t(len(kernels)))
 	if module == nil {
 		return s.fail(s.nativeError())
 	}

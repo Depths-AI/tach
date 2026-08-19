@@ -193,7 +193,7 @@ func validateArity(op Op, a []uint32) error {
 		return exact(a, 4)
 	case OpCompositeExtract:
 		return atLeast(a, 4)
-	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast,
+	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast,
 		OpSNegate, OpFNegate, OpLogicalNot, OpNot:
 		return exact(a, 3)
 	case OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv,
@@ -323,18 +323,19 @@ type functionInfo struct {
 }
 
 type validation struct {
-	m           *Module
-	defs        map[uint32]int
-	types       map[uint32]*typeInfo
-	valueType   map[uint32]uint32
-	constants   map[uint32]uint64
-	decor       map[uint32]*decorationInfo
-	functions   map[uint32]*functionInfo
-	globalVars  map[uint32]uint32 // id -> storage
-	pointerRoot map[uint32]uint32
-	entryPoints map[uint32]string
-	localSize   map[uint32][3]uint32
-	extImports  map[uint32]string
+	m            *Module
+	defs         map[uint32]int
+	types        map[uint32]*typeInfo
+	valueType    map[uint32]uint32
+	constants    map[uint32]uint64
+	decor        map[uint32]*decorationInfo
+	functions    map[uint32]*functionInfo
+	globalVars   map[uint32]uint32 // id -> storage
+	pointerRoot  map[uint32]uint32
+	entryPoints  map[uint32]string
+	localSize    map[uint32][3]uint32
+	extImports   map[uint32]string
+	capabilities map[uint32]int
 }
 
 // Validate owns the complete validity contract for Tach-generated SPIR-V. It
@@ -349,7 +350,7 @@ func Validate(data []byte) error {
 		m: m, defs: map[uint32]int{}, types: map[uint32]*typeInfo{}, valueType: map[uint32]uint32{},
 		constants: map[uint32]uint64{}, decor: map[uint32]*decorationInfo{}, functions: map[uint32]*functionInfo{},
 		globalVars: map[uint32]uint32{}, pointerRoot: map[uint32]uint32{}, entryPoints: map[uint32]string{}, localSize: map[uint32][3]uint32{},
-		extImports: map[uint32]string{},
+		extImports: map[uint32]string{}, capabilities: map[uint32]int{},
 	}
 	if err := v.validateLayoutAndDefinitions(); err != nil {
 		return err
@@ -418,7 +419,7 @@ func hasResultType(op Op) bool {
 	switch op {
 	case OpConstantTrue, OpConstantFalse, OpConstant, OpConstantComposite, OpConstantNull, OpFunction, OpFunctionParameter,
 		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
-		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate,
+		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
 		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
 		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd,
@@ -462,8 +463,6 @@ func setOnce(dst **uint32, val uint32, name string, id uint32) error {
 
 func (v *validation) validateLayoutAndDefinitions() error {
 	lastSec := 0
-	shaderCaps := 0
-	vmmCaps := 0
 	memory := 0
 	inFunc := false
 	var cur *functionInfo
@@ -486,10 +485,8 @@ func (v *validation) validateLayoutAndDefinitions() error {
 		switch in.Op {
 		case OpCapability:
 			switch a[0] {
-			case CapabilityShader:
-				shaderCaps++
-			case CapabilityVulkanMemoryModel:
-				vmmCaps++
+			case CapabilityShader, CapabilityFloat16, CapabilityStorageBuffer16BitAccess, CapabilityUniformAndStorage16BitAccess, CapabilityVulkanMemoryModel:
+				v.capabilities[a[0]]++
 			default:
 				return fmt.Errorf("capability %d is outside Tach profile", a[0])
 			}
@@ -578,8 +575,8 @@ func (v *validation) validateLayoutAndDefinitions() error {
 			}
 			v.types[a[0]] = &typeInfo{kind: typeInt, width: a[1], signed: a[2] == 1}
 		case OpTypeFloat:
-			if a[1] != 32 {
-				return fmt.Errorf("tach float type must be float32")
+			if a[1] != 16 && a[1] != 32 {
+				return fmt.Errorf("tach float type must be float16 or float32")
 			}
 			v.types[a[0]] = &typeInfo{kind: typeFloat, width: a[1]}
 		case OpTypeVector:
@@ -671,8 +668,20 @@ func (v *validation) validateLayoutAndDefinitions() error {
 	if inFunc {
 		return fmt.Errorf("unterminated OpFunction")
 	}
-	if shaderCaps != 1 || vmmCaps != 1 {
+	if v.capabilities[CapabilityShader] != 1 || v.capabilities[CapabilityVulkanMemoryModel] != 1 {
 		return fmt.Errorf("tach module must declare Shader and VulkanMemoryModel exactly once each")
+	}
+	for capability, count := range v.capabilities {
+		if count != 1 {
+			return fmt.Errorf("tach capability %d must be declared at most once", capability)
+		}
+	}
+	float16 := false
+	for _, t := range v.types {
+		float16 = float16 || t.kind == typeFloat && t.width == 16
+	}
+	if float16 != (v.capabilities[CapabilityFloat16] == 1) {
+		return fmt.Errorf("Float16 capability must exactly match use of float16 types")
 	}
 	if memory != 1 {
 		return fmt.Errorf("tach module must declare one memory model")
@@ -818,6 +827,9 @@ func (v *validation) validateReferencesAndTypes() error {
 			}
 			if t.kind != typeInt && t.kind != typeFloat {
 				return fmt.Errorf("%s scalar constant requires int/float type", ctx)
+			}
+			if t.width == 16 && a[2] > 0xffff {
+				return fmt.Errorf("%s float16 constant has non-zero high bits", ctx)
 			}
 		case OpConstantComposite:
 			t, err := v.requireType(a[0], ctx)
@@ -993,7 +1005,7 @@ func (v *validation) validateReferencesAndTypes() error {
 			if err := v.validateCompositeExtract(in); err != nil {
 				return err
 			}
-		case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast:
+		case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast:
 			if err := v.validateConversion(in); err != nil {
 				return err
 			}
@@ -1306,12 +1318,16 @@ func (v *validation) typeAlignment(id uint32, host bool, seen map[uint32]bool) (
 	defer delete(seen, id)
 	switch t.kind {
 	case typeInt, typeFloat:
-		return 4, nil
+		return t.width / 8, nil
 	case typeVector:
-		if t.lanes == 2 {
-			return 8, nil
+		element, err := v.typeAlignment(t.elem, host, seen)
+		if err != nil {
+			return 0, err
 		}
-		return 16, nil
+		if t.lanes == 2 {
+			return element * 2, nil
+		}
+		return element * 4, nil
 	case typeArray, typeRuntimeArray:
 		return v.typeAlignment(t.elem, host, seen)
 	case typeStruct:
@@ -1525,7 +1541,7 @@ func (v *validation) validateExtInst(in Instruction) error {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s FAbs requires matching float32 scalar/vector operand and result", ctx)
+			return fmt.Errorf("%s FAbs requires matching floating scalar/vector operand and result", ctx)
 		}
 	case GLSL450SAbs:
 		if err := need(1); err != nil {
@@ -1540,21 +1556,21 @@ func (v *validation) validateExtInst(in Instruction) error {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s floating unary intrinsic requires matching float32 scalar/vector operand and result", ctx)
+			return fmt.Errorf("%s floating unary intrinsic requires matching floating scalar/vector operand and result", ctx)
 		}
 	case GLSL450Pow:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s Pow requires matching float32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s Pow requires matching floating scalar/vector operands and result", ctx)
 		}
 	case GLSL450FMin, GLSL450FMax:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s float min/max requires matching float32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s float min/max requires matching floating scalar/vector operands and result", ctx)
 		}
 	case GLSL450UMin, GLSL450UMax:
 		if err := need(2); err != nil {
@@ -1582,7 +1598,7 @@ func (v *validation) validateExtInst(in Instruction) error {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s FClamp requires matching float32 scalar/vector operands and result", ctx)
+			return fmt.Errorf("%s FClamp requires matching floating scalar/vector operands and result", ctx)
 		}
 	case GLSL450SClamp:
 		if err := need(3); err != nil {
@@ -1597,7 +1613,7 @@ func (v *validation) validateExtInst(in Instruction) error {
 		}
 		at := v.types[argTypes[0]]
 		if rt.kind != typeFloat || at == nil || at.kind != typeVector || at.elem != a[0] || baseScalar(at, v.types).kind != typeFloat {
-			return fmt.Errorf("%s Length requires float32 vector input and float32 component result", ctx)
+			return fmt.Errorf("%s Length requires a floating vector input and matching component result", ctx)
 		}
 	case GLSL450Distance:
 		if err := need(2); err != nil {
@@ -1605,21 +1621,21 @@ func (v *validation) validateExtInst(in Instruction) error {
 		}
 		at := v.types[argTypes[0]]
 		if argTypes[0] != argTypes[1] || rt.kind != typeFloat || at == nil || at.kind != typeVector || at.elem != a[0] || baseScalar(at, v.types).kind != typeFloat {
-			return fmt.Errorf("%s Distance requires matching float32 vectors and float32 component result", ctx)
+			return fmt.Errorf("%s Distance requires matching floating vectors and component result", ctx)
 		}
 	case GLSL450Cross:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !allResultType() || rt.kind != typeVector || rt.lanes != 3 || base.kind != typeFloat {
-			return fmt.Errorf("%s Cross requires matching float32x3 operands and result", ctx)
+			return fmt.Errorf("%s Cross requires matching three-lane floating operands and result", ctx)
 		}
 	case GLSL450Normalize:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !allResultType() || rt.kind != typeVector || base.kind != typeFloat {
-			return fmt.Errorf("%s Normalize requires matching float32 vector operand and result", ctx)
+			return fmt.Errorf("%s Normalize requires matching floating vector operand and result", ctx)
 		}
 	default:
 		return fmt.Errorf("%s GLSL.std.450 instruction %d is outside Tach's profile", ctx, a[3])
@@ -1645,7 +1661,7 @@ func (v *validation) validateDot(in Instruction) error {
 	}
 	lt := v.types[ltID]
 	if rt.kind != typeFloat || ltID != rtID || lt == nil || lt.kind != typeVector || lt.elem != a[0] || baseScalar(lt, v.types).kind != typeFloat {
-		return fmt.Errorf("%s requires matching float32 vectors and returns their float32 component type", ctx)
+		return fmt.Errorf("%s requires matching floating vectors and returns their component type", ctx)
 	}
 	v.valueType[a[1]] = a[0]
 	return nil
@@ -1678,6 +1694,8 @@ func (v *validation) validateConversion(in Instruction) error {
 		ok = ss.kind == typeInt && ss.signed && ds.kind == typeFloat
 	case OpConvertUToF:
 		ok = ss.kind == typeInt && !ss.signed && ds.kind == typeFloat
+	case OpFConvert:
+		ok = ss.kind == typeFloat && ds.kind == typeFloat && ss.width != ds.width
 	case OpBitcast:
 		ok = ss.kind == typeInt && ds.kind == typeInt && ss.width == ds.width
 	}
@@ -1851,6 +1869,7 @@ func (v *validation) validateDecorationsAndABI() error {
 	}
 
 	pairs := map[[2]uint32][]uint32{}
+	storage16, uniform16 := false, false
 	for id, storage := range v.globalVars {
 		d := v.decoration(id)
 		vt := v.types[v.valueType[id]]
@@ -1896,6 +1915,13 @@ func (v *validation) validateDecorationsAndABI() error {
 			if storage == StorageUniform && containsRuntime(vt.elem, v.types, map[uint32]bool{}) {
 				return fmt.Errorf("uniform descriptor %%%d contains runtime array", id)
 			}
+			if containsFloat16(vt.elem, v.types, map[uint32]bool{}) {
+				if storage == StorageUniform {
+					uniform16 = true
+				} else {
+					storage16 = true
+				}
+			}
 		case StorageWorkgroup:
 			if d.builtin != nil || d.binding != nil || d.set != nil || d.nonWritable {
 				return fmt.Errorf("workgroup variable %%%d has invalid interface/descriptor decoration", id)
@@ -1906,6 +1932,9 @@ func (v *validation) validateDecorationsAndABI() error {
 		default:
 			return fmt.Errorf("global variable %%%d storage class %d outside Tach profile", id, storage)
 		}
+	}
+	if storage16 != (v.capabilities[CapabilityStorageBuffer16BitAccess] == 1) || uniform16 != (v.capabilities[CapabilityUniformAndStorage16BitAccess] == 1) {
+		return fmt.Errorf("16-bit storage capabilities do not match descriptor types")
 	}
 	return nil
 }
@@ -2020,19 +2049,20 @@ func (v *validation) abiOf(id uint32, memo map[uint32]abiLayout, vis map[uint32]
 	var l abiLayout
 	switch t.kind {
 	case typeInt, typeFloat:
-		l = abiLayout{size: 4, align: 4}
+		l = abiLayout{size: t.width / 8, align: t.width / 8}
 	case typeVector:
 		e := v.types[t.elem]
 		if e == nil || (e.kind != typeInt && e.kind != typeFloat) {
 			return l, fmt.Errorf("vector %%%d has non-host element", id)
 		}
+		width := e.width / 8
 		switch t.lanes {
 		case 2:
-			l = abiLayout{size: 8, align: 8}
+			l = abiLayout{size: width * 2, align: width * 2}
 		case 3:
-			l = abiLayout{size: 12, align: 16}
+			l = abiLayout{size: width * 3, align: width * 4}
 		case 4:
-			l = abiLayout{size: 16, align: 16}
+			l = abiLayout{size: width * 4, align: width * 4}
 		default:
 			return l, fmt.Errorf("invalid vector width")
 		}
@@ -2122,6 +2152,29 @@ func containsRuntime(id uint32, ts map[uint32]*typeInfo, seen map[uint32]bool) b
 			if containsRuntime(m, ts, seen) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func containsFloat16(id uint32, ts map[uint32]*typeInfo, seen map[uint32]bool) bool {
+	if seen[id] {
+		return false
+	}
+	seen[id] = true
+	t := ts[id]
+	if t == nil {
+		return false
+	}
+	if t.kind == typeFloat {
+		return t.width == 16
+	}
+	if t.elem != 0 && containsFloat16(t.elem, ts, seen) {
+		return true
+	}
+	for _, member := range t.members {
+		if containsFloat16(member, ts, seen) {
+			return true
 		}
 	}
 	return false
@@ -2461,7 +2514,7 @@ func valueUses(in Instruction) []uint32 {
 		return []uint32{a[2], a[3]}
 	case OpCompositeExtract:
 		return []uint32{a[2]}
-	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpBitcast, OpSNegate, OpFNegate, OpLogicalNot, OpNot:
+	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast, OpSNegate, OpFNegate, OpLogicalNot, OpNot:
 		return []uint32{a[2]}
 	case OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem, OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual, OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual, OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual, OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd:
 		return []uint32{a[2], a[3]}

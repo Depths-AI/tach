@@ -174,7 +174,7 @@ try {
     }
     if (evaluation.result.value) {
       if (
-        evaluation.result.value.programs !== 11 ||
+        evaluation.result.value.programs !== 14 ||
         evaluation.result.value.presentedFrames !== 35 ||
         evaluation.result.value.pngBytes < 100
       ) {

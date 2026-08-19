@@ -1,6 +1,7 @@
 package sema_test
 
 import (
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"tach/src/ir"
 	"tach/src/parser"
 	"tach/src/sema"
+	"tach/src/types"
 )
 
 func TestParticlesEndToIR(t *testing.T) {
@@ -171,6 +173,77 @@ export function invalid[i](out: buffer<uint32[]>, value: uint32) {
 	_, err = sema.CheckAndLower(m)
 	if err == nil || !strings.Contains(err.Error(), "cannot assign to immutable value value") {
 		t.Fatalf("CheckAndLower error = %v, want immutable-parameter diagnostic", err)
+	}
+}
+
+func TestFloat16LanguageSurface(t *testing.T) {
+	valid := `
+function shape(value: float16x3): float16x3 {
+  const direction = normalize(value);
+  const magnitude = length(value) + distance(value, direction) + dot(value, direction);
+  const crossed = cross(value, direction);
+  return crossed + direction * float16x3(magnitude);
+}
+export function halfMath[i](values: buffer<float16x4[]>, factor: float16) {
+  if (i < values.length) {
+    const value = values[i];
+    const geometry = shape(value.xyz);
+    const wave = sin(value.x) + cos(value.y) + tan(value.z);
+    const exponential = exp(value.x) + exp2(value.y) + log(value.z) + log2(value.w);
+    const rooted = sqrt(abs(value.x)) + rsqrt(value.w);
+    const rounded = floor(value.x) + ceil(value.y) + trunc(value.z);
+    const converted = float16(float32(value.w));
+    values[i] = float16x4(geometry.x + pow(wave, factor), exponential, rooted + rounded, converted);
+  }
+}`
+	parsed, err := parser.Parse("float16.tach", valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := sema.CheckAndLower(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump := ir.Dump(module.Kernel)
+	for _, want := range []string{"float16", "float16x4", "intrinsic normalize", ": float16 -> float32", ": float32 -> float16"} {
+		if !strings.Contains(dump, want) {
+			t.Fatalf("Float16 IR missing %q:\n%s", want, dump)
+		}
+	}
+
+	for _, test := range []struct{ source, want string }{
+		{`export function bad[i](out: buffer<float16[]>) { if (i < out.length) { out[i] = float16(70000.0); } }`, "invalid float16 literal"},
+		{`export function bad[i](out: buffer<float16[]>) { if (i < out.length) { out[i] = out[i] + float32(out[i]); } }`, "matching numeric operands"},
+	} {
+		parsed, parseErr := parser.Parse("invalid-float16.tach", test.source)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil || !strings.Contains(checkErr.Error(), test.want) {
+			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
+		}
+	}
+}
+
+func TestFloat16Encoding(t *testing.T) {
+	for _, test := range []struct {
+		value float64
+		bits  uint16
+	}{
+		{0, 0x0000}, {math.Copysign(0, -1), 0x8000}, {1, 0x3c00}, {-2, 0xc000}, {65504, 0x7bff},
+		{0.00006103515625, 0x0400}, {0.000000059604644775390625, 0x0001},
+		{1.00048828125, 0x3c00}, {1.00146484375, 0x3c02},
+		{math.Nextafter(1.00048828125, 2), 0x3c01}, {math.Nextafter(1.00146484375, 1), 0x3c01},
+	} {
+		bits, ok := types.Float16bits(test.value)
+		if !ok || bits != test.bits {
+			t.Errorf("Float16bits(%g) = %#04x, %v; want %#04x, true", test.value, bits, ok, test.bits)
+		}
+	}
+	for _, value := range []float64{65505, -65505} {
+		if _, ok := types.Float16bits(value); ok {
+			t.Errorf("Float16bits(%g) accepted an out-of-range value", value)
+		}
 	}
 }
 

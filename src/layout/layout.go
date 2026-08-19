@@ -46,21 +46,27 @@ func of(t *types.Type, seen map[string]bool) (TypeLayout, error) {
 		return TypeLayout{}, fmt.Errorf("nil type")
 	}
 	switch t.Kind {
+	case types.F16:
+		return TypeLayout{Size: 2, Align: 2}, nil
 	case types.I32, types.U32, types.F32, types.Atomic:
 		return TypeLayout{Size: 4, Align: 4}, nil
 	case types.Bool:
 		return TypeLayout{}, fmt.Errorf("bool is a value type and has no direct Tach buffer representation")
 	case types.Vector:
-		if t.Elem.Kind != types.I32 && t.Elem.Kind != types.U32 && t.Elem.Kind != types.F32 {
+		if !types.IsNumericScalar(t.Elem) {
 			return TypeLayout{}, fmt.Errorf("vector element %s is not host-shareable", t.Elem)
+		}
+		element, err := of(t.Elem, seen)
+		if err != nil {
+			return TypeLayout{}, err
 		}
 		switch t.Lanes {
 		case 2:
-			return TypeLayout{Size: 8, Align: 8}, nil
+			return TypeLayout{Size: element.Size * 2, Align: element.Align * 2}, nil
 		case 3:
-			return TypeLayout{Size: 12, Align: 16}, nil
+			return TypeLayout{Size: element.Size * 3, Align: element.Align * 4}, nil
 		case 4:
-			return TypeLayout{Size: 16, Align: 16}, nil
+			return TypeLayout{Size: element.Size * 4, Align: element.Align * 4}, nil
 		default:
 			return TypeLayout{}, fmt.Errorf("unsupported vector width %d", t.Lanes)
 		}

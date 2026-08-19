@@ -6,7 +6,10 @@ import type {
   Tach,
 } from "@depths/tach";
 import {
-  denseMatrixProduct,
+  coupledOscillatorsFloat16,
+  coupledOscillatorsFloat32,
+  denseMatrixProductFloat16,
+  denseMatrixProductFloat32,
   type MeshParams,
   meshWorld,
   type MonteCarloParams,
@@ -516,11 +519,27 @@ function matrixValue(row: number, column: number, salt: number): number {
     15) / 31;
 }
 
-function matrixWorkload(gpu: Tach): Workload {
+type FloatingArray = Float16Array | Float32Array;
+type FloatingArrayConstructor<T extends FloatingArray> = new (
+  length: number,
+) => T;
+type MatrixKernel<T extends FloatingArray> = (
+  left: ComputeBuffer<T>,
+  right: ComputeBuffer<T>,
+  output: ComputeBuffer<T>,
+  size: number,
+) => ComputeCommand;
+
+function matrixWorkload<T extends FloatingArray>(
+  gpu: Tach,
+  precision: "FP16" | "FP32",
+  ArrayType: FloatingArrayConstructor<T>,
+  kernel: MatrixKernel<T>,
+): Workload {
   const size = 2048;
   const cells = size * size;
-  const leftValues = new Float32Array(cells);
-  const rightValues = new Float32Array(cells);
+  const leftValues = new ArrayType(cells);
+  const rightValues = new ArrayType(cells);
   for (let row = 0; row < size; row++) {
     for (let column = 0; column < size; column++) {
       const index = row * size + column;
@@ -530,15 +549,15 @@ function matrixWorkload(gpu: Tach): Workload {
   }
   const left = gpu.buffer(leftValues);
   const right = gpu.buffer(rightValues);
-  const output = gpu.buffer(new Float32Array(cells));
+  const output = gpu.buffer(new ArrayType(cells));
   const operations = 2 * size * size * size;
   return {
-    id: "matrix",
+    id: `matrix-${precision.toLowerCase()}`,
     category: "mathematics",
-    name: "Dense matrix algebra",
-    problem: "2048 x 2048 tiled dense matrix multiplication",
+    name: `Dense matrix algebra (${precision})`,
+    problem: `2048 x 2048 ${precision} tiled dense matrix multiplication`,
     dispatches: 1,
-    command: denseMatrixProduct(left, right, output, size),
+    command: kernel(left, right, output, size),
     buffers: [left, right, output],
     units: operations,
     divisor: 1e9,
@@ -548,6 +567,8 @@ function matrixWorkload(gpu: Tach): Workload {
       outputCells: cells,
       floatingPointOperations: operations,
       tile: "16 x 16",
+      precision,
+      matrixBytes: leftValues.byteLength * 3,
     },
     readback: async () => {
       const result = await output.read();
@@ -560,15 +581,16 @@ function matrixWorkload(gpu: Tach): Workload {
       ) {
         let expected = 0;
         for (let k = 0; k < size; k++) {
-          expected += Math.fround(matrixValue(row!, k, 1)) *
-            Math.fround(matrixValue(k, column!, 7));
+          expected += leftValues[row! * size + k]! *
+            rightValues[k * size + column!]!;
         }
         maximumError = Math.max(
           maximumError,
           Math.abs(result[row! * size + column!]! - expected),
         );
       }
-      if (maximumError >= 0.01) {
+      const errorLimit = precision === "FP16" ? 1 : 0.01;
+      if (!Number.isFinite(maximumError) || maximumError >= errorLimit) {
         throw new Error(`matrix reference error ${maximumError}`);
       }
       return {
@@ -576,6 +598,123 @@ function matrixWorkload(gpu: Tach): Workload {
       };
     },
   };
+}
+
+function matrixFloat32Workload(gpu: Tach): Workload {
+  return matrixWorkload(
+    gpu,
+    "FP32",
+    Float32Array,
+    denseMatrixProductFloat32,
+  );
+}
+
+function matrixFloat16Workload(gpu: Tach): Workload {
+  return matrixWorkload(
+    gpu,
+    "FP16",
+    Float16Array,
+    denseMatrixProductFloat16,
+  );
+}
+
+type OscillatorKernel<T extends FloatingArray> = (
+  positions: ComputeBuffer<T>,
+  velocities: ComputeBuffer<T>,
+  steps: number,
+) => ComputeCommand;
+
+function oscillatorWorkload<T extends FloatingArray>(
+  gpu: Tach,
+  precision: "FP16" | "FP32",
+  ArrayType: FloatingArrayConstructor<T>,
+  kernel: OscillatorKernel<T>,
+): Workload {
+  const states = 1 << 18;
+  const steps = 512;
+  const positionsData = new ArrayType(states * 4);
+  const velocitiesData = new ArrayType(states * 4);
+  for (let i = 0; i < positionsData.length; i++) {
+    positionsData[i] = (noise(i, 503) * 2 - 1) * 0.75;
+    velocitiesData[i] = (noise(i, 521) * 2 - 1) * 0.12;
+  }
+  const positions = gpu.buffer(positionsData);
+  const velocities = gpu.buffer(velocitiesData);
+  const operations = states * 4 * steps * 14;
+  return {
+    id: `oscillators-${precision.toLowerCase()}`,
+    category: "physics",
+    name: `Coupled nonlinear oscillators (${precision})`,
+    problem: `${
+      (states * 4).toLocaleString()
+    } coupled oscillators x ${steps} register-resident integration steps`,
+    dispatches: 1,
+    command: kernel(positions, velocities, steps),
+    buffers: [positions, velocities],
+    units: operations,
+    divisor: 1e9,
+    throughputUnit: "GFLOP/s",
+    details: {
+      precision,
+      oscillators: states * 4,
+      vectorStates: states,
+      integrationSteps: steps,
+      floatingPointOperations: operations,
+      stateBytes: positionsData.byteLength + velocitiesData.byteLength,
+    },
+    readback: async () => {
+      const [positionsResult, velocitiesResult] = await Promise.all([
+        positions.read(),
+        velocities.read(),
+      ]);
+      const stride = Math.max(1, Math.trunc(positionsResult.length / 8192));
+      let maximumAmplitude = 0;
+      let sampledEnergy = 0;
+      let checked = 0;
+      for (let i = 0; i < positionsResult.length; i += stride) {
+        const position = positionsResult[i]!;
+        const velocity = velocitiesResult[i]!;
+        if (!Number.isFinite(position + velocity)) {
+          throw new Error("non-finite oscillator state");
+        }
+        maximumAmplitude = Math.max(
+          maximumAmplitude,
+          Math.abs(position),
+          Math.abs(velocity),
+        );
+        sampledEnergy += position * position + velocity * velocity;
+        checked++;
+      }
+      if (
+        maximumAmplitude <= 0.001 || maximumAmplitude >= 2 || sampledEnergy <= 0
+      ) {
+        throw new Error(
+          `oscillator stability bounds failed: amplitude=${maximumAmplitude}, energy=${sampledEnergy}`,
+        );
+      }
+      return {
+        details: { sampledValues: checked, maximumAmplitude, sampledEnergy },
+      };
+    },
+  };
+}
+
+function oscillatorFloat32Workload(gpu: Tach): Workload {
+  return oscillatorWorkload(
+    gpu,
+    "FP32",
+    Float32Array,
+    coupledOscillatorsFloat32,
+  );
+}
+
+function oscillatorFloat16Workload(gpu: Tach): Workload {
+  return oscillatorWorkload(
+    gpu,
+    "FP16",
+    Float16Array,
+    coupledOscillatorsFloat16,
+  );
 }
 
 function monteCarloWorkload(gpu: Tach): Workload {
@@ -827,10 +966,13 @@ export async function runBenchmarks(
   const factories = [
     proceduralWorkload,
     meshWorkload,
-    matrixWorkload,
+    matrixFloat32Workload,
+    matrixFloat16Workload,
     monteCarloWorkload,
     particleWorkload,
     waveWorkload,
+    oscillatorFloat32Workload,
+    oscillatorFloat16Workload,
   ] as const;
   const results: BenchmarkResult[] = [];
   for (const factory of factories) {

@@ -1,6 +1,6 @@
 @docs(
   title("Dense matrix algebra"),
-  summary("Multiplies large dense square matrices with cooperative workgroup tiling."),
+  summary("Compares binary32 and binary16 dense square multiplication with identical cooperative tiling."),
 );
 
 @docs(
@@ -13,7 +13,7 @@
   param(size, "Shared width and height of the square matrices."),
 )
 @workgroup(16, 16)
-function multiply[column, row](
+function multiplyFloat32[column, row](
   left: buffer<float32[]>,
   right: buffer<float32[]>,
   output: buffer<float32[]>,
@@ -50,11 +50,66 @@ function multiply[column, row](
   param(output, "Row-major product matrix."),
   param(size, "Shared matrix width and height."),
 )
-export function denseMatrixProduct(
+export function denseMatrixProductFloat32(
   left: buffer<float32[]>,
   right: buffer<float32[]>,
   output: buffer<float32[]>,
   size: uint32,
 ) {
-  run multiply(left, right, output, size) over[size, size];
+  run multiplyFloat32(left, right, output, size) over[size, size];
+}
+
+@docs(
+  summary("Multiplies one binary16 16 by 16 output tile using shared input tiles."),
+  coordinate(column, "Output column."),
+  coordinate(row, "Output row."),
+  param(left, "Binary16 left row-major matrix."),
+  param(right, "Binary16 right row-major matrix."),
+  param(output, "Binary16 row-major matrix product."),
+  param(size, "Shared width and height of the square matrices."),
+)
+@workgroup(16, 16)
+function multiplyFloat16[column, row](
+  left: buffer<float16[]>,
+  right: buffer<float16[]>,
+  output: buffer<float16[]>,
+  size: uint32,
+) {
+  let leftTile: shared<float16[256]>;
+  let rightTile: shared<float16[256]>;
+  const localColumn = column % 16;
+  const localRow = row % 16;
+  const lane = localRow * 16 + localColumn;
+  let sum = float16(0.0);
+  for (let tile = 0; tile < size; tile += 16) {
+    leftTile[lane] = row < size && tile + localColumn < size
+      ? left[row * size + tile + localColumn] : 0.0;
+    rightTile[lane] = column < size && tile + localRow < size
+      ? right[(tile + localRow) * size + column] : 0.0;
+    workgroupBarrier();
+    for (let offset = 0; offset < 16; offset++) {
+      sum += leftTile[localRow * 16 + uint32(offset)]
+        * rightTile[uint32(offset) * 16 + localColumn];
+    }
+    workgroupBarrier();
+  }
+  if (column < size && row < size) {
+    output[row * size + column] = sum;
+  }
+}
+
+@docs(
+  summary("Computes one complete binary16 dense square matrix product."),
+  param(left, "Binary16 left row-major matrix."),
+  param(right, "Binary16 right row-major matrix."),
+  param(output, "Binary16 row-major product matrix."),
+  param(size, "Shared matrix width and height."),
+)
+export function denseMatrixProductFloat16(
+  left: buffer<float16[]>,
+  right: buffer<float16[]>,
+  output: buffer<float16[]>,
+  size: uint32,
+) {
+  run multiplyFloat16(left, right, output, size) over[size, size];
 }

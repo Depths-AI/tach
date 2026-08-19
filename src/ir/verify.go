@@ -830,7 +830,7 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 		return len(args) > 0
 	}
 	floatVec := func(t *types.Type) bool {
-		return t != nil && t.Kind == types.Vector && t.Elem != nil && t.Elem.Kind == types.F32
+		return t != nil && t.Kind == types.Vector && types.IsFloatLike(t.Elem)
 	}
 	switch x.Kind {
 	case IntrinsicAbs:
@@ -838,23 +838,23 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 			return err
 		}
 		t := args[0]
-		baseOK := t.Kind == types.I32 || t.Kind == types.F32 || t.Kind == types.Vector && (t.Elem.Kind == types.I32 || t.Elem.Kind == types.F32)
+		baseOK := types.IsSignedNumeric(t)
 		if !baseOK || !types.Equal(x.Type, t) {
-			return fmt.Errorf("abs requires int32/float32 scalar or vector and preserves type")
+			return fmt.Errorf("abs requires a signed numeric scalar or vector and preserves type")
 		}
 	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicRSqrt:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("intrinsic %s requires float32 scalar/vector and preserves type", x.Kind)
+			return fmt.Errorf("intrinsic %s requires a floating-point scalar/vector and preserves type", x.Kind)
 		}
 	case IntrinsicPow:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !same() || !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("pow requires matching float32 scalar/vector operands")
+			return fmt.Errorf("pow requires matching floating-point scalar/vector operands")
 		}
 	case IntrinsicMin, IntrinsicMax:
 		if err := need(2); err != nil {
@@ -874,36 +874,36 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 		if err := need(2); err != nil {
 			return err
 		}
-		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, types.TF32) {
-			return fmt.Errorf("dot requires matching float32 vectors and returns float32")
+		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
+			return fmt.Errorf("dot requires matching floating-point vectors and returns their component type")
 		}
 	case IntrinsicLength:
 		if err := need(1); err != nil {
 			return err
 		}
-		if !floatVec(args[0]) || !types.Equal(x.Type, types.TF32) {
-			return fmt.Errorf("length requires a float32 vector and returns float32")
+		if !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
+			return fmt.Errorf("length requires a floating-point vector and returns its component type")
 		}
 	case IntrinsicDistance:
 		if err := need(2); err != nil {
 			return err
 		}
-		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, types.TF32) {
-			return fmt.Errorf("distance requires matching float32 vectors and returns float32")
+		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
+			return fmt.Errorf("distance requires matching floating-point vectors and returns their component type")
 		}
 	case IntrinsicCross:
 		if err := need(2); err != nil {
 			return err
 		}
 		if !same() || !floatVec(args[0]) || args[0].Lanes != 3 || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("cross requires two float32x3 operands")
+			return fmt.Errorf("cross requires matching three-lane floating-point vectors")
 		}
 	case IntrinsicNormalize:
 		if err := need(1); err != nil {
 			return err
 		}
 		if !floatVec(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("normalize requires a float32 vector and preserves type")
+			return fmt.Errorf("normalize requires a floating-point vector and preserves type")
 		}
 	default:
 		return fmt.Errorf("unknown intrinsic %d", x.Kind)

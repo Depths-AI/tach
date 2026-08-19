@@ -12,6 +12,7 @@ export interface HostLayout {
     | "bool"
     | "i32"
     | "u32"
+    | "f16"
     | "f32"
     | "vector"
     | "array"
@@ -92,6 +93,7 @@ export interface ValueSource {
     | "bool"
     | "i32"
     | "u32"
+    | "f16Bits"
     | "f32Bits"
     | "shape"
     | "repeat";

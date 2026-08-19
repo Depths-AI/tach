@@ -72,9 +72,13 @@ func TestValidatorRejectsReservedDoubleUnderscoreIdentifier(t *testing.T) {
 
 func TestRuntimeArrayWrapperKeepsNaturalAlignment(t *testing.T) {
 	a, err := parser.Parse("runtime.tach", `
+type Series = { offset: float16, values: float16[] };
 @workgroup(1)
 export function clear[i](data: buffer<uint32[]>) {
   if (i < data.length) { data[i] = 0; }
+}
+export function clearSeries[i](data: buffer<Series>) {
+  if (i < data.values.length) { data.values[i] = data.offset; }
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +93,44 @@ export function clear[i](data: buffer<uint32[]>) {
 	}
 	if !strings.Contains(out, "data: array<u32>,") || strings.Contains(out, "@align(16) data: array<u32>,") {
 		t.Fatalf("runtime array wrapper has a synthetic fixed-resource alignment:\n%s", out)
+	}
+	if !strings.Contains(out, "var<storage, read_write> _tach_r1_0: _tach_t_Series;") || strings.Contains(out, "data: _tach_t_Series") {
+		t.Fatalf("runtime-tail struct is not the storage root:\n%s", out)
+	}
+	if !strings.Contains(out, "struct _tach_t_Series {\n  f0_offset: f16,") {
+		t.Fatalf("runtime-tail struct has a synthetic fixed-struct alignment:\n%s", out)
+	}
+}
+
+func TestFloat16WGSLFeatureAndTypes(t *testing.T) {
+	a, err := parser.Parse("float16.tach", `
+export function half[i](values: buffer<float16x2[]>, factor: float16) {
+  if (i < values.length) { values[i] = sin(values[i]) * float16x2(factor); }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"enable f16;", "vec2<f16>", "f0: f16"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("Float16 WGSL missing %q:\n%s", want, out)
+		}
+	}
+	if err := wgsl.Validate(out); err != nil {
+		t.Fatal(err)
+	}
+	if err := wgsl.Validate("fn ok() { return; }\nenable f16;"); err == nil {
+		t.Fatal("validator accepted enable directive after a declaration")
+	}
+	if err := wgsl.Validate("enable unknown; fn ok() { return; }"); err == nil {
+		t.Fatal("validator accepted an unknown enable directive")
 	}
 }
 

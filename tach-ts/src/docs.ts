@@ -5,6 +5,7 @@ export interface TypeRef {
     | "bool"
     | "i32"
     | "u32"
+    | "f16"
     | "f32"
     | "vector"
     | "struct"
@@ -246,6 +247,7 @@ export function typeScriptType(type: TypeRef): string {
       return "boolean";
     case "i32":
     case "u32":
+    case "f16":
     case "f32":
     case "atomic":
       return "number";
@@ -274,6 +276,8 @@ function typedArray(type: TypeRef): string | undefined {
     ? "Int32Array"
     : element.kind === "u32"
     ? "Uint32Array"
+    : element.kind === "f16"
+    ? "Float16Array"
     : element.kind === "f32"
     ? "Float32Array"
     : undefined;

@@ -82,6 +82,55 @@ func TestParticlesSPIRV(t *testing.T) {
 	}
 }
 
+func TestFloat16SPIRVCapabilitiesTypesConstantsAndConversions(t *testing.T) {
+	bin := emitSource(t, "float16.tach", `
+@workgroup(1)
+export function half[i](values: buffer<float16[]>, factor: float16) {
+  if (i < values.length) {
+    let one: float16 = 1.0;
+    values[i] = float16(float32(values[i] * factor)) + one;
+  }
+}`)
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps, halfTypes := map[uint32]int{}, map[uint32]bool{}
+	var constants, one, converts, arrayLengths int
+	for _, in := range m.Instructions {
+		switch in.Op {
+		case spirv.OpCapability:
+			caps[in.Operands[0]]++
+		case spirv.OpTypeFloat:
+			if in.Operands[1] == 16 {
+				halfTypes[in.Operands[0]] = true
+			}
+		case spirv.OpConstant:
+			if halfTypes[in.Operands[0]] {
+				constants++
+				if in.Operands[2] == 0x3c00 {
+					one++
+				}
+				if in.Operands[2]&0xffff0000 != 0 {
+					t.Fatalf("Float16 constant used high literal bits: %v", in.Operands)
+				}
+			}
+		case spirv.OpFConvert:
+			converts++
+		case spirv.OpArrayLength:
+			arrayLengths++
+		}
+	}
+	for _, capability := range []uint32{spirv.CapabilityShader, spirv.CapabilityFloat16, spirv.CapabilityStorageBuffer16BitAccess, spirv.CapabilityUniformAndStorage16BitAccess, spirv.CapabilityVulkanMemoryModel} {
+		if caps[capability] != 1 {
+			t.Fatalf("capability %d count = %d, want 1", capability, caps[capability])
+		}
+	}
+	if len(halfTypes) != 1 || constants == 0 || one != 1 || converts != 2 || arrayLengths != 0 {
+		t.Fatalf("Float16 SPIR-V types/constants/one/conversions/physical lengths = %d/%d/%d/%d/%d, want 1/>0/1/2/0", len(halfTypes), constants, one, converts, arrayLengths)
+	}
+}
+
 func TestViewProjectionIsValidSPIRV16(t *testing.T) {
 	bin := emitSource(t, "view.tach", `
 function paint[i](pixels: buffer<float32x4[]>) {

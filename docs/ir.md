@@ -374,6 +374,14 @@ structs, atomics, fixed/runtime arrays, and void. Host padding, WGSL wrappers,
 SPIR-V pointer/storage types, and descriptor decorations are later physical
 representations.
 
+`float16` and its two-, three-, and four-lane vectors are ordinary logical
+floating types, not packed integers or backend annotations. Constants carry
+canonical source text until emission; semantic checking proves they are finite
+and inside the binary16 literal range, then emission rounds them to binary16
+with round-to-nearest-even. `Convert` is the sole boundary between binary16 and
+other numeric widths, so neither optimizer nor backend may silently widen an
+f16 expression.
+
 Observable effects are stores, atomics, and barriers. Loads from mutable or
 shared memory cannot be freely reused. Loads from inferred read-only buffers
 can be commoned when place identity and structured dominance match.
@@ -482,6 +490,7 @@ Workgroup
 Storage bindings
 Optional parameter block
 Coordinate mapping
+Optional logical lengths for scalar f16 runtime arrays
 ```
 
 It can internalize safe repeat, prune now-unused value parameters, select a
@@ -501,6 +510,13 @@ View               optional terminal projection step and extent
 A dispatch step refers to a physical-kernel index, domain shapes, resource
 sources, and parameter sources. Physical identity is therefore target-specific
 and downstream of logical dispatch identity.
+
+A scalar `float16[]`, direct or trailing a struct prefix, may require physical
+padding at a host/backend boundary. When its stage uses `.length`, target
+planning supplies the checked logical element count and tail path as a hidden
+value. WGSL and SPIR-V both consume that value instead of deriving Tach
+semantics from the physical binding range. No IR-level padding element is
+invented.
 
 The current planner creates one physical kernel for every ordinary dispatch.
 It does not deduplicate identical stage clones or fuse adjacent source
@@ -526,6 +542,8 @@ stores the word in a storage buffer.
 | `If` result | private mutable local | merge block and `OpPhi` |
 | `Loop` carrier | generated mutable local | header `OpPhi` |
 | intrinsic | WGSL builtin | core or GLSL.std.450 instruction |
+| `float16` | `f16` after `enable f16;` | 16-bit `OpTypeFloat` plus exact capabilities |
+| f16/f32 conversion | constructor conversion | `OpFConvert` |
 | atomic | WGSL atomic builtin | `OpAtomic*` at QueueFamily or Workgroup |
 | source barrier | WGSL barrier | `OpControlBarrier` with availability/visibility |
 | plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier2` in Tach's Vulkan 1.3 runtime |

@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"math"
 )
 
 type Kind uint8
@@ -12,6 +13,7 @@ const (
 	Bool
 	I32
 	U32
+	F16
 	F32
 	Vector
 	Struct
@@ -39,6 +41,7 @@ var (
 	TBool = &Type{Kind: Bool, Name: "bool"}
 	TI32  = &Type{Kind: I32, Name: "int32"}
 	TU32  = &Type{Kind: U32, Name: "uint32"}
+	TF16  = &Type{Kind: F16, Name: "float16"}
 	TF32  = &Type{Kind: F32, Name: "float32"}
 )
 
@@ -52,7 +55,7 @@ func (t *Type) String() string {
 		return "<nil>"
 	}
 	switch t.Kind {
-	case Void, Bool, I32, U32, F32:
+	case Void, Bool, I32, U32, F16, F32:
 		return t.Name
 	case Vector:
 		return fmt.Sprintf("%sx%d", t.Elem, t.Lanes)
@@ -77,7 +80,7 @@ func Equal(a, b *Type) bool {
 		return false
 	}
 	switch a.Kind {
-	case Void, Bool, I32, U32, F32:
+	case Void, Bool, I32, U32, F16, F32:
 		return true
 	case Vector:
 		return a.Lanes == b.Lanes && Equal(a.Elem, b.Elem)
@@ -94,10 +97,10 @@ func Equal(a, b *Type) bool {
 }
 
 func IsScalar(t *Type) bool {
-	return t != nil && (t.Kind == I32 || t.Kind == U32 || t.Kind == F32 || t.Kind == Bool)
+	return t != nil && (t.Kind == I32 || t.Kind == U32 || t.Kind == F16 || t.Kind == F32 || t.Kind == Bool)
 }
 func IsNumericScalar(t *Type) bool {
-	return t != nil && (t.Kind == I32 || t.Kind == U32 || t.Kind == F32)
+	return t != nil && (t.Kind == I32 || t.Kind == U32 || t.Kind == F16 || t.Kind == F32)
 }
 func IsNumeric(t *Type) bool {
 	return IsNumericScalar(t) || (t != nil && t.Kind == Vector && IsNumericScalar(t.Elem))
@@ -107,7 +110,7 @@ func IsIntegerLike(t *Type) bool {
 	return IsInteger(t) || t != nil && t.Kind == Vector && IsInteger(t.Elem)
 }
 func IsFloatLike(t *Type) bool {
-	return t != nil && (t.Kind == F32 || t.Kind == Vector && t.Elem != nil && t.Elem.Kind == F32)
+	return t != nil && (t.Kind == F16 || t.Kind == F32 || t.Kind == Vector && t.Elem != nil && (t.Elem.Kind == F16 || t.Elem.Kind == F32))
 }
 func ShiftCountType(t *Type) *Type {
 	if IsInteger(t) {
@@ -125,27 +128,25 @@ func IsSignedNumeric(t *Type) bool {
 	if t == nil {
 		return false
 	}
-	if t.Kind == I32 || t.Kind == F32 {
+	if t.Kind == I32 || t.Kind == F16 || t.Kind == F32 {
 		return true
 	}
 	return t.Kind == Vector && IsSignedNumeric(t.Elem)
 }
 
-// ContainsRuntimeArray is true when the type has a runtime-sized tail, directly
-// or through a nested structure. Such values can be addressed in buffers but
-// cannot be loaded, constructed, passed by value, or used in parameter blocks.
-func ContainsRuntimeArray(t *Type) bool {
+func Contains(t *Type, kind Kind) bool {
 	if t == nil {
 		return false
 	}
-	switch t.Kind {
-	case RuntimeArray:
+	if t.Kind == kind {
 		return true
-	case FixedArray:
-		return ContainsRuntimeArray(t.Elem)
+	}
+	switch t.Kind {
+	case Vector, Atomic, FixedArray, RuntimeArray:
+		return Contains(t.Elem, kind)
 	case Struct:
 		for _, f := range t.Fields {
-			if ContainsRuntimeArray(f.Type) {
+			if Contains(f.Type, kind) {
 				return true
 			}
 		}
@@ -153,13 +154,18 @@ func ContainsRuntimeArray(t *Type) bool {
 	return false
 }
 
+// ContainsRuntimeArray is true when the type has a runtime-sized tail, directly
+// or through a nested structure. Such values can be addressed in buffers but
+// cannot be loaded, constructed, passed by value, or used in parameter blocks.
+func ContainsRuntimeArray(t *Type) bool { return Contains(t, RuntimeArray) }
+
 // IsConstructible is the value-domain counterpart to IsHostShareable.
 func IsConstructible(t *Type) bool {
 	if t == nil || ContainsRuntimeArray(t) {
 		return false
 	}
 	switch t.Kind {
-	case Bool, I32, U32, F32:
+	case Bool, I32, U32, F16, F32:
 		return true
 	case Vector:
 		return IsConstructible(t.Elem)
@@ -178,7 +184,7 @@ func IsHostShareable(t *Type) bool {
 		return false
 	}
 	switch t.Kind {
-	case I32, U32, F32:
+	case I32, U32, F16, F32:
 		return true
 	case Vector:
 		return IsHostShareable(t.Elem)
@@ -220,8 +226,16 @@ func ParseBuiltin(name string) *Type {
 		return TI32
 	case "uint32":
 		return TU32
+	case "float16":
+		return TF16
 	case "float32":
 		return TF32
+	case "float16x2":
+		return Vec(TF16, 2)
+	case "float16x3":
+		return Vec(TF16, 3)
+	case "float16x4":
+		return Vec(TF16, 4)
 	case "float32x2":
 		return Vec(TF32, 2)
 	case "float32x3":
@@ -244,31 +258,14 @@ func ParseBuiltin(name string) *Type {
 	return nil
 }
 
-func ContainsAtomic(t *Type) bool {
-	if t == nil {
-		return false
-	}
-	switch t.Kind {
-	case Atomic:
-		return true
-	case FixedArray, RuntimeArray:
-		return ContainsAtomic(t.Elem)
-	case Struct:
-		for _, f := range t.Fields {
-			if ContainsAtomic(f.Type) {
-				return true
-			}
-		}
-	}
-	return false
-}
+func ContainsAtomic(t *Type) bool { return Contains(t, Atomic) }
 
 func IsWorkgroupStorable(t *Type) bool {
 	if t == nil || ContainsRuntimeArray(t) {
 		return false
 	}
 	switch t.Kind {
-	case I32, U32, F32:
+	case I32, U32, F16, F32:
 		return true
 	case Vector:
 		return IsWorkgroupStorable(t.Elem)
@@ -289,4 +286,26 @@ func IsWorkgroupStorable(t *Type) bool {
 
 func IsTransientElement(t *Type) bool {
 	return t != nil && IsHostShareable(t) && !ContainsRuntimeArray(t) && !ContainsAtomic(t)
+}
+
+// Float16bits converts a finite value to IEEE 754 binary16 using
+// round-to-nearest, ties-to-even. The boolean is false only for NaN, infinity,
+// or finite values outside binary16's range.
+func Float16bits(value float64) (uint16, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > 65504 {
+		return 0, false
+	}
+	sign, magnitude := uint16(0), math.Abs(value)
+	if math.Signbit(value) {
+		sign = 0x8000
+	}
+	if magnitude < math.Ldexp(1, -14) {
+		return sign | uint16(math.RoundToEven(math.Ldexp(magnitude, 24))), true
+	}
+	exponent := math.Ilogb(magnitude)
+	significand := uint16(math.RoundToEven(math.Ldexp(magnitude, 10-exponent)))
+	if significand == 2048 {
+		exponent, significand = exponent+1, 1024
+	}
+	return sign | uint16(exponent+15)<<10 | (significand - 1024), true
 }

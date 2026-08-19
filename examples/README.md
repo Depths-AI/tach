@@ -5,7 +5,7 @@ through a library. These files are how Tach asks you to *describe* GPU work
 yourself: small functions that look like TypeScript, compiled once, then
 called from ordinary application code.
 
-This folder is not an app and not a speed test. It is a set of eleven short
+This folder is not an app and not a speed test. It is a set of fourteen short
 programs that together cover the language you will actually write. Each
 program exists because it teaches one idea that is easy to miss if you only
 ever saw `array.map`. Read them in order the first time. After that, jump
@@ -57,10 +57,11 @@ past the end of the array. The `if (i < data.length)` you will keep seeing
 is not timid style. It is how you ignore those extra runs. Forgetting it
 is the most common first bug.
 
-**Typed numbers.** There is no JavaScript `number`. `float32` is a 32-bit
-float, `int32` / `uint32` are 32-bit integers, and `float32x4` is four
-floats in one value (a pixel, a position, a color). You write `2.0` when
-you mean a float and `2` when you mean an unsigned integer.
+**Typed numbers.** There is no JavaScript `number`. `float16` is a 16-bit
+float, `float32` is a 32-bit float, `int32` / `uint32` are 32-bit integers,
+and `float32x4` is four floats in one value (a pixel, a position, a color).
+Binary16 is explicit because it trades range and precision for half-sized
+storage and hardware throughput where supported.
 
 **`export` means "call me from TypeScript."** A function without `export`
 is private GPU glue. After `tach build`, only the exported names appear in
@@ -76,7 +77,7 @@ with `@depths/tach` and the generated functions.
 examples/
   tach.json          project name and generated package name
   core/              everyday language
-    scalars.tach     multiply an array
+    scalars.tach     multiply float32 and float16 arrays
     bitwise.tach     integer bit operations
     control.tach     loops and branches
     for.tach         for-loops and vectors
@@ -94,6 +95,9 @@ under it. There is no source list and no webpack config for kernels.
 | You call this from TypeScript | It lives in | In one sentence |
 |---|---|---|
 | `scale` | `core/scalars.tach` | Multiply every number by a factor. |
+| `scaleFloat16` | `core/scalars.tach` | Keep the same operation in binary16 end to end. |
+| `float16Math` | `core/scalars.tach` | Exercise binary16 scalar, vector, and geometry math. |
+| `halveFloat16` | `core/scalars.tach` | Carry a binary16 constant through an orchestration plan. |
 | `bitwise` | `core/bitwise.tach` | Do the same bit math at every index. |
 | `transform` | `core/control.tach` | Walk a strided slice, add, maybe write back. |
 | `reduceLanes` | `core/for.tach` | Sum each group of four integers. |
@@ -130,6 +134,25 @@ array `[1, 2, 3, 4]` becomes `[24, 48, 72, 96]`.
 This file is first because every other example reuses its shape: a
 coordinate, a buffer, a small constant from TypeScript, and a bounds
 check. If `scale` makes sense, you can read the rest.
+
+## The Float16 trio - smaller values, real tradeoffs
+
+`scaleFloat16` repeats `scale` with `float16` data so the difference stays
+visible: TypeScript supplies a `Float16Array`, every stored element occupies
+two bytes, and arithmetic remains binary16 through WGSL and SPIR-V.
+`float16Math` then exercises scalar, vector, transcendental, and geometric
+operations without silently widening them. Its `Float16Series` input also
+proves that a prefixed runtime tail keeps its exact `.length` when physical GPU
+alignment needs extra bytes. `halveFloat16` carries an exact binary16 constant
+through a public orchestration plan, covering the same type at the multi-stage
+boundary.
+
+Tach checks the optional WebGPU and Vulkan Float16 requirements automatically,
+including direct and prefixed-tail byte extents that require private physical
+padding. Use binary16 when its storage, bandwidth, or arithmetic benefit matters
+and the algorithm can tolerate roughly three decimal digits of precision and a
+maximum finite magnitude of 65504. Smaller is not automatically more accurate
+or faster.
 
 ## `bitwise` - 32-bit integers are not JavaScript numbers
 
@@ -337,7 +360,7 @@ imports `tach` from `@depths/tach`. The same TypeScript runs in a
 browser (WebGPU) and in Deno (Vulkan). You do not choose a backend.
 
 The repository's browser and Deno tests compile this project and call
-every public function. They are how we know the eleven programs still
+every public function. They are how we know the fourteen programs still
 mean the same thing on both hosts. A separate project, `showcase-ts`,
 measures large workloads. It is not this folder.
 

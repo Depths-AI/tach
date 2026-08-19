@@ -60,6 +60,7 @@ struct tv_context {
   VkPhysicalDeviceProperties properties;
   VkPhysicalDeviceMemoryProperties memory;
   uint32_t loader_version;
+  uint32_t optional_features;
   VkCommandPool command_pool;
   char error[512];
 #define FIELD(name) PFN_vk##name name;
@@ -82,6 +83,7 @@ struct tv_buffer {
   void *mapped;
   VkDeviceSize allocation_size;
   uint32_t size;
+  uint32_t capacity;
   VkMemoryPropertyFlags properties;
 };
 
@@ -205,7 +207,8 @@ static int select_device(tv_context *context, int high_performance) {
     VkPhysicalDeviceProperties properties;
     context->GetPhysicalDeviceProperties(devices[index], &properties);
     if (!version_at_least(properties.apiVersion, VK_API_VERSION_1_3)) continue;
-    VkPhysicalDeviceVulkan12Features features12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    VkPhysicalDeviceVulkan11Features features11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+    VkPhysicalDeviceVulkan12Features features12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &features11 };
     VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &features12 };
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13 };
     context->GetPhysicalDeviceFeatures2(devices[index], &features);
@@ -215,6 +218,9 @@ static int select_device(tv_context *context, int high_performance) {
     int rank = device_rank(properties.deviceType, high_performance);
     if (rank < best_rank) {
       best_rank = rank; context->physical = devices[index]; context->queue_family = family; context->properties = properties;
+      context->optional_features = (features12.shaderFloat16 ? TV_FEATURE_FLOAT16 : 0) |
+        (features11.storageBuffer16BitAccess ? TV_FEATURE_STORAGE16 : 0) |
+        (features11.uniformAndStorageBuffer16BitAccess ? TV_FEATURE_UNIFORM16 : 0);
     }
   }
   free(devices);
@@ -236,7 +242,11 @@ tv_context *tv_open(int high_performance) {
   if (!result(context, "vkCreateInstance", create_instance(&instance_info, NULL, &context->instance)) || !load_instance(context) || !select_device(context, high_performance)) goto fail;
   float priority = 1.0f;
   VkDeviceQueueCreateInfo queue = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = context->queue_family, .queueCount = 1, .pQueuePriorities = &priority };
-  VkPhysicalDeviceVulkan12Features features12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .vulkanMemoryModel = VK_TRUE };
+  VkPhysicalDeviceVulkan11Features features11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+    .storageBuffer16BitAccess = !!(context->optional_features & TV_FEATURE_STORAGE16),
+    .uniformAndStorageBuffer16BitAccess = !!(context->optional_features & TV_FEATURE_UNIFORM16) };
+  VkPhysicalDeviceVulkan12Features features12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &features11,
+    .shaderFloat16 = !!(context->optional_features & TV_FEATURE_FLOAT16), .vulkanMemoryModel = VK_TRUE };
   VkPhysicalDeviceVulkan13Features features13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &features12, .synchronization2 = VK_TRUE, .shaderZeroInitializeWorkgroupMemory = VK_TRUE };
   VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13, .features.robustBufferAccess = VK_TRUE };
   VkDeviceCreateInfo device_info = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features, .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue };
@@ -284,7 +294,7 @@ static tv_buffer *make_buffer(tv_context *context, uint32_t size, VkBufferUsageF
                               VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred) {
   tv_buffer *buffer = (tv_buffer *)calloc(1, sizeof(*buffer));
   if (!buffer) { set_error(context, "out of memory while creating a buffer"); return NULL; }
-  buffer->context = context; buffer->size = size;
+  buffer->context = context; buffer->size = size; buffer->capacity = size;
   VkBufferCreateInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
   if (!result(context, "vkCreateBuffer", context->CreateBuffer(context->device, &info, NULL, &buffer->buffer))) goto fail;
   VkMemoryRequirements requirements;
@@ -361,7 +371,7 @@ static int immediate_transfer(tv_buffer *device_buffer, tv_buffer *staging, int 
   if (!result(context, "vkDeviceWaitIdle", context->DeviceWaitIdle(context->device))) return 0;
   VkCommandBuffer commands;
   if (!allocate_commands(context, &commands)) return 0;
-  VkBufferCopy copy = { .size = device_buffer->size };
+  VkBufferCopy copy = { .size = device_buffer->capacity };
   if (upload) {
     context->CmdCopyBuffer(commands, staging->buffer, device_buffer->buffer, 1, &copy);
     transfer_barrier(context, commands, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -384,16 +394,20 @@ static int immediate_transfer(tv_buffer *device_buffer, tv_buffer *staging, int 
 
 tv_buffer *tv_buffer_create(tv_context *context, uint32_t size, const uint8_t *initial) {
   if (!context || !size || size > context->properties.limits.maxStorageBufferRange) { if (context) set_error(context, "invalid storage buffer size %u", size); return NULL; }
-  tv_buffer *buffer = make_buffer(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+  uint64_t padded = ((uint64_t)size + 3u) & ~3ull;
+  if (padded > UINT32_MAX || padded > context->properties.limits.maxStorageBufferRange) { set_error(context, "storage buffer size %u cannot satisfy transfer alignment", size); return NULL; }
+  uint32_t capacity = (uint32_t)padded;
+  tv_buffer *buffer = make_buffer(context, capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
   if (!buffer) return NULL;
+  buffer->size = size;
   if (initial && !tv_buffer_write(buffer, initial, size)) { free_buffer(buffer); return NULL; }
   return buffer;
 }
 
 int tv_buffer_write(tv_buffer *buffer, const uint8_t *bytes, uint32_t length) {
   if (!buffer || !bytes || length != buffer->size) return buffer ? set_error(buffer->context, "buffer write length %u does not equal %u", length, buffer->size) : 0;
-  tv_buffer *staging = make_buffer(buffer->context, length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+  tv_buffer *staging = make_buffer(buffer->context, buffer->capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   if (!staging) return 0;
   int ok = host_copy(staging, (uint8_t *)bytes, length, 0, 1) && immediate_transfer(buffer, staging, 1);
@@ -403,7 +417,7 @@ int tv_buffer_write(tv_buffer *buffer, const uint8_t *bytes, uint32_t length) {
 
 int tv_buffer_read(tv_buffer *buffer, uint8_t *output, uint32_t length) {
   if (!buffer || !output || length != buffer->size) return buffer ? set_error(buffer->context, "buffer read length %u does not equal %u", length, buffer->size) : 0;
-  tv_buffer *staging = make_buffer(buffer->context, length, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+  tv_buffer *staging = make_buffer(buffer->context, buffer->capacity, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   if (!staging) return 0;
   int ok = immediate_transfer(buffer, staging, 0) && host_copy(staging, output, length, 0, 0);
@@ -417,9 +431,10 @@ void tv_buffer_destroy(tv_buffer *buffer) {
   free_buffer(buffer);
 }
 
-tv_module *tv_module_create(tv_context *context, const uint8_t *spirv, size_t length, uint32_t kernel_count) {
+tv_module *tv_module_create(tv_context *context, const uint8_t *spirv, size_t length, uint32_t features, uint32_t kernel_count) {
   uint32_t magic = 0, version = 0;
   if (!context || !spirv || length < 20 || length % 4 || !kernel_count) return context ? (set_error(context, "invalid SPIR-V module"), NULL) : NULL;
+  if (features & ~context->optional_features) { set_error(context, "Vulkan device lacks required 16-bit shader or storage features"); return NULL; }
   memcpy(&magic, spirv, 4); memcpy(&version, spirv + 4, 4);
   if (magic != 0x07230203 || version != 0x00010600) { set_error(context, "SPIR-V module must use version 1.6"); return NULL; }
   tv_module *module = (tv_module *)calloc(1, sizeof(*module));

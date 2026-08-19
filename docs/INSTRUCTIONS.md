@@ -374,7 +374,8 @@ module.
 Public names have an additional host-language constraint. Type names, exported
 function names, and exported parameter names must be portable ASCII
 JavaScript/TypeScript identifiers and cannot be TypeScript keywords. Type names
-also cannot be `Float32Array`, `Int32Array`, `Uint32Array`, or `ReadonlyArray`.
+also cannot be `Float16Array`, `Float32Array`, `Int32Array`, `Uint32Array`, or
+`ReadonlyArray`.
 Private helpers and stages may use the broader Tach Unicode identifier syntax,
 but portable ASCII remains the least surprising application convention.
 
@@ -980,7 +981,7 @@ Arguments of `run` are also intentionally constrained. A buffer argument must
 directly name one public buffer parameter or one earlier transient declaration;
 arbitrary indexing, conditionals, and buffer-producing expressions are invalid.
 A value argument may be a matching public value, a nested field of one, a
-supported literal, or-when the stage formal is `uint32`-an earlier checked
+supported literal, or, when the stage formal is `uint32`, an earlier checked
 shape. These restrictions keep orchestration declarative and make all resource
 and parameter sources knowable before GPU execution.
 
@@ -1030,6 +1031,7 @@ Tach scalar types are explicit:
 | `bool` | `true` or `false`; value-only outside parameter blocks |
 | `int32` | signed 32-bit integer |
 | `uint32` | unsigned 32-bit integer |
+| `float16` | IEEE 754 binary16 |
 | `float32` | IEEE 754 single precision |
 | `void` | absence of a helper result |
 
@@ -1044,9 +1046,22 @@ ordinary type on its own.
 
 Use `uint32` for coordinates, counts, lengths, indices, masks whose ordering is
 unsigned, and program shapes. Use `int32` for signed integer arithmetic. Use
-`float32` for numerical work. Host TypeScript represents all three numeric
-scalars as `number`, but generated codecs enforce the Tach range and
-interpretation.
+`float32` for general numerical work. Use `float16` deliberately when its
+half-sized storage, bandwidth, or hardware throughput matters and the
+algorithm tolerates its much smaller range and precision. Host TypeScript
+represents all four numeric scalars as `number`. Generated codecs enforce
+integer ranges, boolean representation, aggregate shape, and each declared
+floating width. A Float16 buffer uses `Float16Array` on the host and remains
+binary16 through arithmetic and both shader backends; it is not storage sugar
+for widened float32.
+
+Float16 is an optional GPU feature. WebGPU execution requires `shader-f16`.
+Vulkan execution requires `shaderFloat16` and the relevant 16-bit
+storage/uniform feature according to how the project uses the type. A host
+session enables supported Float16 functionality when it opens; each generated
+module records its exact requirements, and command preparation checks them. A
+Float16 command fails on unsupported hardware, while a module without Float16
+retains the ordinary feature floor.
 
 `bool` can be passed as a plain parameter and used in local values. It has no
 direct storage-buffer representation, so do not place it in buffer-backed
@@ -1058,6 +1073,7 @@ documented `uint32` convention such as `0` and `1`.
 Tach provides two-, three-, and four-lane vectors for every numeric scalar:
 
 ```text
+float16x2  float16x3  float16x4
 float32x2  float32x3  float32x4
 int32x2    int32x3    int32x4
 uint32x2   uint32x3   uint32x4
@@ -1125,8 +1141,8 @@ array may place that array only in its final field and is a storage shape, not a
 whole constructible value.
 
 All structs are emitted as readonly TypeScript shapes. Match exact field names
-when creating host values; generated codecs reject missing, extra, malformed,
-or out-of-range data.
+when creating host values; generated codecs reject missing or extra fields,
+wrong vector/array widths, malformed values, and out-of-range integers.
 
 ## 29. Runtime and fixed arrays
 
@@ -1233,7 +1249,7 @@ host data:
 
 | Tach storage value | TypeScript representation |
 |---|---|
-| `int32`, `uint32`, `float32` | `number` |
+| `int32`, `uint32`, `float16`, `float32` | `number` |
 | storage atomic | `number` |
 | numeric vector | readonly numeric tuple |
 | named struct | generated readonly object |
@@ -1252,7 +1268,7 @@ const positions: readonly (readonly [number, number, number])[] = [
 ```
 
 Scalar, two-lane, and four-lane runtime arrays are tightly packed and can use
-matching `Float32Array`, `Int32Array`, or `Uint32Array` values. Readback
+matching `Float16Array`, `Float32Array`, `Int32Array`, or `Uint32Array` values. Readback
 preserves an accepted typed-array representation where possible.
 
 Struct field order determines layout even though object-literal order does
@@ -1275,10 +1291,12 @@ explain memory-size differences and prevent incorrect typed-array assumptions:
 
 | Tach type | Size | Alignment |
 |---|---:|---:|
+| `float16` | 2 | 2 |
 | `int32`, `uint32`, `float32`, integer atomic | 4 | 4 |
-| two-lane numeric vector | 8 | 8 |
-| three-lane numeric vector | 12 | 16 |
-| four-lane numeric vector | 16 | 16 |
+| `float16x2`, `float16x3`, `float16x4` | 4 / 6 / 8 | 4 / 8 / 8 |
+| 32-bit two-lane numeric vector | 8 | 8 |
+| 32-bit three-lane numeric vector | 12 | 16 |
+| 32-bit four-lane numeric vector | 16 | 16 |
 
 A host-visible struct has at least 16-byte alignment. Each field begins at its
 required alignment; the final struct extent is rounded to its alignment. These
@@ -1298,6 +1316,11 @@ has `position` at byte 0, `mass` at byte 12, `velocity` at byte 16, and a
 fields.
 
 Runtime-array element stride is the element size rounded to its alignment.
+A direct odd-length `float16[]` remains tightly packed at two bytes per element;
+the runtime/backend privately handles four-byte transfer and WebGPU binding
+padding without changing `.length` or exposing a phantom element.
+A trailing scalar `float16[]` receives the same treatment when its struct
+prefix leaves the complete logical byte extent off a four-byte boundary.
 A struct may have one runtime-array tail after a fixed prefix. Multi-byte
 values use little-endian representation. A fixed-size public buffer's physical
 allocation is rounded to 16 bytes; the host value still contains only its
@@ -1325,6 +1348,10 @@ context where available. Without context:
 - a fractional or exponent literal infers `float32`; and
 - unary minus gives a whole literal signed `int32` context.
 
+There is no unconstrained `float16` inference. A binary16 literal receives its
+type from an annotation, parameter/result/assignment context, or
+`float16(...)`; it must be finite and within `-65504` to `65504`.
+
 Inference considers both operands without making expression meaning depend on
 operand order. Still, use an annotation or explicit conversion when a literal's
 intended domain is not obvious:
@@ -1332,6 +1359,7 @@ intended domain is not obvious:
 ```tach
 const signed: int32 = -1;
 const count: uint32 = 64;
+const half: float16 = 0.5;
 const scale: float32 = 2;
 ```
 
@@ -1345,6 +1373,7 @@ The only general numeric conversions are constructor-shaped:
 ```tach
 int32(value)
 uint32(value)
+float16(value)
 float32(value)
 ```
 
@@ -1360,6 +1389,10 @@ Integer-to-integer conversion preserves the low 32-bit pattern. Therefore
 `uint32(-1)` is a bit-pattern conversion, not a range clamp. Conversion from
 floating point to integer should be used only with values whose range and rounding have
 been made explicit by the algorithm.
+
+`float16(float32Value)` explicitly narrows with IEEE binary16 rounding;
+`float32(float16Value)` explicitly widens. Neither conversion changes the
+precision already lost by prior binary16 computation.
 
 Vector constructors build vectors; scalar conversion constructors convert
 scalars. Do not assume a vector can be converted by naming another vector type
@@ -1528,7 +1561,7 @@ orchestration programs do not support ordinary control flow at all.
 
 ## 41. Math intrinsics
 
-These free functions preserve a `float32` scalar or vector type:
+These free functions preserve their `float16` or `float32` scalar/vector type:
 
 ```text
 floor  ceil  trunc
@@ -1539,7 +1572,7 @@ sqrt   rsqrt
 
 Additional rules:
 
-- `abs` accepts `int32` or `float32` scalars/vectors.
+- `abs` accepts `int32`, `float16`, or `float32` scalars/vectors.
 - `pow` accepts matching floating values and can broadcast a scalar exponent
   across a vector base.
 - `min`, `max`, and `clamp` accept integer scalars/vectors.
@@ -1549,15 +1582,15 @@ Geometric intrinsics are:
 
 | Function | Input | Result |
 |---|---|---|
-| `dot(a, b)` | matching `float32xN` | `float32` |
-| `length(value)` | `float32xN` | `float32` |
-| `distance(a, b)` | matching `float32xN` | `float32` |
-| `cross(a, b)` | two `float32x3` | `float32x3` |
-| `normalize(value)` | `float32xN` | same vector type |
+| `dot(a, b)` | matching `float16xN` or `float32xN` | component type |
+| `length(value)` | floating vector | component type |
+| `distance(a, b)` | matching floating vectors | component type |
+| `cross(a, b)` | matching three-lane floating vectors | same vector type |
+| `normalize(value)` | floating vector | same vector type |
 
 Intrinsic names are reserved. Do not redefine them as types or functions.
-Remember that `float32` has finite precision and target-portable GPU math may
-not be bit-identical to CPU double precision.
+Remember that both floating widths have finite precision and target-portable
+GPU math may not be bit-identical to CPU double precision.
 
 ## 42. Shared workgroup memory
 
@@ -2406,7 +2439,11 @@ extent representable. Bounds-checking the final buffer access does not repair an
 index that overflowed before the comparison.
 
 `float32` has about seven decimal digits of precision and a smaller range than
-the double-precision arithmetic normally performed by JavaScript. Guard
+the double-precision arithmetic normally performed by JavaScript. `float16`
+has roughly three decimal digits, maximum finite magnitude 65504, and far less
+headroom for intermediate results. Store or compute in binary16 only after the
+algorithm's error and dynamic-range budget justifies it; convert explicitly at
+an intentional width boundary rather than relying on widening. Guard
 domain-sensitive operations when inputs can be exceptional: `sqrt` and `rsqrt` need a
 non-negative domain, logarithms need positive inputs, division needs a nonzero
 denominator, and `normalize` needs a policy for zero-length vectors. Tach does

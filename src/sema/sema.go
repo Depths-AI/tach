@@ -139,7 +139,7 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 			}
 		}
 	}
-	for _, n := range []string{"void", "bool", "int32", "uint32", "float32", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
+	for _, n := range []string{"void", "bool", "int32", "uint32", "float16", "float32", "float16x2", "float16x3", "float16x4", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
 	var interfaceDiagnostics source.Diagnostics
@@ -1288,7 +1288,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 			return 0, nil, diag(v.Span, "! requires bool")
 		}
 		if v.Op == "-" && !types.IsSignedNumeric(t) {
-			return 0, nil, diag(v.Span, "unary - requires int32/float32 or a vector of them")
+			return 0, nil, diag(v.Span, "unary - requires a signed numeric scalar or vector")
 		}
 		if v.Op == "~" && !types.IsIntegerLike(t) {
 			return 0, nil, diag(v.Span, "unary ~ requires int32/uint32 or an integer vector")
@@ -1389,15 +1389,27 @@ func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *types.T
 			return 0, nil, diag(n.Span, "int32 literal out of range")
 		}
 		canonical = strconv.FormatUint(v, 10)
-	case types.F32:
+	case types.F16, types.F32:
 		if basePrefixed {
 			return 0, nil, diag(n.Span, "base-prefixed integer literal requires an integer context or explicit conversion")
 		}
-		f, err := strconv.ParseFloat(raw, 32)
-		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
-			return 0, nil, diag(n.Span, "invalid float32 literal")
+		bits := 32
+		name := "float32"
+		if t.Kind == types.F16 {
+			bits, name = 64, "float16"
 		}
-		canonical = strconv.FormatFloat(f, 'g', -1, 32)
+		f, err := strconv.ParseFloat(raw, bits)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return 0, nil, diag(n.Span, "invalid %s literal", name)
+		}
+		if t.Kind == types.F16 {
+			if _, ok := types.Float16bits(f); !ok {
+				return 0, nil, diag(n.Span, "invalid float16 literal")
+			}
+		} else {
+			f = float64(float32(f))
+		}
+		canonical = strconv.FormatFloat(f, 'g', -1, bits)
 		if !strings.ContainsAny(canonical, ".eE") {
 			canonical += ".0"
 		}
@@ -1738,7 +1750,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 
 	firstExpected := expected
 	if kind == ir.IntrinsicDot || kind == ir.IntrinsicLength || kind == ir.IntrinsicDistance {
-		firstExpected = nil // result float32 does not determine vector width
+		firstExpected = nil // a component result does not determine vector width
 	}
 	v, t, err := c.lowerExpr(b, e, x.Args[0], firstExpected)
 	if err != nil {
@@ -1765,7 +1777,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 	}
 
 	floatVec := func(t *types.Type) bool {
-		return t != nil && t.Kind == types.Vector && t.Elem != nil && t.Elem.Kind == types.F32
+		return t != nil && t.Kind == types.Vector && types.IsFloatLike(t.Elem)
 	}
 	same := func() bool {
 		for i := 1; i < len(argTypes); i++ {
@@ -1779,17 +1791,17 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 	switch kind {
 	case ir.IntrinsicAbs:
 		t := argTypes[0]
-		ok := t.Kind == types.I32 || t.Kind == types.F32 || t.Kind == types.Vector && (t.Elem.Kind == types.I32 || t.Elem.Kind == types.F32)
+		ok := types.IsSignedNumeric(t)
 		if !ok {
-			return 0, nil, diag(x.Span, "abs requires int32/float32 scalar or vector, got %s", t)
+			return 0, nil, diag(x.Span, "abs requires a signed numeric scalar or vector, got %s", t)
 		}
 	case ir.IntrinsicFloor, ir.IntrinsicCeil, ir.IntrinsicTrunc, ir.IntrinsicSin, ir.IntrinsicCos, ir.IntrinsicTan, ir.IntrinsicExp, ir.IntrinsicExp2, ir.IntrinsicLog, ir.IntrinsicLog2, ir.IntrinsicSqrt, ir.IntrinsicRSqrt:
 		if !types.IsFloatLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "%s requires float32 scalar/vector, got %s", kind, argTypes[0])
+			return 0, nil, diag(x.Span, "%s requires a floating-point scalar/vector, got %s", kind, argTypes[0])
 		}
 	case ir.IntrinsicPow:
 		if !same() || !types.IsFloatLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "pow requires matching float32 scalar/vector operands")
+			return 0, nil, diag(x.Span, "pow requires matching floating-point scalar/vector operands")
 		}
 	case ir.IntrinsicMin, ir.IntrinsicMax:
 		// DECISION: Float bounds stay unavailable until Tach defines NaN and
@@ -1804,26 +1816,26 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		}
 	case ir.IntrinsicDot:
 		if !same() || !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "dot requires matching float32 vectors")
+			return 0, nil, diag(x.Span, "dot requires matching floating-point vectors")
 		}
-		out = types.TF32
+		out = argTypes[0].Elem
 	case ir.IntrinsicLength:
 		if !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "length requires a float32 vector")
+			return 0, nil, diag(x.Span, "length requires a floating-point vector")
 		}
-		out = types.TF32
+		out = argTypes[0].Elem
 	case ir.IntrinsicDistance:
 		if !same() || !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "distance requires matching float32 vectors")
+			return 0, nil, diag(x.Span, "distance requires matching floating-point vectors")
 		}
-		out = types.TF32
+		out = argTypes[0].Elem
 	case ir.IntrinsicCross:
 		if !same() || !floatVec(argTypes[0]) || argTypes[0].Lanes != 3 {
-			return 0, nil, diag(x.Span, "cross requires two float32x3 operands")
+			return 0, nil, diag(x.Span, "cross requires two matching three-lane floating-point vectors")
 		}
 	case ir.IntrinsicNormalize:
 		if !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "normalize requires a float32 vector")
+			return 0, nil, diag(x.Span, "normalize requires a floating-point vector")
 		}
 	default:
 		return 0, nil, diag(x.Span, "unsupported intrinsic %s", kind)
@@ -1965,7 +1977,7 @@ func atomicBuiltin(name string) (ir.AtomicKind, bool) {
 	}
 }
 func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *ast.CallExpr, target *types.Type) (ir.ValueID, *types.Type, error) {
-	if target.Kind == types.I32 || target.Kind == types.U32 || target.Kind == types.F32 {
+	if types.IsNumericScalar(target) {
 		if len(x.Args) != 1 {
 			return 0, nil, diag(x.Span, "%s constructor expects one argument", target)
 		}

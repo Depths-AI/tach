@@ -148,6 +148,16 @@ func Validate(src string) error {
 		return err
 	}
 	p := &vp{t: ts}
+	if p.ident("enable") {
+		p.take()
+		if !p.ident("f16") {
+			return fmt.Errorf("WGSL byte %d: only enable f16 is in Tach's profile", p.cur().off)
+		}
+		p.take()
+		if err := p.want(vSemi); err != nil {
+			return err
+		}
+	}
 	for p.cur().k != vEOF {
 		for p.cur().k == vAt {
 			if err := p.attr(); err != nil {

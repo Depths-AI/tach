@@ -1,0 +1,68 @@
+@docs(
+  title("Coupled nonlinear oscillator integration"),
+  summary("Compares binary32 and binary16 arithmetic throughput while integrating conservative register-resident oscillator ensembles."),
+);
+
+@docs(
+  summary("Integrates four coupled conservative nonlinear oscillators in binary32."),
+  coordinate(i, "Four-oscillator state index."),
+  param(positions, "Four oscillator positions per state."),
+  param(velocities, "Four oscillator velocities per state."),
+  param(steps, "Integration steps performed before writing state."),
+)
+export function coupledOscillatorsFloat32[i](
+  positions: buffer<float32x4[]>,
+  velocities: buffer<float32x4[]>,
+  steps: uint32,
+) {
+  if (i < positions.length && i < velocities.length) {
+    let position = positions[i];
+    let velocity = velocities[i];
+    for (let step = 0; step < steps; step++) {
+      const neighborSum = float32x4(
+        position.y + position.w,
+        position.z + position.x,
+        position.w + position.y,
+        position.x + position.z,
+      );
+      const acceleration = (neighborSum - position * 2.0) * 0.14 - position * 0.72 - position
+        * position * position * 0.08;
+      velocity += acceleration * 0.015625;
+      position += velocity * 0.015625;
+    }
+    positions[i] = position;
+    velocities[i] = velocity;
+  }
+}
+
+@docs(
+  summary("Integrates four coupled conservative nonlinear oscillators in binary16."),
+  coordinate(i, "Four-oscillator state index."),
+  param(positions, "Four binary16 oscillator positions per state."),
+  param(velocities, "Four binary16 oscillator velocities per state."),
+  param(steps, "Integration steps performed before writing state."),
+)
+export function coupledOscillatorsFloat16[i](
+  positions: buffer<float16x4[]>,
+  velocities: buffer<float16x4[]>,
+  steps: uint32,
+) {
+  if (i < positions.length && i < velocities.length) {
+    let position = positions[i];
+    let velocity = velocities[i];
+    for (let step = 0; step < steps; step++) {
+      const neighborSum = float16x4(
+        position.y + position.w,
+        position.z + position.x,
+        position.w + position.y,
+        position.x + position.z,
+      );
+      const acceleration = (neighborSum - position * 2.0) * 0.14 - position * 0.72 - position
+        * position * position * 0.08;
+      velocity += acceleration * 0.015625;
+      position += velocity * 0.015625;
+    }
+    positions[i] = position;
+    velocities[i] = velocity;
+  }
+}

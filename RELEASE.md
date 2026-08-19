@@ -7,7 +7,7 @@ Run releases locally from the repository root in a visible PowerShell window. Th
 Dry mode runs every validation gate, builds all release artifacts, verifies the packed npm package, and writes the result under `dist/releases/<version>`. It does not change npm or GitHub.
 
 ```powershell
-.\release.ps1 v0.1.2 -Dry -Notes "Meaningful release notes"
+.\release.ps1 v0.1.3 -Dry -Notes "Meaningful release notes"
 ```
 
 ## Actual mode
@@ -15,7 +15,7 @@ Dry mode runs every validation gate, builds all release artifacts, verifies the 
 Actual mode requires `master` equal to `origin/master`. It performs the complete dry-mode work itself, or reuses the same verified clean artifacts when resuming an interrupted release. It publishes the npm package, waits for npm publication, then creates the published GitHub release and uploads its verified artifacts. It never creates a GitHub draft.
 
 ```powershell
-.\release.ps1 v0.1.2 -Publish -Notes "Meaningful release notes"
+.\release.ps1 v0.1.3 -Publish -Notes "Meaningful release notes"
 ```
 
 Near the end, npm requests browser approval through its interactive CLI. Run actual mode in a visible PowerShell window; npm opens the one-time approval page and waits for approval before completing publication. The script then verifies the public npm version, creates the published GitHub release, uploads its artifacts, and reports completion.

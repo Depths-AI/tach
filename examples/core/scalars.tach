@@ -15,3 +15,57 @@ export function scale[i](data: buffer<float32[]>, factor: float32) {
     data[i] *= factor;
   }
 }
+
+@docs(
+  summary("Multiplies binary16 values without widening them to float32."),
+  coordinate(i, "Value index."),
+  param(data, "Binary16 values updated in place."),
+  param(factor, "Binary16 multiplier applied to each value."),
+)
+export function scaleFloat16[i](data: buffer<float16[]>, factor: float16) {
+  if (i < data.length) {
+    data[i] *= factor;
+  }
+}
+
+@docs(
+  summary("Binary16 input with a scalar prefix and runtime-sized tail."),
+  field(offset, "Value added after length normalization."),
+  field(values, "Binary16 values consumed by the math kernel."),
+)
+type Float16Series = {
+  offset: float16,
+  values: float16[],
+};
+
+@docs(
+  summary("Exercises binary16 scalar, vector, transcendental, and geometry math."),
+  coordinate(i, "Output vector index."),
+  param(input, "Prefixed binary16 runtime tail used as the math input."),
+  param(output, "Binary16 results written in place."),
+)
+export function float16Math[i](
+  input: buffer<Float16Series>,
+  output: buffer<float16x4[]>,
+) {
+  if (i < input.values.length && i < output.length) {
+    const x = input.values[i] / float16(input.values.length) + input.offset;
+    const value = float16x3(x, 2.0, 3.0);
+    const unit = normalize(value);
+    const geometry = dot(value, unit) + length(value) + distance(value, unit)
+      + cross(value, unit).x;
+    const wave = sin(x) + cos(x) + tan(float16(0.25));
+    const shaped = sqrt(abs(wave)) + rsqrt(x + 1.0);
+    const exponential = exp2(log2(x + 1.0)) + exp(log(x + 1.0));
+    const rounded = floor(pow(x + 1.0, 2.0)) + ceil(geometry) + trunc(shaped);
+    output[i] = float16x4(unit, shaped + exponential + rounded);
+  }
+}
+
+@docs(
+  summary("Runs the binary16 scale stage with a constant encoded in the program plan."),
+  param(data, "Binary16 values updated in place."),
+)
+export function halveFloat16(data: buffer<float16[]>) {
+  run scaleFloat16(data, 0.5) over data.length;
+}

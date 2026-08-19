@@ -204,7 +204,7 @@ func bufferAccess(buffer ir.BufferSummary) flow.ResourceAccess {
 }
 
 func typeRef(t *types.Type) TypeRef {
-	kinds := [...]string{"invalid", "void", "bool", "i32", "u32", "f32", "vector", "struct", "atomic", "fixedArray", "runtimeArray"}
+	kinds := [...]string{"invalid", "void", "bool", "i32", "u32", "f16", "f32", "vector", "struct", "atomic", "fixedArray", "runtimeArray"}
 	out := TypeRef{Tach: t.String(), Kind: kinds[t.Kind]}
 	switch t.Kind {
 	case types.Struct:
