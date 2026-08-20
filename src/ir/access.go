@@ -96,6 +96,7 @@ func AnalyzeAccess(function *Function) AccessSummary {
 				summary.Effects.Workgroup = true
 			case *PlaceWorkgroup:
 				summary.Effects.Workgroup = true
+				places[x.Result] = placeAccess{buffer: -1}
 			case *If:
 				walk(x.Then)
 				walk(x.Else)

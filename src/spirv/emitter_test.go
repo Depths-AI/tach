@@ -145,11 +145,14 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
     half[i] = fma(half[i], float16(2), vec(1, 1, 1, 1));
   }
 }`)
+	if err := spirv.Validate(bin); err != nil {
+		t.Fatal(err)
+	}
 	m, err := spirv.Decode(bin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fma32, fma16 int
+	var fma32, fma16, phis int
 	floatWidth := map[uint32]uint32{}
 	for _, instruction := range m.Instructions {
 		switch instruction.Op {
@@ -157,6 +160,8 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 			floatWidth[instruction.Operands[0]] = instruction.Operands[1]
 		case spirv.OpTypeVector:
 			floatWidth[instruction.Operands[0]] = floatWidth[instruction.Operands[1]]
+		case spirv.OpPhi:
+			phis++
 		}
 		if instruction.Op == spirv.OpExtInst && instruction.Operands[3] == spirv.GLSL450Fma {
 			switch floatWidth[instruction.Operands[0]] {
@@ -167,8 +172,8 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 			}
 		}
 	}
-	if fma16 != 1 || fma32 != 1 {
-		t.Fatalf("SPIR-V Fma counts: float16=%d float32=%d, want 1 each", fma16, fma32)
+	if fma16 != 1 || fma32 != 1 || phis == 0 {
+		t.Fatalf("SPIR-V Fma/loop phi counts: float16=%d float32=%d phis=%d, want 1/1/>0", fma16, fma32, phis)
 	}
 }
 

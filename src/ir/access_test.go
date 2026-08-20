@@ -12,7 +12,7 @@ import (
 func stage(t *testing.T, body string) *ir.Function {
 	t.Helper()
 	prefix := ""
-	if strings.Contains(body, "Barrier") {
+	if strings.Contains(body, "Barrier") || strings.Contains(body, "shared<") {
 		prefix = "@workgroup(1) "
 	}
 	a, err := parser.Parse("access.tach", prefix+"export function access[i](data: buffer<uint32[]>) { "+body+" }")
@@ -49,5 +49,9 @@ func TestAccessSummaryTracksEffectsAndGuardedCompleteWrite(t *testing.T) {
 	barrier := ir.AnalyzeAccess(stage(t, `bufferBarrier(); data[i] = i;`))
 	if !barrier.Effects.Barrier || !barrier.Effects.Workgroup {
 		t.Fatalf("barrier = %#v", barrier)
+	}
+	shared := ir.AnalyzeAccess(stage(t, `let scratch: shared<uint32[4]>; scratch[0] = 7; const value = scratch[0];`))
+	if !shared.Effects.Workgroup || shared.Effects.Memory || shared.Buffers[0].Read || shared.Buffers[0].Write || shared.Buffers[0].CompleteWrite || len(shared.Buffers[0].Accesses) != 0 {
+		t.Fatalf("shared memory polluted storage buffer summary = %#v", shared)
 	}
 }

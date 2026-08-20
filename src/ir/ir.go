@@ -258,6 +258,8 @@ func (k IntrinsicKind) Rule() IntrinsicRule {
 	case IntrinsicPow:
 		return IntrinsicRule{Arity: 2, Domain: NumericFloat, Broadcast: 1 << 1}
 	case IntrinsicMin, IntrinsicMax:
+		// DECISION: Float bounds stay unavailable until Tach defines NaN and
+		// signed-zero behavior; integer-only semantics are identical everywhere.
 		return IntrinsicRule{Arity: 2, Domain: NumericInteger, Broadcast: 0b11}
 	case IntrinsicClamp:
 		return IntrinsicRule{Arity: 3, Domain: NumericInteger, Broadcast: 0b111}

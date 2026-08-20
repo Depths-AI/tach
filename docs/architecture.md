@@ -542,8 +542,10 @@ Each record has severity, stable code, byte offset plus line/column span,
 message, captured source line, optional help, and related source locations.
 The public TypeScript layer validates the envelope once. It then exposes the
 same records through `ProjectResult.diagnostics`, `CompilerError.diagnostics`,
-Markdown-like terminal rendering, or the public CLI's `--json` result. No
-frontend or backend owns a second rendering or message model.
+Markdown-like terminal rendering, or the public CLI's `--json` result. These
+structured records are the sole cross-layer message model. Go error strings
+remain an internal compiler and test representation; neither backend owns a
+diagnostic model or public renderer.
 
 ### Artifact transaction
 

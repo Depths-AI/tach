@@ -539,6 +539,17 @@ func TestWarningsRespectImportsReachabilityAndControl(t *testing.T) {
 	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Kind != "unused-import" {
 		t.Fatalf("unused import diagnostics = %#v", result.Diagnostics)
 	}
+
+	root = projectFixture(t, map[string]string{
+		"app/main.tach": `@workgroup(4) export function sharedOnly[i](out: buffer<uint32[]>) { let scratch: shared<uint32[8]>; scratch[0] = out.length; scratch[i * 2] = 2; }`,
+	})
+	result, err = Check(root, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Kind != "no-effect-kernel" {
+		t.Fatalf("shared-memory diagnostics = %#v", result.Diagnostics)
+	}
 }
 
 func TestOneAndManyWorkerBuildsAreByteIdentical(t *testing.T) {
