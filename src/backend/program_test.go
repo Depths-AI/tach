@@ -135,11 +135,11 @@ export function graph(data: buffer<uint32[]>) { const count = data.length; run f
 
 func TestViewProjectionIsBackendSpecific(t *testing.T) {
 	const source = `
-function paint[i](pixels: buffer<float32x4[]>) {
-  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) {
+  if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`
@@ -168,8 +168,8 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 
 func TestStandaloneProjectionPacksTheSameDisplayWord(t *testing.T) {
 	const source = `
-function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
-export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32): view<srgb8> {
+function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
+export function image(pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32): view<srgb8> {
   run paint(pixels) over width * height;
   return view(pixels, width, height);
 }`
@@ -188,9 +188,9 @@ export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32
 
 func TestConstantExtentViewStillFuses(t *testing.T) {
 	executable := lower(t, `
-function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 export function image(): view<srgb8> {
-  const pixels = transient<float32x4>(4);
+  const pixels = transient<vec<float32, 4>>(4);
   run paint(pixels) over pixels.length;
   return view(pixels, 2, 2);
 }`, backend.SPIRVProfile)

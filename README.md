@@ -197,6 +197,11 @@ npx tach build
 project through both targets without writing output. `build` writes one
 cohesive generated package:
 
+Errors and optimization warnings include an exact source location, source
+line, stable code, and help where Tach can prescribe a safe action. Use
+`npx tach check --json` when an editor, agent, or build tool needs the same
+diagnostics as structured data instead of the terminal report.
+
 ```text
 build/
   package.json
@@ -276,11 +281,11 @@ The brackets declare logical invocation coordinates. A two-dimensional kernel
 can use `[x, y]`; the host then supplies a matching logical size:
 
 ```tach
-export function image[x, y](pixels: buffer<float32x4[]>) {
+export function image[x, y](pixels: buffer<vec<float32, 4>[]>) {
   const width = 1920;
   const pixel = y * width + x;
   if (pixel < pixels.length) {
-    pixels[pixel] = float32x4(
+    pixels[pixel] = vec(
       float32(x) / 1920.0,
       float32(y) / 1080.0,
       0.5,
@@ -297,11 +302,27 @@ await gpu.submit(image(pixels, { size: [1920, 1080] }));
 Tach rounds logical sizes to complete workgroups, so kernels guard edge
 invocations before indexing. Parameters are either `buffer<T>` GPU storage or
 immutable values packed by the compiler. The core value types are `bool`,
-`int32`, `uint32`, `float16`, `float32`, and two-, three-, or four-lane numeric
-vectors. Binary16 stays binary16 in buffers, arithmetic, WGSL, and SPIR-V;
+`int32`, `uint32`, `float16`, `float32`, and `vec<T, N>` numeric vectors where
+`N` is 2, 3, or 4. Binary16 stays binary16 in buffers, arithmetic, WGSL, and SPIR-V;
 generated modules record and enforce its optional GPU requirements. Projects
 without `float16` keep the ordinary feature floor.
 Struct types are always emitted into the TypeScript API.
+
+Tach infers expression-local numeric types from annotations, assignments,
+parameters, returns, struct fields, sibling operands, and intrinsic domains.
+`vec(...)` is the only vector value constructor and builds two to four lanes
+from scalar/vector components without repeating a known element type. For example,
+`normalize(vec(1, 0, 0))` is `vec<float32, 3>`, while a `vec<float16, 3>` result context
+makes the same components binary16. Typed values are never silently converted;
+ambiguous or conflicting contexts are errors.
+
+Inside a helper or indexed stage, ordinary structured `if`, `while`, and `for`
+control is available. `break` exits the nearest loop; `continue` advances it
+and still performs a `for` update. Portable math includes scalar/vector FP16
+and FP32 `fma(a, b, c)`, which carries multiply-add intent to both backends
+without claiming one physical instruction on every adapter. The
+[examples guide](examples/README.md) demonstrates these alongside the simpler
+forms rather than hiding them inside a large kernel.
 
 Files import other project files by extensionless module/kernel identity:
 
@@ -370,11 +391,11 @@ display result. It remains ordinary Tach orchestration, so a procedural frame
 can be driven entirely by scalar parameters:
 
 ```tach
-function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
+function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32) {
   if (i < pixels.length) {
     const x = i % width;
     const y = i / width;
-    pixels[i] = float32x4(
+    pixels[i] = vec(
       float32(x) / float32(width),
       float32(y) / float32(height),
       0.25,
@@ -384,7 +405,7 @@ function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
 }
 
 export function gradient(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels, width, height) over pixels.length;
   return view(pixels, width, height);
 }
@@ -407,7 +428,7 @@ try {
 }
 ```
 
-You write linear `float32x4` pixels. Tach converts them to 8-bit sRGB for
+You write linear `vec<float32, 4>` pixels. Tach converts them to 8-bit sRGB for
 display. The browser stores that picture as a canvas texture; native Vulkan
 stores the same bytes in a packed buffer. When the last pixel-writing stage
 already writes each pixel once, Tach can do the conversion in that stage

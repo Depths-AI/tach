@@ -17,6 +17,47 @@ export interface BuildOptions extends CompilerRunOptions {
   readonly verbose?: boolean;
 }
 
+export interface DiagnosticPosition {
+  readonly offset: number;
+  readonly line: number;
+  readonly column: number;
+}
+
+export interface DiagnosticSpan {
+  readonly file: string;
+  readonly start: DiagnosticPosition;
+  readonly end: DiagnosticPosition;
+}
+
+export interface RelatedDiagnostic {
+  readonly span: DiagnosticSpan;
+  readonly message: string;
+  readonly source?: string;
+}
+
+export interface Diagnostic {
+  readonly severity: "error" | "warning";
+  readonly code: string;
+  readonly span: DiagnosticSpan;
+  readonly message: string;
+  readonly help?: string;
+  readonly source?: string;
+  readonly related?: readonly RelatedDiagnostic[];
+}
+
+export class CompilerError extends TachError {
+  readonly diagnostics: readonly Diagnostic[];
+
+  constructor(diagnostics: readonly Diagnostic[], cause: unknown) {
+    super("compiler-execution", renderDiagnostics(diagnostics), {
+      operation: "compiler",
+      cause,
+    });
+    this.name = "CompilerError";
+    this.diagnostics = diagnostics;
+  }
+}
+
 interface RuntimeProgram {
   readonly name: string;
   readonly parameters: readonly unknown[];
@@ -44,6 +85,12 @@ interface CompilerRun {
   readonly path: string;
   readonly stdout: string;
   readonly stderr: string;
+  readonly diagnostics: readonly Diagnostic[];
+}
+
+interface DiagnosticEnvelope {
+  readonly schema: 1;
+  readonly diagnostics: readonly Diagnostic[];
 }
 
 interface NativeTarget {
@@ -343,7 +390,14 @@ async function runNative(
       stdout: decoder.decode(result.stdout),
       stderr: decoder.decode(result.stderr),
     };
-    if (result.success) return output;
+    const diagnostics = parseDiagnostics(output.stderr);
+    if (result.success) return { ...output, diagnostics };
+    if (diagnostics.length > 0) {
+      throw new CompilerError(diagnostics, {
+        ...output,
+        exitCode: result.code,
+      });
+    }
     throw new TachError(
       "compiler-execution",
       `${args[0]} failed with exit code ${result.code}${
@@ -355,6 +409,81 @@ async function runNative(
     if (cause instanceof TachError) throw cause;
     throw normalizeError(cause, "compiler-execution", "compiler");
   }
+}
+
+function parseDiagnostics(stderr: string): readonly Diagnostic[] {
+  if (!stderr.trim()) return [];
+  let envelope: DiagnosticEnvelope;
+  try {
+    envelope = JSON.parse(stderr) as DiagnosticEnvelope;
+  } catch {
+    return [];
+  }
+  const position = (value: DiagnosticPosition): boolean =>
+    Number.isInteger(value?.offset) && value.offset >= 0 &&
+    Number.isInteger(value?.line) && value.line >= 1 &&
+    Number.isInteger(value?.column) && value.column >= 1;
+  const span = (value: DiagnosticSpan): boolean =>
+    typeof value?.file === "string" && position(value.start) &&
+    position(value.end) && value.end.offset >= value.start.offset &&
+    value.end.line >= value.start.line &&
+    (value.end.line !== value.start.line ||
+      value.end.column >= value.start.column);
+  if (
+    envelope.schema !== 1 || !Array.isArray(envelope.diagnostics) ||
+    envelope.diagnostics.some((item) =>
+      item?.severity !== "error" && item?.severity !== "warning" ||
+      !item.code || typeof item.code !== "string" ||
+      !item.message || typeof item.message !== "string" || !span(item.span) ||
+      item.source !== undefined && typeof item.source !== "string" ||
+      item.help !== undefined && typeof item.help !== "string" ||
+      item.related !== undefined &&
+        (!Array.isArray(item.related) ||
+          item.related.some((related: RelatedDiagnostic) =>
+            !span(related.span) || !related.message ||
+            typeof related.message !== "string" ||
+            related.source !== undefined && typeof related.source !== "string"
+          ))
+    )
+  ) throw new TypeError("invalid native diagnostic envelope");
+  return envelope.diagnostics;
+}
+
+function location(span: DiagnosticSpan): string {
+  return `${span.file || "<project>"}:${span.start.line}:${span.start.column}`;
+}
+
+function sourceContext(span: DiagnosticSpan, source?: string): string {
+  if (!source) return "";
+  const number = String(span.start.line), width = number.length;
+  const characters = [...source], start = span.start.column - 1;
+  const display = (value: readonly string[]): string =>
+    value.join("").replaceAll("\t", "  ");
+  const before = display(characters.slice(0, start)).length;
+  const length = span.start.line === span.end.line
+    ? Math.max(1, display(characters.slice(start, span.end.column - 1)).length)
+    : 1;
+  return `\n${" ".repeat(width)} |\n${number} | ${display(characters)}\n${
+    " ".repeat(width)
+  } | ${" ".repeat(before)}${"^".repeat(length)}`;
+}
+
+export function renderDiagnostics(
+  diagnostics: readonly Diagnostic[],
+): string {
+  return diagnostics.map((diagnostic) => {
+    let output =
+      `## ${diagnostic.severity} [${diagnostic.code}]\n\n${diagnostic.message}\n\n--> ${
+        location(diagnostic.span)
+      }${sourceContext(diagnostic.span, diagnostic.source)}`;
+    for (const related of diagnostic.related ?? []) {
+      output += `\n\n- note: ${related.message}\n  --> ${
+        location(related.span)
+      }${sourceContext(related.span, related.source).replaceAll("\n", "\n  ")}`;
+    }
+    if (diagnostic.help) output += `\n\n- help: ${diagnostic.help}`;
+    return output;
+  }).join("\n\n---\n\n");
 }
 
 async function projectRoot(cwd = Deno.cwd()): Promise<string> {
@@ -665,6 +794,7 @@ async function replaceBuild(root: string, stage: string): Promise<void> {
 export interface ProjectResult {
   readonly root: string;
   readonly description: Documentation;
+  readonly diagnostics: readonly Diagnostic[];
 }
 
 export async function build(
@@ -677,7 +807,7 @@ export async function build(
   try {
     const args = ["_build", "--output", stage];
     if (verbose) args.push("--verbose");
-    await runNative(args, { ...runOptions, cwd: root });
+    const run = await runNative(args, { ...runOptions, cwd: root });
     const [projectSource, runtimeSource] = await Promise.all([
       Deno.readTextFile(join(stage, "project.json")),
       Deno.readTextFile(join(stage, "runtime.json")),
@@ -725,7 +855,7 @@ export async function build(
     }
     await assertInventory(stage, description, verbose);
     await replaceBuild(root, stage);
-    return { root, description };
+    return { root, description, diagnostics: run.diagnostics };
   } catch (cause) {
     await remove(stage);
     throw cause;
@@ -747,7 +877,7 @@ export async function check(
   generatedDeclarations(description, runtime);
   generatedModule(runtime, "check");
   JSON.stringify(generatedPackage(description, await packageVersion()));
-  return { root, description };
+  return { root, description, diagnostics: run.diagnostics };
 }
 
 export async function docs(
@@ -773,7 +903,7 @@ export async function docs(
     await remove(join(stage, "docs"));
     await writeDocumentation(stage, description);
     await replaceBuild(root, stage);
-    return { root, description };
+    return { root, description, diagnostics: run.diagnostics };
   } catch (cause) {
     await remove(stage);
     throw cause;

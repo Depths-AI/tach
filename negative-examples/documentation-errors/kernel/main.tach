@@ -1,0 +1,6 @@
+@docs(title("A title without a summary"));
+
+@docs(summary("Incomplete field documentation."), field(missing, "No such field."))
+type Value = {
+  actual: float32,
+};

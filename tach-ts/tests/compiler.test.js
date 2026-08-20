@@ -101,6 +101,62 @@ Deno.test("the public CLI is authoritative and the private compiler resolves", a
   }
 });
 
+Deno.test("compiler diagnostics have identical human and JSON surfaces", async () => {
+  const warningRoot = await fixture(
+    `export function idle[i](out: buffer<float32[]>, unused: float32) {
+  const discarded = float32(i) * 2;
+}`,
+  );
+  const errorRoot = await fixture(
+    `export function broken[i](out: buffer<float32[]>) {
+  if (i < out.length) { out[i] = missing; }
+}`,
+  );
+  try {
+    const result = await check({ cwd: warningRoot });
+    assert.deepEqual(
+      [...new Set(result.diagnostics.map((item) => item.code))].sort(),
+      ["no-effect-kernel", "unused-binding"],
+    );
+    const humanWarning = runCLI(["check"], warningRoot);
+    assert.equal(humanWarning.status, 0, humanWarning.stderr);
+    assert.equal(humanWarning.stdout, "ok\n");
+    assert.match(humanWarning.stderr, /## warning \[unused-binding\]/u);
+    assert.match(humanWarning.stderr, /--> kernels\/scale\.tach:1:/u);
+    assert.match(humanWarning.stderr, /- help:/u);
+    const jsonWarning = runCLI(["check", "--json"], warningRoot);
+    assert.equal(jsonWarning.status, 0, jsonWarning.stderr);
+    assert.equal(jsonWarning.stderr, "");
+    const warningPayload = JSON.parse(jsonWarning.stdout);
+    assert.equal(warningPayload.schema, 1);
+    assert.equal(warningPayload.ok, true);
+    assert.equal(warningPayload.command, "check");
+    assert.deepEqual(warningPayload.diagnostics, result.diagnostics);
+
+    const humanError = runCLI(["check"], errorRoot);
+    assert.notEqual(humanError.status, 0);
+    assert.equal(humanError.stdout, "");
+    assert.match(humanError.stderr, /## error \[semantic\]/u);
+    assert.match(humanError.stderr, /unknown identifier "missing"/u);
+    assert.match(humanError.stderr, /out\[i\] = missing/u);
+    const jsonError = runCLI(["check", "--json"], errorRoot);
+    assert.notEqual(jsonError.status, 0);
+    assert.equal(jsonError.stderr, "");
+    const errorPayload = JSON.parse(jsonError.stdout);
+    assert.equal(errorPayload.schema, 1);
+    assert.equal(errorPayload.ok, false);
+    assert.equal(errorPayload.diagnostics[0].severity, "error");
+    assert.equal(errorPayload.diagnostics[0].code, "semantic");
+    assert.equal(errorPayload.diagnostics[0].span.file, "kernels/scale.tach");
+    assert.equal(errorPayload.diagnostics[0].source.includes("missing"), true);
+  } finally {
+    await Promise.all([
+      Deno.remove(warningRoot, { recursive: true }),
+      Deno.remove(errorRoot, { recursive: true }),
+    ]);
+  }
+});
+
 Deno.test("bundled instructions expose dense context and exact detail chunks", async () => {
   const bundle = JSON.parse(
     await Deno.readTextFile(join(packageRoot, "dist", "instructions.json")),
@@ -190,7 +246,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
         type: "module",
         sideEffects: false,
         exports: { ".": { types: "./index.d.ts", default: "./index.js" } },
-        dependencies: { "@depths/tach": "0.1.3" },
+        dependencies: { "@depths/tach": "0.2.0" },
       },
     );
     const artifacts = [

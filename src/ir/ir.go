@@ -223,12 +223,90 @@ const (
 	IntrinsicMin
 	IntrinsicMax
 	IntrinsicClamp
+	IntrinsicFma
 	IntrinsicDot
 	IntrinsicLength
 	IntrinsicDistance
 	IntrinsicCross
 	IntrinsicNormalize
 )
+
+type NumericDomain uint8
+
+const (
+	NumericAny NumericDomain = iota
+	NumericSigned
+	NumericFloat
+	NumericInteger
+)
+
+type IntrinsicRule struct {
+	Arity         int
+	Domain        NumericDomain
+	Broadcast     uint8
+	VectorOnly    bool
+	ResultElement bool
+	Lanes         int
+}
+
+func (k IntrinsicKind) Rule() IntrinsicRule {
+	switch k {
+	case IntrinsicAbs:
+		return IntrinsicRule{Arity: 1, Domain: NumericSigned}
+	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicRSqrt:
+		return IntrinsicRule{Arity: 1, Domain: NumericFloat}
+	case IntrinsicPow:
+		return IntrinsicRule{Arity: 2, Domain: NumericFloat, Broadcast: 1 << 1}
+	case IntrinsicMin, IntrinsicMax:
+		// DECISION: Float bounds stay unavailable until Tach defines NaN and
+		// signed-zero behavior; integer-only semantics are identical everywhere.
+		return IntrinsicRule{Arity: 2, Domain: NumericInteger, Broadcast: 0b11}
+	case IntrinsicClamp:
+		return IntrinsicRule{Arity: 3, Domain: NumericInteger, Broadcast: 0b111}
+	case IntrinsicFma:
+		return IntrinsicRule{Arity: 3, Domain: NumericFloat, Broadcast: 0b111}
+	case IntrinsicDot, IntrinsicDistance:
+		return IntrinsicRule{Arity: 2, Domain: NumericFloat, VectorOnly: true, ResultElement: true}
+	case IntrinsicLength:
+		return IntrinsicRule{Arity: 1, Domain: NumericFloat, VectorOnly: true, ResultElement: true}
+	case IntrinsicCross:
+		return IntrinsicRule{Arity: 2, Domain: NumericFloat, VectorOnly: true, Lanes: 3}
+	case IntrinsicNormalize:
+		return IntrinsicRule{Arity: 1, Domain: NumericFloat, VectorOnly: true}
+	default:
+		return IntrinsicRule{}
+	}
+}
+
+func (d NumericDomain) Accepts(t *types.Type) bool {
+	switch d {
+	case NumericAny:
+		return types.IsNumericScalar(t)
+	case NumericSigned:
+		return t != nil && (t.Kind == types.I32 || t.Kind == types.F16 || t.Kind == types.F32)
+	case NumericFloat:
+		return t != nil && (t.Kind == types.F16 || t.Kind == types.F32)
+	case NumericInteger:
+		return types.IsInteger(t)
+	default:
+		return false
+	}
+}
+
+func (d NumericDomain) String() string {
+	switch d {
+	case NumericAny:
+		return "numeric"
+	case NumericSigned:
+		return "signed numeric"
+	case NumericFloat:
+		return "floating-point"
+	case NumericInteger:
+		return "integer"
+	default:
+		return "invalid"
+	}
+}
 
 type Intrinsic struct {
 	Result ValueID
@@ -418,6 +496,10 @@ type Continue struct{ Values []ValueID }
 
 func (*Continue) termNode() {}
 
+type Break struct{ Values []ValueID }
+
+func (*Break) termNode() {}
+
 type Return struct {
 	Value    ValueID
 	HasValue bool
@@ -564,6 +646,10 @@ func cloneTerm(term Term) Term {
 		y := *x
 		y.Values = append([]ValueID(nil), x.Values...)
 		return &y
+	case *Break:
+		y := *x
+		y.Values = append([]ValueID(nil), x.Values...)
+		return &y
 	case *Return:
 		y := *x
 		return &y
@@ -637,6 +723,8 @@ func (k IntrinsicKind) String() string {
 		return "max"
 	case IntrinsicClamp:
 		return "clamp"
+	case IntrinsicFma:
+		return "fma"
 	case IntrinsicDot:
 		return "dot"
 	case IntrinsicLength:
@@ -801,6 +889,8 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 		fmt.Fprintf(b, "%syield %v\n", ind, t.Values)
 	case *Continue:
 		fmt.Fprintf(b, "%scontinue %v\n", ind, t.Values)
+	case *Break:
+		fmt.Fprintf(b, "%sbreak %v\n", ind, t.Values)
 	case *Return:
 		if t.HasValue {
 			fmt.Fprintf(b, "%sreturn %%%d\n", ind, t.Value)

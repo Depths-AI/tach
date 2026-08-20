@@ -15,6 +15,7 @@ import (
 	"tach/src/flow"
 	"tach/src/opt"
 	"tach/src/sema"
+	"tach/src/source"
 	"tach/src/spirv"
 	"tach/src/wgsl"
 )
@@ -29,6 +30,7 @@ type Result struct {
 	Metadata        *bindings.Metadata
 	MetadataJSON    []byte
 	Description     []byte
+	Diagnostics     source.Diagnostics
 }
 
 func WriteNativeArtifacts(result *Result, output string, verbose bool) error {
@@ -138,7 +140,7 @@ func compile(cwd string, build bool, workers int) (*Result, error) {
 			return nil, fmt.Errorf("IR optimization: %w", err)
 		}
 	}
-	result := &Result{Module: logical}
+	result := &Result{Module: logical, Diagnostics: warnings(project, logical)}
 	if build {
 		result.Web, err = wgsl.Lower(logical)
 		if err == nil {

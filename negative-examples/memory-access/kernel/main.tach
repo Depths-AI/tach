@@ -1,0 +1,6 @@
+export function scattered[i](out: buffer<uint32[]>) {
+  if (i * 2 < out.length) {
+    out[i * 2] = i;
+  }
+  out[0] = i;
+}

@@ -1,0 +1,7 @@
+function misplacedBreak() {
+  break;
+}
+
+function misplacedContinue() {
+  continue;
+}

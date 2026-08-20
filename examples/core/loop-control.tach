@@ -1,0 +1,86 @@
+@docs(
+  title("Loop control and contextual math"),
+  summary("Demonstrates early exit, skipped iterations, inferred vectors, and float16 and float32 math."),
+);
+
+@docs(
+  summary("Controls a strided scan with skipped zeros and an early threshold exit."),
+  field(stride, "Distance between values owned by one invocation."),
+  field(count, "Number of input values available to scan."),
+  field(scale, "Multiplier applied to every accepted value."),
+  field(threshold, "Accumulation value that stops the scan."),
+)
+type ScanParams = {
+  stride: uint32,
+  count: uint32,
+  scale: float32,
+  threshold: float32,
+};
+
+@docs(
+  summary("Scans one strided lane, ignoring zero values and stopping at the threshold."),
+  coordinate(start, "First input index in this invocation's strided lane."),
+  param(output, "One accumulated result per launched lane."),
+  param(input, "Values scanned without modification."),
+  param(params, "Stride, bounds, scale, and stopping threshold."),
+)
+export function selectiveScan[start](
+  output: buffer<float32[]>,
+  input: buffer<float32[]>,
+  params: ScanParams,
+) {
+  let total = 0.0;
+  for (let i = start; i < params.count && i < input.length; i += params.stride) {
+    const value = input[i];
+    if (value == 0.0) {
+      continue;
+    }
+    total = fma(value, params.scale, total);
+    if (total >= params.threshold) {
+      break;
+    }
+  }
+  if (start < output.length) {
+    output[start] = total;
+  }
+}
+
+@docs(
+  summary("Applies one component-wise binary16 multiply-add to every vector."),
+  coordinate(i, "Vector index."),
+  param(values, "Binary16 vectors updated in place."),
+  param(multiplier, "Per-lane binary16 multiplier."),
+  param(addend, "Per-lane binary16 addend."),
+)
+export function affineFloat16[i](
+  values: buffer<vec<float16, 4>[]>,
+  multiplier: vec<float16, 4>,
+  addend: vec<float16, 4>,
+) {
+  if (i < values.length) {
+    values[i] = fma(values[i], multiplier, addend);
+  }
+}
+
+@docs(
+  summary("Uses the float16 result context to infer two binary16 vectors."),
+  returns("Binary16 dot product."),
+)
+function contextualHalfDot(): float16 {
+  return dot(vec(1, 2, 3), vec(4, 5, 6));
+}
+
+@docs(
+  summary("Builds vectors and floating math from local context without implicit conversion."),
+  coordinate(i, "Output index and first direction component."),
+  param(output, "Normalized, scaled, and translated directions with a math summary in w."),
+  param(scale, "Scalar broadcast across the three direction lanes."),
+)
+export function contextualMath[i](output: buffer<vec<float32, 4>[]>, scale: float32) {
+  if (i < output.length) {
+    const direction = normalize(vec(float32(i) + 1, 2, 3));
+    let transformed = fma(direction, scale, vec(1, 2, 3));
+    transformed += sin(1);
+    output[i] = vec(transformed, sin(1) + pow(2, 3) + float32(contextualHalfDot()));
+  }
+}

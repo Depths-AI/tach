@@ -444,12 +444,18 @@ func rewriteBlockValues(block *ir.Block, resolve func(ir.ValueID) ir.ValueID) {
 // this ceiling later; guessing would silently reorder observable memory.
 func loopHasUnsafeExitOrSync(loop *ir.Loop) bool {
 	unsafe := false
-	var walk func(*ir.Block)
-	walk = func(block *ir.Block) {
+	var walk func(*ir.Block, bool)
+	walk = func(block *ir.Block, root bool) {
 		if _, ok := block.Term.(*ir.Return); ok {
 			unsafe = true
 		}
 		if _, ok := block.Term.(*ir.Unreachable); ok {
+			unsafe = true
+		}
+		if _, ok := block.Term.(*ir.Break); ok {
+			unsafe = true
+		}
+		if _, ok := block.Term.(*ir.Continue); ok && !root {
 			unsafe = true
 		}
 		for _, in := range block.Instrs {
@@ -457,16 +463,16 @@ func loopHasUnsafeExitOrSync(loop *ir.Loop) bool {
 			case *ir.Atomic, *ir.Barrier:
 				unsafe = true
 			case *ir.If:
-				walk(x.Then)
-				walk(x.Else)
+				walk(x.Then, false)
+				walk(x.Else, false)
 			case *ir.Loop:
-				walk(x.Cond)
-				walk(x.Body)
+				walk(x.Cond, false)
+				walk(x.Body, false)
 			}
 		}
 	}
-	walk(loop.Cond)
-	walk(loop.Body)
+	walk(loop.Cond, false)
+	walk(loop.Body, true)
 	return unsafe
 }
 
@@ -663,6 +669,8 @@ func rewriteTerm(term ir.Term, resolve func(ir.ValueID) ir.ValueID) {
 	case *ir.Yield:
 		values = x.Values
 	case *ir.Continue:
+		values = x.Values
+	case *ir.Break:
 		values = x.Values
 	case *ir.Return:
 		if x.HasValue {

@@ -332,7 +332,7 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 			return fmt.Errorf("kernel %s parameter block consumed %d of %d fields", f.Name, cursor, len(block.Fields))
 		}
 	}
-	if err := st.emitBlock(f.Body, nil, nil); err != nil {
+	if err := st.emitBlock(f.Body, nil); err != nil {
 		return err
 	}
 	e.indent--
@@ -379,6 +379,7 @@ type fnState struct {
 	lowered *backend.Coordinates
 	values  map[ir.ValueID]*types.Type
 	places  map[ir.PlaceID]placeExpr
+	loops   []*ir.Loop
 }
 
 func v(id ir.ValueID) string                        { return fmt.Sprintf("_v%d", id) }
@@ -391,7 +392,20 @@ func (s *fnState) emitInstrs(b *ir.Block) error {
 	}
 	return nil
 }
-func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result, loop *ir.Loop) error {
+
+func (s *fnState) emitLoopTransfer(values []ir.ValueID, keyword string) error {
+	if len(s.loops) == 0 {
+		return fmt.Errorf("%s outside loop", keyword)
+	}
+	loop := s.loops[len(s.loops)-1]
+	for i, id := range values {
+		s.e.line("%s = %s;", v(loop.Results[i].ID), v(id))
+	}
+	s.e.line("%s;", keyword)
+	return nil
+}
+
+func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result) error {
 	if err := s.emitInstrs(b); err != nil {
 		return err
 	}
@@ -409,13 +423,9 @@ func (s *fnState) emitBlock(b *ir.Block, yieldTargets []ir.Result, loop *ir.Loop
 			}
 		}
 	case *ir.Continue:
-		if loop == nil {
-			return fmt.Errorf("continue outside loop")
-		}
-		for i, id := range t.Values {
-			s.e.line("%s = %s;", v(loop.Results[i].ID), v(id))
-		}
-		s.e.line("continue;")
+		return s.emitLoopTransfer(t.Values, "continue")
+	case *ir.Break:
+		return s.emitLoopTransfer(t.Values, "break")
 	case *ir.Unreachable:
 	case *ir.ExitScope:
 		s.e.line("break;")
@@ -623,13 +633,13 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		}
 		e.line("if (%s) {", v(x.Cond))
 		e.indent++
-		if err := s.emitBlock(x.Then, x.Results, nil); err != nil {
+		if err := s.emitBlock(x.Then, x.Results); err != nil {
 			return err
 		}
 		e.indent--
 		e.line("} else {")
 		e.indent++
-		if err := s.emitBlock(x.Else, x.Results, nil); err != nil {
+		if err := s.emitBlock(x.Else, x.Results); err != nil {
 			return err
 		}
 		e.indent--
@@ -642,6 +652,7 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		}
 		e.line("loop {")
 		e.indent++
+		s.loops = append(s.loops, x)
 		for i, p := range x.Params {
 			e.line("let %s: %s = %s;", v(p.ID), e.typeName(p.Type), v(x.Results[i].ID))
 		}
@@ -653,7 +664,9 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 			return fmt.Errorf("loop condition malformed")
 		}
 		e.line("if (!%s) { break; }", v(cy.Values[0]))
-		if err := s.emitBlock(x.Body, nil, x); err != nil {
+		err := s.emitBlock(x.Body, nil)
+		s.loops = s.loops[:len(s.loops)-1]
+		if err != nil {
 			return err
 		}
 		e.indent--
@@ -661,7 +674,7 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 	case *ir.Scope:
 		e.line("loop {")
 		e.indent++
-		if err := s.emitBlock(x.Body, nil, nil); err != nil {
+		if err := s.emitBlock(x.Body, nil); err != nil {
 			return err
 		}
 		if _, exits := x.Body.Term.(*ir.ExitScope); !exits {

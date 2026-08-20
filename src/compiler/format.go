@@ -342,9 +342,10 @@ func formatSource(file, text string) (string, error) {
 			}
 			write(token.Text)
 		case lexer.Less:
-			if previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" {
+			if previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" || previous.Text == "vec" {
 				write("<")
 				generics++
+				lists = append(lists, list{close: lexer.Greater})
 			} else {
 				if line >= 88 {
 					indent++
@@ -362,6 +363,7 @@ func formatSource(file, text string) (string, error) {
 			if generics > 0 {
 				write(">")
 				generics--
+				lists = lists[:len(lists)-1]
 			} else {
 				if line >= 88 {
 					indent++
@@ -373,6 +375,16 @@ func formatSource(file, text string) (string, error) {
 				}
 				space()
 				write(">")
+				space()
+			}
+		case lexer.ShiftRight:
+			if generics >= 2 {
+				write(">>")
+				generics -= 2
+				lists = lists[:len(lists)-2]
+			} else {
+				space()
+				write(">>")
 				space()
 			}
 		default:
@@ -418,8 +430,8 @@ func formatSource(file, text string) (string, error) {
 }
 
 func listWidth(tokens []lexer.Token, start int, close lexer.Kind) (int, bool) {
-	depth, width, comma := 0, 1, false
-	for _, token := range tokens[start+1:] {
+	depth, generics, width, comma := 0, 0, 1, false
+	for index, token := range tokens[start+1:] {
 		switch token.Kind {
 		case lexer.LParen, lexer.LBracket, lexer.LBrace:
 			depth++
@@ -428,8 +440,19 @@ func listWidth(tokens []lexer.Token, start int, close lexer.Kind) (int, bool) {
 				return width + 1, comma
 			}
 			depth--
+		case lexer.Less:
+			previous := tokens[start+index]
+			if previous.Kind == lexer.Ident && (previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" || previous.Text == "vec") {
+				generics++
+			}
+		case lexer.Greater:
+			if generics > 0 {
+				generics--
+			}
+		case lexer.ShiftRight:
+			generics = max(0, generics-2)
 		case lexer.Comma:
-			comma = comma || depth == 0
+			comma = comma || depth == 0 && generics == 0
 		}
 		width += len(token.Text) + 1
 	}

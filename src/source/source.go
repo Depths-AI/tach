@@ -7,14 +7,15 @@ import (
 )
 
 type Pos struct {
-	Offset int
-	Line   int
-	Column int
+	Offset int `json:"offset"`
+	Line   int `json:"line"`
+	Column int `json:"column"`
 }
 
 type Span struct {
-	File       string
-	Start, End Pos
+	File  string `json:"file"`
+	Start Pos    `json:"start"`
+	End   Pos    `json:"end"`
 }
 
 func (s Span) String() string {
@@ -25,15 +26,19 @@ func (s Span) String() string {
 }
 
 type Related struct {
-	Span    Span
-	Message string
+	Span    Span   `json:"span"`
+	Message string `json:"message"`
+	Source  string `json:"source,omitempty"`
 }
 
 type Diagnostic struct {
-	Kind    string
-	Span    Span
-	Message string
-	Related []Related
+	Severity string    `json:"severity"`
+	Kind     string    `json:"code"`
+	Span     Span      `json:"span"`
+	Message  string    `json:"message"`
+	Help     string    `json:"help,omitempty"`
+	Source   string    `json:"source,omitempty"`
+	Related  []Related `json:"related,omitempty"`
 }
 
 func (d Diagnostic) Error() string { return fmt.Sprintf("%s: %s", d.Span.String(), d.Message) }
@@ -57,6 +62,9 @@ func (ds Diagnostics) Sorted() Diagnostics {
 		}
 		if a.Span.Start.Offset != b.Span.Start.Offset {
 			return a.Span.Start.Offset < b.Span.Start.Offset
+		}
+		if a.Severity != b.Severity {
+			return a.Severity != "warning"
 		}
 		return a.Kind < b.Kind
 	})

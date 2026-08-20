@@ -181,6 +181,15 @@ buffer projection becomes a typed place; local rebinding becomes structured
 SSA results; a `run` buffer becomes a resource/version edge; and a program
 shape becomes a checked host-evaluable expression.
 
+Numeric inference has one expression-local authority here. It resolves all
+operands of an operator or intrinsic together using explicit types, expected
+context, concrete siblings, intrinsic domains, then defaults. This makes
+operand order irrelevant without importing later-use, whole-program, host, or
+backend knowledge. Inferred `vec(...)` construction and scalar broadcast are
+then lowered to ordinary typed composites.
+Plain and compound assignment enter this same resolver; assignment syntax does
+not carry a second operand-typing algorithm.
+
 ## 4. Two target-independent IRs
 
 ### Kernel IR: per-invocation semantics
@@ -199,6 +208,16 @@ loads/stores, atomics, barriers, workgroup declarations, and structured
 values. Bindings, descriptor sets, padding, target pointer types, and builtin
 variable names do not appear.
 
+Inference is absent from this IR: each value already has one concrete type.
+`vec(...)` and scalar broadcast require no new operation because semantic
+lowering expresses both with the existing `Composite` instruction.
+Intrinsic signatures live with their Kernel IR kinds and are consumed by both
+semantic lowering and IR verification, so admissible types have one authority.
+
+`Continue` and `Break` terminators carry the loop values for their exact CFG
+edge, so early transfer remains valid SSA rather than source-level control that
+a backend must rediscover. `fma` remains one target-neutral typed intrinsic.
+
 ### Flow IR: public program semantics
 
 `src/flow` represents host-callable work around indexed stages:
@@ -216,7 +235,7 @@ Program
 An exported indexed function synthesizes one Flow program with one launch-axis
 shape and one dispatch. An exported unindexed function lowers its source
 `const`, `transient`, and `run` declarations directly. A `view<srgb8>` program
-also records the final runtime `float32x4` resource version and checked width
+also records the final runtime `vec<float32, 4>` resource version and checked width
 and height shapes. It may have no external resource when it constructs the
 complete frame in a transient.
 
@@ -407,7 +426,8 @@ so physical padding cannot become a phantom logical element.
 1. indexes physical and helper function coordinate requirements;
 2. emits structs, resources, parameter blocks, helpers, and private entries;
 3. maps structured Kernel IR directly to structured WGSL, including the
-   shared view-pack helper;
+   shared view-pack helper, carrier assignments before `break`/`continue`, and
+   the WGSL `fma` builtin;
 4. stores a fused or standalone view by unpacking the packed word with
    `unpack4x8unorm` into an `rgba8unorm` storage texture; and
 5. reparses the exact generated WGSL subset with its in-tree validator.
@@ -436,6 +456,11 @@ GLSL.std.450 math where required. It owns result IDs,
 logical/physical types,
 interface variables, decorations, structured CFG construction, phi nodes,
 access chains, atomics, barriers, and extended instructions.
+
+Early loop transfers become edges to the structured continuation or merge
+block and contribute their carried values to that block's `OpPhi` nodes.
+`fma` becomes GLSL.std.450 `Fma`; neither mapping changes its target-neutral
+source type contract.
 
 Host-visible StorageBuffer/uniform aggregates use decorated physical types.
 SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
@@ -509,6 +534,18 @@ module and describes Tach types, function roles, coordinates, buffers, access,
 returns, documentation, project identity, and JavaScript-package identity
 without importing or spelling TypeScript. `tach-ts` owns JSDoc/Markdown presentation,
 the generated usage sample, module-document filenames, and npm metadata.
+
+Diagnostics cross the native/TypeScript boundary as one schema-1 JSON envelope
+on the private compiler's stderr. This keeps stdout reserved for project and
+runtime descriptions while allowing successful operations to carry warnings.
+Each record has severity, stable code, byte offset plus line/column span,
+message, captured source line, optional help, and related source locations.
+The public TypeScript layer validates the envelope once. It then exposes the
+same records through `ProjectResult.diagnostics`, `CompilerError.diagnostics`,
+Markdown-like terminal rendering, or the public CLI's `--json` result. These
+structured records are the sole cross-layer message model. Go error strings
+remain an internal compiler and test representation; neither backend owns a
+diagnostic model or public renderer.
 
 ### Artifact transaction
 
@@ -653,17 +690,21 @@ Tests mirror ownership:
 - `browser-test` builds the example project once and checks every generated
   endpoint through its exact generated WGSL in WebGPU, including fused and
   fallback views, exact 8-bit swatch presentation, sustained CPU-selected
-  canvas presentation, Float16 math/storage/parameters, an odd direct f16
-  array, and a prefixed f16 runtime tail;
+  canvas presentation, contextual numeric/vector inference, scalar broadcast,
+  nearest-loop early exits and skips, FP16/FP32 `fma`, Float16
+  math/storage/parameters, an odd direct f16 array, and
+  a prefixed f16 runtime tail;
 - `deno-test` independently builds the same example project, validates its
   SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
   including fused/fallback offscreen projection, the same swatch pair,
-  owner-neutral recipes, repeated logical sessions, and the same Float16 seams;
-- `showcase-ts` builds seven workload kernels plus one shared color file and
-  runs nine host-neutral rendering, mathematical, and physics workloads through
-  both WebGPU and Vulkan, including matched FP32/FP16 matrix and
-  arithmetic-dense oscillator pairs; browser renderers use direct canvas
-  presentation while native renderers exercise packed view projection;
+  owner-neutral recipes, repeated logical sessions, and the same loop,
+  contextual inference, multiply-add, and Float16 seams;
+- `showcase-ts` builds eight workload kernels plus one shared color file and
+  runs eleven host-neutral rendering, mathematical, and physics workloads
+  through both WebGPU and Vulkan, including matched FP32/FP16 matrix,
+  data-dependent complex recurrence, and arithmetic-dense oscillator pairs;
+  browser renderers use direct canvas presentation while native renderers
+  exercise packed view projection;
   and
 - `dupl`, `deadcode`, and `staticcheck` provide structural duplication,
   whole-program reachability, and correctness audits beyond behavioral tests.

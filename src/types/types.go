@@ -58,7 +58,7 @@ func (t *Type) String() string {
 	case Void, Bool, I32, U32, F16, F32:
 		return t.Name
 	case Vector:
-		return fmt.Sprintf("%sx%d", t.Elem, t.Lanes)
+		return fmt.Sprintf("vec<%s, %d>", t.Elem, t.Lanes)
 	case Struct:
 		return t.Name
 	case Atomic:
@@ -230,30 +230,6 @@ func ParseBuiltin(name string) *Type {
 		return TF16
 	case "float32":
 		return TF32
-	case "float16x2":
-		return Vec(TF16, 2)
-	case "float16x3":
-		return Vec(TF16, 3)
-	case "float16x4":
-		return Vec(TF16, 4)
-	case "float32x2":
-		return Vec(TF32, 2)
-	case "float32x3":
-		return Vec(TF32, 3)
-	case "float32x4":
-		return Vec(TF32, 4)
-	case "uint32x2":
-		return Vec(TU32, 2)
-	case "uint32x3":
-		return Vec(TU32, 3)
-	case "uint32x4":
-		return Vec(TU32, 4)
-	case "int32x2":
-		return Vec(TI32, 2)
-	case "int32x3":
-		return Vec(TI32, 3)
-	case "int32x4":
-		return Vec(TI32, 4)
 	}
 	return nil
 }

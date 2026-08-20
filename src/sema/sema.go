@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -73,6 +74,13 @@ type fnBuilder struct {
 	ids   *idAllocator
 	block *ir.Block
 	top   bool
+	loop  *loopContext
+}
+
+type loopContext struct {
+	names []string
+	base  env
+	post  ast.Stmt
 }
 
 func (b *fnBuilder) value() ir.ValueID {
@@ -87,7 +95,7 @@ func (b *fnBuilder) emit(i ir.Instr) { b.block.Instrs = append(b.block.Instrs, i
 func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	// Structured regions share one allocator. SSA/place IDs are function-global
 	// identities even when definitions have region-scoped visibility.
-	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block}
+	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block, loop: b.loop}
 }
 
 func CheckAndLower(m *ast.Module) (*flow.Module, error) {
@@ -139,7 +147,7 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 			}
 		}
 	}
-	for _, n := range []string{"void", "bool", "int32", "uint32", "float16", "float32", "float16x2", "float16x3", "float16x4", "float32x2", "float32x3", "float32x4", "uint32x2", "uint32x3", "uint32x4", "int32x2", "int32x3", "int32x4"} {
+	for _, n := range []string{"void", "bool", "int32", "uint32", "float16", "float32"} {
 		c.types[n] = types.ParseBuiltin(n)
 	}
 	var interfaceDiagnostics source.Diagnostics
@@ -159,6 +167,10 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
 	if err := ir.Verify(c.mod); err != nil {
+		var diagnostic *source.Diagnostic
+		if errors.As(err, &diagnostic) {
+			return nil, nil, appendError(documentationDiagnostics, diagnostic).Sorted()
+		}
 		return nil, nil, fmt.Errorf("internal IR verification failed: %w", err)
 	}
 	if err := c.lowerPrograms(); err != nil {
@@ -450,6 +462,19 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 			return nil, diag(t.Span, "fixed array length must be a positive uint32 constant")
 		}
 		return types.Array(e, uint32(n)), nil
+	case *ast.VectorType:
+		e, err := c.resolveType(t.Elem)
+		if err != nil {
+			return nil, err
+		}
+		if !types.IsNumericScalar(e) {
+			return nil, diag(t.Span, "vec element type must be numeric, got %s", e)
+		}
+		lanes, err := strconv.Atoi(t.Lanes)
+		if err != nil || lanes < 2 || lanes > 4 {
+			return nil, diag(t.Span, "vec lane count must be 2, 3, or 4")
+		}
+		return types.Vec(e, lanes), nil
 	case *ast.GenericType:
 		if t.Name == "buffer" {
 			return nil, diag(t.Span, "buffer<T> is only valid in a kernel parameter")
@@ -850,6 +875,17 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		return c.lowerWhile(b, e, x)
 	case *ast.ForStmt:
 		return c.lowerFor(b, e, x)
+	case *ast.BreakStmt:
+		if b.loop == nil {
+			return diag(x.Span, "break is only valid inside a loop")
+		}
+		b.block.Term = &ir.Break{Values: loopValues(b.loop.names, e)}
+		return nil
+	case *ast.ContinueStmt:
+		if b.loop == nil {
+			return diag(x.Span, "continue is only valid inside a loop")
+		}
+		return c.continueLoop(b, e)
 	default:
 		return fmt.Errorf("unknown statement %T", s)
 	}
@@ -867,19 +903,7 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 			if op == "=" {
 				nv, nt, err = c.lowerExpr(b, e, rhs, sym.ty)
 			} else {
-				binOp := strings.TrimSuffix(op, "=")
-				want := binaryRHSExpected(sym.ty, rhs, binOp)
-				rv, rt, e2 := c.lowerExpr(b, e, rhs, want)
-				if e2 != nil {
-					return e2
-				}
-				if binOp == "<<" || binOp == ">>" {
-					rv, rt, e2 = c.prepareShiftCount(b, rv, rt, sym.ty, rhs.GetSpan())
-					if e2 != nil {
-						return e2
-					}
-				}
-				nv, nt, err = c.emitBinary(b, binOp, sym.value, sym.ty, rv, rt, span)
+				nv, nt, err = c.lowerCompound(b, e, strings.TrimSuffix(op, "="), sym.value, sym.ty, rhs, span)
 			}
 			if err != nil {
 				return err
@@ -903,19 +927,7 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 	} else {
 		old := b.value()
 		b.emit(&ir.Load{Result: old, Type: pt, Place: p, Span: target.GetSpan()})
-		binOp := strings.TrimSuffix(op, "=")
-		want := binaryRHSExpected(pt, rhs, binOp)
-		rv, rt, e2 := c.lowerExpr(b, e, rhs, want)
-		if e2 != nil {
-			return e2
-		}
-		if binOp == "<<" || binOp == ">>" {
-			rv, rt, e2 = c.prepareShiftCount(b, rv, rt, pt, rhs.GetSpan())
-			if e2 != nil {
-				return e2
-			}
-		}
-		v, vt, err = c.emitBinary(b, binOp, old, pt, rv, rt, span)
+		v, vt, err = c.lowerCompound(b, e, strings.TrimSuffix(op, "="), old, pt, rhs, span)
 	}
 	if err != nil {
 		return err
@@ -1043,8 +1055,38 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 	}
 	return nil
 }
-func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
-	names := carriedNames([]*ast.BlockStmt{x.Body}, e)
+func loopValues(names []string, e env) []ir.ValueID {
+	values := make([]ir.ValueID, len(names))
+	for i, name := range names {
+		values[i] = e.syms[name].value
+	}
+	return values
+}
+
+func (c *Checker) continueLoop(b *fnBuilder, e env) error {
+	loop := b.loop
+	if loop.post != nil {
+		postEnv := loop.base.clone()
+		for _, name := range loop.names {
+			symbol := postEnv.syms[name]
+			symbol.value = e.syms[name].value
+			postEnv.syms[name] = symbol
+		}
+		if err := c.lowerStmt(b, postEnv, loop.post); err != nil {
+			return err
+		}
+		e = postEnv
+	}
+	b.block.Term = &ir.Continue{Values: loopValues(loop.names, e)}
+	return nil
+}
+
+func (c *Checker) lowerLoop(b *fnBuilder, e env, cond ast.Expr, body *ast.BlockStmt, post ast.Stmt, span source.Span) error {
+	blocks := []*ast.BlockStmt{body}
+	if post != nil {
+		blocks = append(blocks, &ast.BlockStmt{Stmts: []ast.Stmt{post}})
+	}
+	names := carriedNames(blocks, e)
 	params := make([]ir.LoopParam, len(names))
 	results := make([]ir.Result, len(names))
 	loopEnv := e.clone()
@@ -1059,41 +1101,37 @@ func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
 	}
 	condBlock := &ir.Block{}
 	cb := b.child(condBlock)
-	cv, ct, err := c.lowerExpr(cb, loopEnv, x.Cond, types.TBool)
+	cv, ct, err := c.lowerExpr(cb, loopEnv, cond, types.TBool)
 	if err != nil {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "while condition is %s, want bool", ct)
+		return diag(cond.GetSpan(), "loop condition is %s, want bool", ct)
 	}
 	condBlock.Term = &ir.Yield{Values: []ir.ValueID{cv}}
 	bodyBlock := &ir.Block{}
 	bb := b.child(bodyBlock)
+	bb.loop = &loopContext{names: names, base: loopEnv, post: post}
 	bodyEnv := loopEnv.clone()
-	if err := c.lowerBlock(bb, x.Body, bodyEnv, "loop"); err != nil {
+	if err := c.lowerBlock(bb, body, bodyEnv, "loop"); err != nil {
 		return err
 	}
 	if bodyBlock.Term == nil {
-		vals := make([]ir.ValueID, len(names))
-		for i, n := range names {
-			vals[i] = bodyEnv.syms[n].value
-		}
-		bodyBlock.Term = &ir.Continue{Values: vals}
-	} else {
-		if _, ok := bodyBlock.Term.(*ir.Return); ok {
-			return diag(x.Body.Span, "a while body that unconditionally returns is better expressed as if; Tach loops currently require a continuing path")
-		}
-		if _, ok := bodyBlock.Term.(*ir.Unreachable); ok {
-			return diag(x.Body.Span, "while body has no continuing path")
+		if err := c.continueLoop(bb, bodyEnv); err != nil {
+			return err
 		}
 	}
-	b.emit(&ir.Loop{Results: results, Params: params, Cond: condBlock, Body: bodyBlock, Span: x.Span})
+	b.emit(&ir.Loop{Results: results, Params: params, Cond: condBlock, Body: bodyBlock, Span: span})
 	for i, n := range names {
 		sym := e.syms[n]
 		sym.value = results[i].ID
 		e.syms[n] = sym
 	}
 	return nil
+}
+
+func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
+	return c.lowerLoop(b, e, x.Cond, x.Body, nil, x.Span)
 }
 
 func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
@@ -1103,10 +1141,7 @@ func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
 	if err := c.lowerStmt(b, loopEnv, x.Init); err != nil {
 		return err
 	}
-	body := &ast.BlockStmt{Span: x.Body.Span}
-	body.Stmts = append(body.Stmts, x.Body.Stmts...)
-	body.Stmts = append(body.Stmts, x.Post)
-	if err := c.lowerWhile(b, loopEnv, &ast.WhileStmt{Cond: x.Cond, Body: body, Span: x.Span}); err != nil {
+	if err := c.lowerLoop(b, loopEnv, x.Cond, x.Body, x.Post, x.Span); err != nil {
 		return err
 	}
 	// The initializer is lexically scoped to the for-loop. Mutations to symbols
@@ -1309,41 +1344,59 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		if !types.Equal(ct, types.TBool) {
 			return 0, nil, diag(v.Cond.GetSpan(), "conditional expression requires bool condition, got %s", ct)
 		}
-		thenBlock := &ir.Block{}
-		tb := b.child(thenBlock)
-		elseBlock := &ir.Block{}
-		eb := b.child(elseBlock)
-		thenNumber, thenIsNumber := v.Then.(*ast.NumberExpr)
-		elseNumber, elseIsNumber := v.Else.(*ast.NumberExpr)
-		branchType := numberPairExpected(thenNumber, elseNumber, expected)
-		var tv, ev ir.ValueID
-		var tt, et *types.Type
-		if expected == nil && thenIsNumber && !elseIsNumber && !floatNumber(thenNumber) {
-			ev, et, err = c.lowerExpr(eb, e.clone(), v.Else, nil)
-			if err == nil {
-				tv, tt, err = c.lowerExpr(tb, e.clone(), v.Then, et)
+		expressions := []ast.Expr{v.Then, v.Else}
+		arguments := make([]detachedExpr, len(expressions))
+		expectedElement, expectedLanes := numericElement(expected)
+		if expected == nil || expectedElement != nil {
+			for i, expression := range expressions {
+				arguments[i], err = c.lowerDetached(b, e.clone(), expression, nil)
+				if err != nil {
+					return 0, nil, err
+				}
+			}
+			thenElement, _ := numericElement(arguments[0].type_)
+			elseElement, _ := numericElement(arguments[1].type_)
+			if thenElement != nil && elseElement != nil {
+				expectedElement, expectedLanes, err = resolveNumericOperands("conditional", ir.NumericAny, arguments, expectedElement, expectedLanes)
+				if err != nil {
+					return 0, nil, diag(v.Span, "%v", err)
+				}
+				for i, argument := range arguments {
+					_, lanes := numericElement(argument.type_)
+					want := expectedElement
+					if lanes > 0 {
+						want = types.Vec(expectedElement, expectedLanes)
+					}
+					if argument.contextual {
+						arguments[i], err = c.lowerDetached(b, e.clone(), expressions[i], want)
+						if err != nil {
+							return 0, nil, err
+						}
+					}
+				}
+			} else if expectedElement != nil {
+				return 0, nil, diag(v.Span, "conditional branches cannot satisfy %s context", expected)
 			}
 		} else {
-			tv, tt, err = c.lowerExpr(tb, e.clone(), v.Then, branchType)
-			if err == nil {
-				branchType = expected
-				if branchType == nil {
-					branchType = tt
+			for i, expression := range expressions {
+				arguments[i], err = c.lowerDetached(b, e.clone(), expression, expected)
+				if err != nil {
+					return 0, nil, err
 				}
-				ev, et, err = c.lowerExpr(eb, e.clone(), v.Else, branchType)
 			}
 		}
-		if err != nil {
-			return 0, nil, err
+		if !types.Equal(arguments[0].type_, arguments[1].type_) {
+			return 0, nil, diag(v.Span, "conditional branches have types %s and %s", arguments[0].type_, arguments[1].type_)
 		}
-		thenBlock.Term = &ir.Yield{Values: []ir.ValueID{tv}}
-		elseBlock.Term = &ir.Yield{Values: []ir.ValueID{ev}}
-		if !types.Equal(tt, et) {
-			return 0, nil, diag(v.Span, "conditional branches have types %s and %s", tt, et)
+		if expected != nil && !types.Equal(arguments[0].type_, expected) {
+			return 0, nil, diag(v.Span, "conditional result is %s, context requires %s", arguments[0].type_, expected)
 		}
+		thenBlock, elseBlock := arguments[0].block, arguments[1].block
+		thenBlock.Term = &ir.Yield{Values: []ir.ValueID{arguments[0].value}}
+		elseBlock.Term = &ir.Yield{Values: []ir.ValueID{arguments[1].value}}
 		r := b.value()
-		b.emit(&ir.If{Results: []ir.Result{{ID: r, Type: tt}}, Cond: cond, Then: thenBlock, Else: elseBlock, Span: v.Span})
-		return r, tt, nil
+		b.emit(&ir.If{Results: []ir.Result{{ID: r, Type: arguments[0].type_}}, Cond: cond, Then: thenBlock, Else: elseBlock, Span: v.Span})
+		return r, arguments[0].type_, nil
 	case *ast.CallExpr:
 		return c.lowerCall(b, e, v, expected)
 	default:
@@ -1472,69 +1525,42 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 		if err != nil {
 			return 0, nil, err
 		}
-		countType := types.ShiftCountType(lt)
-		if countType == nil {
-			return 0, nil, diag(x.Left.GetSpan(), "%s requires an int32/uint32 scalar or integer vector on the left, got %s", x.Op, lt)
-		}
-		want := countType
-		if countType.Kind == types.Vector {
-			want = binaryRHSExpected(lt, x.Right, x.Op)
-		}
-		r, rt, err := c.lowerExpr(b, e, x.Right, want)
-		if err != nil {
-			return 0, nil, err
-		}
-		r, rt, err = c.prepareShiftCount(b, r, rt, lt, x.Right.GetSpan())
-		if err != nil {
-			return 0, nil, err
-		}
-		return c.emitBinary(b, x.Op, l, lt, r, rt, x.Span)
+		return c.lowerShift(b, e, x.Op, l, lt, x.Right, x.Span)
 	}
 
-	var l ir.ValueID
-	var lt *types.Type
-	var r ir.ValueID
-	var rt *types.Type
-	var err error
-	leftNumber, ln := x.Left.(*ast.NumberExpr)
-	rightNumber, rn := x.Right.(*ast.NumberExpr)
-	expected = numberPairExpected(leftNumber, rightNumber, expected)
-	if ln && !rn && expected == nil && !floatNumber(leftNumber) {
-		r, rt, err = c.lowerExpr(b, e, x.Right, nil)
-		if err != nil {
-			return 0, nil, err
-		}
-		want := rt
-		if rt.Kind == types.Vector && vectorScalarOperator(x.Op) {
-			want = rt.Elem
-		}
-		l, lt, err = c.lowerExpr(b, e, x.Left, want)
-	} else {
-		l, lt, err = c.lowerExpr(b, e, x.Left, expected)
-		if err == nil {
-			want := binaryRHSExpected(lt, x.Right, x.Op)
-			r, rt, err = c.lowerExpr(b, e, x.Right, want)
-		}
-	}
+	expressions := []ast.Expr{x.Left, x.Right}
+	arguments, err := c.lowerNumericArguments(b, e, x.Op, expressions)
 	if err != nil {
 		return 0, nil, err
 	}
-	return c.emitBinary(b, x.Op, l, lt, r, rt, x.Span)
+
+	return c.emitResolvedBinary(b, e, x.Op, arguments, expected, x.Span)
 }
 
-func numberPairExpected(left, right *ast.NumberExpr, expected *types.Type) *types.Type {
-	if expected != nil || left == nil || right == nil {
-		return expected
+func (c *Checker) emitResolvedBinary(b *fnBuilder, e env, op string, arguments []detachedExpr, expected *types.Type, span source.Span) (ir.ValueID, *types.Type, error) {
+	var element *types.Type
+	if expectedElement, _ := numericElement(expected); expectedElement != nil && op != "==" && op != "!=" && op != "<" && op != "<=" && op != ">" && op != ">=" {
+		element = expectedElement
 	}
-	if floatNumber(left) || floatNumber(right) {
-		return types.TF32
+	element, lanes, err := resolveNumericOperands(op, ir.NumericAny, arguments, element, 0)
+	if err != nil {
+		return 0, nil, diag(span, "%v", err)
 	}
-	return nil
-}
-
-func floatNumber(number *ast.NumberExpr) bool {
-	raw, basePrefixed := splitNumberLiteral(number.Raw)
-	return !basePrefixed && strings.ContainsAny(raw, ".eE")
+	vector := types.Vec(element, lanes)
+	values := make([]ir.ValueID, 2)
+	valueTypes := make([]*types.Type, 2)
+	for i, argument := range arguments {
+		_, argumentLanes := numericElement(argument.type_)
+		want := element
+		if argumentLanes > 0 {
+			want = vector
+		}
+		values[i], valueTypes[i], err = c.commitNumericArgument(b, e, argument, want)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+	return c.emitBinary(b, op, values[0], valueTypes[0], values[1], valueTypes[1], span)
 }
 
 func vectorScalarOperator(op string) bool {
@@ -1545,20 +1571,36 @@ func vectorScalarOperator(op string) bool {
 	return false
 }
 
-func binaryRHSExpected(left *types.Type, right ast.Expr, op string) *types.Type {
-	if left == nil || left.Kind != types.Vector || (!vectorScalarOperator(op) && op != "<<" && op != ">>") {
-		if op == "<<" || op == ">>" {
-			return types.ShiftCountType(left)
-		}
-		return left
+func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID, leftType *types.Type, right ast.Expr, span source.Span) (ir.ValueID, *types.Type, error) {
+	if op == "<<" || op == ">>" {
+		return c.lowerShift(b, e, op, left, leftType, right, span)
 	}
-	if _, literal := right.(*ast.NumberExpr); literal {
-		if op == "<<" || op == ">>" {
-			return types.TU32
-		}
-		return left.Elem
+	rightArguments, err := c.lowerNumericArguments(b, e, op, []ast.Expr{right})
+	if err != nil {
+		return 0, nil, err
 	}
-	return nil
+	arguments := append([]detachedExpr{{block: &ir.Block{}, value: left, type_: leftType}}, rightArguments...)
+	return c.emitResolvedBinary(b, e, op, arguments, leftType, span)
+}
+
+func (c *Checker) lowerShift(b *fnBuilder, e env, op string, left ir.ValueID, leftType *types.Type, right ast.Expr, span source.Span) (ir.ValueID, *types.Type, error) {
+	countType := types.ShiftCountType(leftType)
+	if countType == nil {
+		return 0, nil, diag(span, "%s requires an int32/uint32 scalar or integer vector on the left, got %s", op, leftType)
+	}
+	want := countType
+	if countType.Kind == types.Vector && !contextualNumeric(right) {
+		want = nil
+	}
+	r, rt, err := c.lowerExpr(b, e, right, want)
+	if err != nil {
+		return 0, nil, err
+	}
+	r, rt, err = c.prepareShiftCount(b, r, rt, leftType, right.GetSpan())
+	if err != nil {
+		return 0, nil, err
+	}
+	return c.emitBinary(b, op, left, leftType, r, rt, span)
 }
 
 func (c *Checker) prepareShiftCount(b *fnBuilder, value ir.ValueID, got, shifted *types.Type, span source.Span) (ir.ValueID, *types.Type, error) {
@@ -1692,6 +1734,8 @@ func intrinsicBuiltin(name string) (ir.IntrinsicKind, bool) {
 		return ir.IntrinsicMax, true
 	case "clamp":
 		return ir.IntrinsicClamp, true
+	case "fma":
+		return ir.IntrinsicFma, true
 	case "dot":
 		return ir.IntrinsicDot, true
 	case "length":
@@ -1714,7 +1758,7 @@ func ReservedName(name string) bool {
 	if _, ok := atomicBuiltin(name); ok {
 		return true
 	}
-	if name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" || name == "view" || name == "srgb8" {
+	if name == "break" || name == "continue" || name == "vec" || name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" || name == "view" || name == "srgb8" {
 		return true
 	}
 	return types.ParseBuiltin(name) != nil
@@ -1729,131 +1773,278 @@ func viewType(expression ast.TypeExpr) (flow.ViewFormat, bool) {
 	return flow.SRGB8, ok && format.Name == "srgb8"
 }
 
-func intrinsicArity(kind ir.IntrinsicKind) int {
-	switch kind {
-	case ir.IntrinsicPow, ir.IntrinsicMin, ir.IntrinsicMax, ir.IntrinsicDot, ir.IntrinsicDistance, ir.IntrinsicCross:
-		return 2
-	case ir.IntrinsicClamp:
-		return 3
-	default:
-		return 1
-	}
+type detachedExpr struct {
+	block      *ir.Block
+	value      ir.ValueID
+	type_      *types.Type
+	contextual bool
+	source     ast.Expr
 }
 
-func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.IntrinsicKind, expected *types.Type) (ir.ValueID, *types.Type, error) {
-	wantN := intrinsicArity(kind)
-	if len(x.Args) != wantN {
-		return 0, nil, diag(x.Span, "%s expects %d argument(s), got %d", kind, wantN, len(x.Args))
-	}
-	args := make([]ir.ValueID, wantN)
-	argTypes := make([]*types.Type, wantN)
+func (c *Checker) lowerDetached(b *fnBuilder, e env, expression ast.Expr, expected *types.Type) (detachedExpr, error) {
+	block := &ir.Block{}
+	value, type_, err := c.lowerExpr(b.child(block), e, expression, expected)
+	return detachedExpr{block: block, value: value, type_: type_, contextual: contextualNumeric(expression), source: expression}, err
+}
 
-	firstExpected := expected
-	if kind == ir.IntrinsicDot || kind == ir.IntrinsicLength || kind == ir.IntrinsicDistance {
-		firstExpected = nil // a component result does not determine vector width
-	}
-	v, t, err := c.lowerExpr(b, e, x.Args[0], firstExpected)
-	if err != nil {
-		return 0, nil, err
-	}
-	args[0], argTypes[0] = v, t
-	for i := 1; i < wantN; i++ {
-		want := argTypes[0]
-		broadcast := intrinsicBroadcastsScalars(kind) && argTypes[0].Kind == types.Vector
-		if broadcast {
-			want = nil
-			if _, literal := x.Args[i].(*ast.NumberExpr); literal {
-				want = argTypes[0].Elem
+func contextualNumeric(expression ast.Expr) bool {
+	switch x := expression.(type) {
+	case *ast.NumberExpr:
+		return true
+	case *ast.UnaryExpr:
+		return (x.Op == "-" || x.Op == "~") && contextualNumeric(x.X)
+	case *ast.BinaryExpr:
+		return contextualNumeric(x.Left) && contextualNumeric(x.Right)
+	case *ast.ConditionalExpr:
+		return contextualNumeric(x.Then) && contextualNumeric(x.Else)
+	case *ast.CallExpr:
+		callee, ok := x.Callee.(*ast.IdentExpr)
+		if !ok {
+			return false
+		}
+		if callee.Name != "vec" {
+			if _, ok = intrinsicBuiltin(callee.Name); !ok {
+				return false
 			}
 		}
-		v, t, err := c.lowerExpr(b, e, x.Args[i], want)
-		if err != nil {
-			return 0, nil, err
-		}
-		if broadcast && types.Equal(t, argTypes[0].Elem) {
-			v, t = c.splat(b, v, argTypes[0], x.Args[i].GetSpan()), argTypes[0]
-		}
-		args[i], argTypes[i] = v, t
-	}
-
-	floatVec := func(t *types.Type) bool {
-		return t != nil && t.Kind == types.Vector && types.IsFloatLike(t.Elem)
-	}
-	same := func() bool {
-		for i := 1; i < len(argTypes); i++ {
-			if !types.Equal(argTypes[0], argTypes[i]) {
+		for _, argument := range x.Args {
+			if !contextualNumeric(argument) {
 				return false
 			}
 		}
 		return true
 	}
-	out := argTypes[0]
-	switch kind {
-	case ir.IntrinsicAbs:
-		t := argTypes[0]
-		ok := types.IsSignedNumeric(t)
-		if !ok {
-			return 0, nil, diag(x.Span, "abs requires a signed numeric scalar or vector, got %s", t)
+	return false
+}
+
+func numericElement(t *types.Type) (*types.Type, int) {
+	if types.IsNumericScalar(t) {
+		return t, 0
+	}
+	if t != nil && t.Kind == types.Vector && types.IsNumericScalar(t.Elem) {
+		return t.Elem, t.Lanes
+	}
+	return nil, 0
+}
+
+func defaultNumericElement(domain ir.NumericDomain, arguments []detachedExpr) *types.Type {
+	if domain == ir.NumericFloat {
+		return types.TF32
+	}
+	for _, argument := range arguments {
+		element, _ := numericElement(argument.type_)
+		if element != nil && element.Kind == types.F32 {
+			return types.TF32
 		}
-	case ir.IntrinsicFloor, ir.IntrinsicCeil, ir.IntrinsicTrunc, ir.IntrinsicSin, ir.IntrinsicCos, ir.IntrinsicTan, ir.IntrinsicExp, ir.IntrinsicExp2, ir.IntrinsicLog, ir.IntrinsicLog2, ir.IntrinsicSqrt, ir.IntrinsicRSqrt:
-		if !types.IsFloatLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "%s requires a floating-point scalar/vector, got %s", kind, argTypes[0])
+	}
+	if domain == ir.NumericSigned {
+		return types.TI32
+	}
+	for _, argument := range arguments {
+		element, _ := numericElement(argument.type_)
+		if element != nil && element.Kind == types.I32 {
+			return types.TI32
 		}
-	case ir.IntrinsicPow:
-		if !same() || !types.IsFloatLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "pow requires matching floating-point scalar/vector operands")
+	}
+	return types.TU32
+}
+
+func (c *Checker) lowerNumericArguments(b *fnBuilder, e env, operation string, expressions []ast.Expr) ([]detachedExpr, error) {
+	arguments := make([]detachedExpr, len(expressions))
+	for i, expression := range expressions {
+		argument, err := c.lowerDetached(b, e, expression, nil)
+		if err != nil {
+			return nil, err
 		}
-	case ir.IntrinsicMin, ir.IntrinsicMax:
-		// DECISION: Float bounds stay unavailable until Tach defines NaN and
-		// signed-zero behavior; integer-only semantics are identical everywhere.
-		if !same() || !types.IsIntegerLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "%s requires matching integer scalar/vector operands", kind)
+		if element, _ := numericElement(argument.type_); element == nil {
+			return nil, diag(expression.GetSpan(), "%s requires numeric values, got %s", operation, argument.type_)
 		}
-	case ir.IntrinsicClamp:
-		// See the float-bound decision above; clamp inherits the same ceiling.
-		if !same() || !types.IsIntegerLike(argTypes[0]) {
-			return 0, nil, diag(x.Span, "clamp requires three matching integer scalar/vector operands")
+		arguments[i] = argument
+	}
+	return arguments, nil
+}
+
+func resolveNumericOperands(operation string, domain ir.NumericDomain, arguments []detachedExpr, element *types.Type, lanes int) (*types.Type, int, error) {
+	for _, argument := range arguments {
+		argumentElement, argumentLanes := numericElement(argument.type_)
+		if argumentLanes > 0 {
+			if lanes != 0 && lanes != argumentLanes {
+				return nil, 0, fmt.Errorf("%s operands use conflicting vector widths %d and %d", operation, lanes, argumentLanes)
+			}
+			lanes = argumentLanes
 		}
-	case ir.IntrinsicDot:
-		if !same() || !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "dot requires matching floating-point vectors")
+		if !argument.contextual {
+			if !domain.Accepts(argumentElement) {
+				return nil, 0, fmt.Errorf("%s requires %s operands, got %s", operation, domain, argument.type_)
+			}
+			if element != nil && !types.Equal(element, argumentElement) {
+				return nil, 0, fmt.Errorf("%s requires matching numeric operands; got %s and %s", operation, element, argumentElement)
+			}
+			element = argumentElement
 		}
-		out = argTypes[0].Elem
-	case ir.IntrinsicLength:
-		if !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "length requires a floating-point vector")
+	}
+	if element == nil {
+		element = defaultNumericElement(domain, arguments)
+	}
+	if !domain.Accepts(element) {
+		return nil, 0, fmt.Errorf("%s requires %s operands", operation, domain)
+	}
+	return element, lanes, nil
+}
+
+func (c *Checker) commitNumericArgument(b *fnBuilder, e env, argument detachedExpr, want *types.Type) (ir.ValueID, *types.Type, error) {
+	if argument.contextual {
+		var err error
+		argument, err = c.lowerDetached(b, e, argument.source, want)
+		if err != nil {
+			return 0, nil, err
 		}
-		out = argTypes[0].Elem
-	case ir.IntrinsicDistance:
-		if !same() || !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "distance requires matching floating-point vectors")
-		}
-		out = argTypes[0].Elem
-	case ir.IntrinsicCross:
-		if !same() || !floatVec(argTypes[0]) || argTypes[0].Lanes != 3 {
-			return 0, nil, diag(x.Span, "cross requires two matching three-lane floating-point vectors")
-		}
-	case ir.IntrinsicNormalize:
-		if !floatVec(argTypes[0]) {
-			return 0, nil, diag(x.Span, "normalize requires a floating-point vector")
-		}
-	default:
+	}
+	b.block.Instrs = append(b.block.Instrs, argument.block.Instrs...)
+	return argument.value, argument.type_, nil
+}
+
+func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.IntrinsicKind, expected *types.Type) (ir.ValueID, *types.Type, error) {
+	rule := kind.Rule()
+	if rule.Arity == 0 {
 		return 0, nil, diag(x.Span, "unsupported intrinsic %s", kind)
+	}
+	if len(x.Args) != rule.Arity {
+		return 0, nil, diag(x.Span, "%s expects %d argument(s), got %d", kind, rule.Arity, len(x.Args))
+	}
+	arguments, err := c.lowerNumericArguments(b, e, kind.String(), x.Args)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	var element *types.Type
+	lanes := 0
+	if expected != nil {
+		var expectedLanes int
+		element, expectedLanes = numericElement(expected)
+		if element == nil || !rule.Domain.Accepts(element) || rule.ResultElement && expectedLanes != 0 || !rule.ResultElement && rule.VectorOnly && expectedLanes == 0 {
+			return 0, nil, diag(x.Span, "%s result cannot satisfy %s context", kind, expected)
+		}
+		if !rule.ResultElement {
+			lanes = expectedLanes
+		}
+	}
+	element, lanes, err = resolveNumericOperands(kind.String(), rule.Domain, arguments, element, lanes)
+	if err != nil {
+		return 0, nil, diag(x.Span, "%v", err)
+	}
+	if rule.VectorOnly && lanes == 0 {
+		return 0, nil, diag(x.Span, "%s requires floating-point vectors", kind)
+	}
+	if rule.Lanes != 0 && lanes != rule.Lanes {
+		return 0, nil, diag(x.Span, "%s requires %d-lane vectors", kind, rule.Lanes)
+	}
+	vector := types.Vec(element, lanes)
+	args := make([]ir.ValueID, len(arguments))
+	for i, argument := range arguments {
+		_, argumentLanes := numericElement(argument.type_)
+		want := element
+		if argumentLanes > 0 {
+			want = vector
+		}
+		value, type_, err := c.commitNumericArgument(b, e, argument, want)
+		if err != nil {
+			return 0, nil, err
+		}
+		if types.Equal(type_, vector) {
+			args[i] = value
+			continue
+		}
+		if types.Equal(type_, element) && lanes > 0 && rule.Broadcast&(1<<i) != 0 {
+			args[i] = c.splat(b, value, vector, x.Args[i].GetSpan())
+			continue
+		}
+		if lanes == 0 && types.Equal(type_, element) {
+			args[i] = value
+			continue
+		}
+		return 0, nil, diag(x.Args[i].GetSpan(), "%s argument is %s, want %s", kind, type_, vector)
+	}
+	out := element
+	if !rule.ResultElement && lanes > 0 {
+		out = vector
 	}
 	if expected != nil && !types.Equal(out, expected) {
 		return 0, nil, diag(x.Span, "%s returns %s, context requires %s", kind, out, expected)
 	}
-	r := b.value()
-	b.emit(&ir.Intrinsic{Result: r, Type: out, Kind: kind, Args: args, Span: x.Span})
-	return r, out, nil
+	result := b.value()
+	b.emit(&ir.Intrinsic{Result: result, Type: out, Kind: kind, Args: args, Span: x.Span})
+	return result, out, nil
 }
 
-func intrinsicBroadcastsScalars(kind ir.IntrinsicKind) bool {
-	switch kind {
-	case ir.IntrinsicPow, ir.IntrinsicMin, ir.IntrinsicMax, ir.IntrinsicClamp:
-		return true
+func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *ast.CallExpr, expected *types.Type) (ir.ValueID, *types.Type, error) {
+	if len(x.Args) == 0 {
+		return 0, nil, diag(x.Span, "vec requires components")
 	}
-	return false
+	arguments, err := c.lowerNumericArguments(b, e, "vec", x.Args)
+	if err != nil {
+		return 0, nil, err
+	}
+	lanes := 0
+	for _, argument := range arguments {
+		if _, width := numericElement(argument.type_); width == 0 {
+			lanes++
+		} else {
+			lanes += width
+		}
+	}
+	if lanes < 2 || lanes > 4 {
+		return 0, nil, diag(x.Span, "vec received %d lanes, want 2, 3, or 4", lanes)
+	}
+
+	var element *types.Type
+	if expected != nil {
+		if expected.Kind != types.Vector || expected.Lanes != lanes || !types.IsNumericScalar(expected.Elem) {
+			return 0, nil, diag(x.Span, "vec produces a %d-lane numeric vector, context requires %s", lanes, expected)
+		}
+		element = expected.Elem
+	}
+	for i, argument := range arguments {
+		argumentElement, _ := numericElement(argument.type_)
+		if argument.contextual {
+			continue
+		}
+		if element != nil && !types.Equal(element, argumentElement) {
+			return 0, nil, diag(x.Args[i].GetSpan(), "vec components use %s and %s; convert explicitly", element, argumentElement)
+		}
+		element = argumentElement
+	}
+	if element == nil {
+		element = defaultNumericElement(ir.NumericAny, arguments)
+	}
+	vector := types.Vec(element, lanes)
+	values := make([]ir.ValueID, 0, lanes)
+	for i, argument := range arguments {
+		_, width := numericElement(argument.type_)
+		want := element
+		if width > 0 {
+			want = types.Vec(element, width)
+		}
+		base, type_, err := c.commitNumericArgument(b, e, argument, want)
+		if err != nil {
+			return 0, nil, err
+		}
+		if types.Equal(type_, element) {
+			values = append(values, base)
+			continue
+		}
+		if type_.Kind != types.Vector || !types.Equal(type_.Elem, element) || type_.Lanes != width {
+			return 0, nil, diag(x.Args[i].GetSpan(), "vec component is %s, want %s", type_, want)
+		}
+		for lane := range width {
+			component := b.value()
+			b.emit(&ir.Extract{Result: component, Type: element, Base: base, Index: lane, Span: x.Args[i].GetSpan()})
+			values = append(values, component)
+		}
+	}
+	result := b.value()
+	b.emit(&ir.Composite{Result: result, Type: vector, Values: values, Span: x.Span})
+	return result, vector, nil
 }
 
 func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *types.Type) (ir.ValueID, *types.Type, error) {
@@ -1863,6 +2054,9 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 	}
 	if target := types.ParseBuiltin(id.Name); target != nil && target.Kind != types.Void && target.Kind != types.Bool {
 		return c.lowerConstructor(b, e, x, target)
+	}
+	if id.Name == "vec" {
+		return c.lowerVectorInference(b, e, x, expected)
 	}
 	if kind, ok := intrinsicBuiltin(id.Name); ok {
 		return c.lowerIntrinsic(b, e, x, kind, expected)
@@ -1977,90 +2171,28 @@ func atomicBuiltin(name string) (ir.AtomicKind, bool) {
 	}
 }
 func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *ast.CallExpr, target *types.Type) (ir.ValueID, *types.Type, error) {
-	if types.IsNumericScalar(target) {
-		if len(x.Args) != 1 {
-			return 0, nil, diag(x.Span, "%s constructor expects one argument", target)
-		}
-		v, t, err := c.lowerExpr(b, e, x.Args[0], target)
-		if err == nil && types.Equal(t, target) {
-			return v, t, nil
-		}
-		if err != nil { // contextual literal failure may be meaningful; retry without context only for non-literals
-			if _, ok := x.Args[0].(*ast.NumberExpr); ok {
-				return 0, nil, err
-			}
-			v, t, err = c.lowerExpr(b, e, x.Args[0], nil)
-			if err != nil {
-				return 0, nil, err
-			}
-		}
-		if !types.IsNumericScalar(t) {
-			return 0, nil, diag(x.Args[0].GetSpan(), "cannot convert %s to %s", t, target)
-		}
-		r := b.value()
-		b.emit(&ir.Convert{Result: r, Type: target, X: v, From: t, Span: x.Span})
-		return r, target, nil
+	if len(x.Args) != 1 {
+		return 0, nil, diag(x.Span, "%s constructor expects one argument", target)
 	}
-	if target.Kind == types.Vector {
-		if len(x.Args) == 0 {
-			return 0, nil, diag(x.Span, "%s constructor requires components", target)
-		}
-		vals := make([]ir.ValueID, 0, target.Lanes)
-		for _, argument := range x.Args {
-			v, t, err := c.lowerExpr(b, e, argument, nil)
-			if err != nil {
-				return 0, nil, err
-			}
-			if types.IsNumericScalar(t) {
-				v, err = c.convertScalar(b, v, t, target.Elem, argument.GetSpan())
-				if err != nil {
-					return 0, nil, err
-				}
-				if len(x.Args) == 1 {
-					for range target.Lanes {
-						vals = append(vals, v)
-					}
-				} else {
-					vals = append(vals, v)
-				}
-				continue
-			}
-			if t.Kind != types.Vector || !types.IsNumeric(t) {
-				return 0, nil, diag(argument.GetSpan(), "%s constructor component is not numeric", target)
-			}
-			if len(x.Args) == 1 && types.Equal(t, target) {
-				return v, target, nil
-			}
-			for lane := 0; lane < t.Lanes; lane++ {
-				extracted := b.value()
-				b.emit(&ir.Extract{Result: extracted, Type: t.Elem, Base: v, Index: lane, Span: argument.GetSpan()})
-				extracted, err = c.convertScalar(b, extracted, t.Elem, target.Elem, argument.GetSpan())
-				if err != nil {
-					return 0, nil, err
-				}
-				vals = append(vals, extracted)
-			}
-		}
-		if len(vals) != target.Lanes {
-			return 0, nil, diag(x.Span, "%s constructor received %d lanes, want %d", target, len(vals), target.Lanes)
-		}
-		r := b.value()
-		b.emit(&ir.Composite{Result: r, Type: target, Values: vals, Span: x.Span})
-		return r, target, nil
+	v, t, err := c.lowerExpr(b, e, x.Args[0], target)
+	if err == nil && types.Equal(t, target) {
+		return v, t, nil
 	}
-	return 0, nil, diag(x.Span, "type %s is not directly constructible", target)
-}
-
-func (c *Checker) convertScalar(b *fnBuilder, value ir.ValueID, from, to *types.Type, span source.Span) (ir.ValueID, error) {
-	if types.Equal(from, to) {
-		return value, nil
+	if err != nil { // contextual literal failure may be meaningful; retry without context only for non-literals
+		if _, ok := x.Args[0].(*ast.NumberExpr); ok {
+			return 0, nil, err
+		}
+		v, t, err = c.lowerExpr(b, e, x.Args[0], nil)
+		if err != nil {
+			return 0, nil, err
+		}
 	}
-	if !types.IsNumericScalar(from) || !types.IsNumericScalar(to) {
-		return 0, diag(span, "cannot convert %s to %s", from, to)
+	if !types.IsNumericScalar(t) {
+		return 0, nil, diag(x.Args[0].GetSpan(), "cannot convert %s to %s", t, target)
 	}
-	result := b.value()
-	b.emit(&ir.Convert{Result: result, Type: to, X: value, From: from, Span: span})
-	return result, nil
+	r := b.value()
+	b.emit(&ir.Convert{Result: r, Type: target, X: v, From: t, Span: x.Span})
+	return r, target, nil
 }
 
 func (c *Checker) splat(b *fnBuilder, value ir.ValueID, vector *types.Type, span source.Span) ir.ValueID {

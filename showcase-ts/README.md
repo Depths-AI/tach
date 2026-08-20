@@ -1,6 +1,6 @@
 # Tach large GPU showcase
 
-This standalone npm workspace measures nine fixed, sustained GPU workloads from
+This standalone npm workspace measures eleven fixed, sustained GPU workloads from
 one Tach project through Chromium/WebGPU and Deno/Vulkan 1.3. It is a
 calculator, not a performance gate: it records what the selected adapters did,
 with one workload profile, five samples, raw observations, and no pass/fail
@@ -14,10 +14,10 @@ conversion, and "am I on WebGPU or Vulkan?" stay out of application code?
 
 Each workload lives in its own `.tach` file. `kernels/mesh` and
 `kernels/procedural` directly import `shared/color`, so the build also exercises
-whole-file project imports. One `tach build` merges all eight files into one
+whole-file project imports. One `tach build` merges all nine files into one
 JavaScript facade, one declaration file, compressed WGSL, and SPIR-V 1.6.
 
-The shared TypeScript workload implementation imports all nine generated recipes
+The shared TypeScript workload implementation imports all eleven generated recipes
 through `build/index.js`. Browser and Deno runners open one persistent Tach
 session and call the same functions. Application code never names a shader
 entry, a bind group, or a canvas format.
@@ -30,6 +30,8 @@ entry, a bind group, or a canvas format.
 | Rendering   | `mesh.tach`        | 1920 x 1080 compute renderer over terrain and 244 torus-knot, twisted-ribbon, superquadric, and organic elements: 162,481 vertices and 312,064 triangles              |
 | Mathematics | `matrix.tach`      | FP32 2048 x 2048 dense matrix multiplication with 16 x 16 cooperative shared-memory tiles: 17,179,869,184 floating-point operations                                   |
 | Mathematics | `matrix.tach`      | Identical matrix dimensions, tiling, inputs, and operation count in FP16, with half the matrix storage                                                                |
+| Mathematics | `escape.tach`      | FP32 1024 x 1024 Julia-set recurrence with up to 192 data-dependent iterations, early escape, transient skipping, and orbit-energy accumulation                     |
+| Mathematics | `escape.tach`      | Identical adaptive recurrence in FP16, with half-sized output and the same `break`, `continue`, and multiply-add structure                                            |
 | Mathematics | `monte-carlo.tach` | 1,048,576 geometric Brownian paths, each advanced through 64 Box-Muller Gaussian time steps                                                                           |
 | Physics     | `particles.tach`   | 2,097,152 particles, 64 integration steps, and four moving softened inverse-square attractors per step                                                                |
 | Physics     | `wave.tach`        | 2048 x 2048 height/velocity grid advanced through 64 five-point stencil steps                                                                                         |
@@ -37,11 +39,22 @@ entry, a bind group, or a canvas format.
 | Physics     | `oscillators.tach` | Identical oscillator ensemble and integration work in FP16, with half the state storage                                                                               |
 
 The matrix pair isolates precision under the same tiled memory-access pattern.
+The complex-dynamics pair instead measures divergent, data-dependent work:
+escaped points leave their loop early, the first eight settled-orbit samples
+are skipped, and accepted samples accumulate with `fma`. Throughput uses the
+actual completed iteration count read after timing rather than the maximum
+possible count. This makes both loop transfers and both floating widths do
+meaningful mathematical work on each backend.
+
 The oscillator pair instead keeps state in registers for 512 steps between one
 initial read and one final write. Its 7,516,192,768 counted floating-point
 operations therefore emphasize sustained arithmetic rather than memory
 bandwidth. The reports preserve both results even when a backend does not make
 FP16 faster.
+
+The escape pair also exercises contextual vector construction and
+order-independent FP16 expression inference in a data-dependent recurrence;
+both lower through the same ordinary typed IR operations as explicit forms.
 
 The procedural renderer runs traversal, lighting, and post-processing. The mesh
 renderer runs vertex projection, visibility clear, per-triangle bounding-box
@@ -49,7 +62,7 @@ rasterization with atomic depth ownership, perspective-correct normal/material
 reconstruction, lighting, and post-processing. The mesh is a heterogeneous world
 of arbitrary curved elements rather than a regular proxy grid.
 
-Both rendering programs return `view<srgb8>` from linear `float32x4` pixels.
+Both rendering programs return `view<srgb8>` from linear `vec<float32, 4>` pixels.
 They never pack display bytes in Tach source. Tach converts those floats to
 8-bit sRGB. The browser draws that picture on a canvas; Deno computes the same
 bytes offscreen. When the last pixel stage already writes each pixel once,
@@ -101,6 +114,7 @@ Throughput uses work intrinsic to each algorithm:
 - complete output pixels per second for procedural rendering;
 - measured candidate fragments per second for mesh rendering;
 - floating-point operations per second for both matrix precisions;
+- actual complex-recurrence iterations per second for both precisions;
 - stochastic path-steps per second for Monte Carlo;
 - attractor interactions per second for particles;
 - stencil cell updates per second for the wave field;
@@ -118,6 +132,8 @@ Validation exists to prevent timings from describing skipped or empty work:
   and visible pixels on both hosts;
 - both matrix variants compare six dispersed cells with direct reference dot
   products over the exact host inputs, including their binary16 quantization;
+- both complex-dynamics variants require finite bounded values, a mixture of
+  escaped and non-escaped points, and nonzero post-transient orbit energy;
 - Monte Carlo checks finite non-negative payoffs and bounded distribution
   statistics;
 - sampled particles must remain finite and inside the simulation volume; and

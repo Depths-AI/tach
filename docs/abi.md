@@ -67,6 +67,10 @@ API names remain available because all runtime types use compiler-private
 `$...` aliases. Private helpers, stages, physical entries, wrappers, and fields
 may be mangled.
 
+Source inference cannot alter this boundary. Public parameters, results,
+struct fields, and buffer element types are declared explicitly, and every
+expression has a concrete type before program or binding ABI construction.
+
 An exported indexed shorthand receives `LaunchOptions`:
 
 ```ts
@@ -168,7 +172,7 @@ boundary.
 | `float16` | 2 | 2 |
 | `int32`, `uint32`, `float32` | 4 | 4 |
 | `atomic<int32>`, `atomic<uint32>` | 4 | 4 |
-| `float16x2`, `float16x3`, `float16x4` | 4 / 6 / 8 | 4 / 8 / 8 |
+| `vec<float16, 2>`, `vec<float16, 3>`, `vec<float16, 4>` | 4 / 6 / 8 | 4 / 8 / 8 |
 | 32-bit two-lane numeric vector | 8 | 8 |
 | 32-bit three-lane numeric vector | 12 | 16 |
 | 32-bit four-lane numeric vector | 16 | 16 |
@@ -185,9 +189,9 @@ structs use the logical max member alignment and do not inherit this floor.
 
 ```tach
 type Particle = {
-  position: float32x3,
+  position: vec<float32, 3>,
   mass: float32,
-  velocity: float32x3,
+  velocity: vec<float32, 3>,
 };
 
 export function preserve[i](particles: buffer<Particle[]>) {
@@ -369,7 +373,7 @@ does not internalize or repeat terminal projection.
 
 ### View color and extent contract
 
-A Flow view names a runtime `float32x4[]` source, its exact final defined
+A Flow view names a runtime `vec<float32, 4>[]` source, its exact final defined
 version, and positive checked `uint32` width and height shapes. Preparation
 checks that `width * height` is a positive safe product and that an unfused
 source contains at least that many complete 16-byte pixels. Extra source
@@ -583,6 +587,39 @@ Schema 2 is compiler/runtime internal while Tach is pre-1.0. Rebuild all
 artifacts together rather than treating it as a stable third-party wire
 format.
 
+### Compiler diagnostics: schema 1
+
+Private compiler operations reserve stdout for successful project/runtime
+payloads and write one diagnostic envelope to stderr when errors or warnings
+exist:
+
+```ts
+interface DiagnosticSpan {
+  file: string;
+  start: { offset: number; line: number; column: number };
+  end: { offset: number; line: number; column: number };
+}
+
+interface DiagnosticEnvelope {
+  schema: 1;
+  diagnostics: Array<{
+    severity: "error" | "warning";
+    code: string;
+    span: DiagnosticSpan;
+    message: string;
+    source?: string;
+    help?: string;
+    related?: Array<{ span: DiagnosticSpan; message: string; source?: string }>;
+  }>;
+}
+```
+
+Offsets count UTF-8 bytes; lines and columns are one-based Unicode source
+positions. Errors accompany a nonzero compiler exit. Warnings accompany a
+successful exit and never change artifacts. The public CLI validates this
+private envelope, renders it for humans, or emits its own schema-1 command
+result under `--json`; callers must not parse the human layout.
+
 ### Target-neutral project description: schema 2
 
 The private compiler engine writes one schema-2 JSON value to the TypeScript
@@ -679,6 +716,9 @@ The runtime builds layouts from metadata and never parses WGSL.
 When the logical module contains binary16, WGSL begins with `enable f16;` and
 the Web target records `shader-f16`. `openWeb` requests that optional adapter
 feature, and module preparation rejects a device that did not enable it.
+Kernel IR loop transfers remain lexical WGSL `break` and `continue` after
+assigning generated loop-carrier locals. The target-neutral `fma` intrinsic
+maps directly to the matching WGSL builtin and changes no layout or binding.
 For a scalar `float16[]` whose byte range may need four-byte binding padding,
 whether direct or after a struct prefix, the entry's private parameter block
 also carries the metadata-derived logical length; generated `arrayLength` use
@@ -686,7 +726,7 @@ is replaced by that parameter.
 
 A Web view output binding is `texture_storage_2d<rgba8unorm, write>`. A fused
 terminal entry packs its own final pixel and unpacks that word into the
-texture. A fallback entry reads the final `float32x4[]` resource over
+texture. A fallback entry reads the final `vec<float32, 4>[]` resource over
 `[width, height]`, applies the same pack, and writes the texture.
 The generated package stores this complete module as deterministic gzip in
 `kernel.wgsl.gz`; the browser driver decompresses it before module creation.
@@ -701,6 +741,9 @@ host-ABI alignment, including the 16-byte struct floor. Workgroup and Input
 use the logical pointee alignment (max member or element; `{uint32, uint32}`
 shared is 4, not 16). StorageBuffer, Uniform, and Workgroup also carry
 NonPrivatePointer; Input does not.
+Loop `continue` and `break` edges feed the structured continuation and merge
+blocks, including their exact `OpPhi` operands. `fma` maps to GLSL.std.450
+`Fma`; these control and arithmetic mappings add no host ABI fields.
 Storage-buffer atomics use QueueFamily scope; workgroup atomics use Workgroup
 scope. Source barriers add MakeAvailable and MakeVisible.
 

@@ -131,13 +131,59 @@ export function half[i](values: buffer<float16[]>, factor: float16) {
 	}
 }
 
+func TestLoopControlAndFmaSPIRV(t *testing.T) {
+	bin := emitSource(t, "control.tach", `
+export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[]>, limit: uint32) {
+  let total: float32 = 0;
+  for (let step = 0; step < limit; step++) {
+    if (step == 2) { continue; }
+    total = fma(float32(step), 0.5, total);
+    if (total > 10.0) { break; }
+  }
+  if (i < out.length && i < half.length) {
+    out[i] = total;
+    half[i] = fma(half[i], float16(2), vec(1, 1, 1, 1));
+  }
+}`)
+	if err := spirv.Validate(bin); err != nil {
+		t.Fatal(err)
+	}
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fma32, fma16, phis int
+	floatWidth := map[uint32]uint32{}
+	for _, instruction := range m.Instructions {
+		switch instruction.Op {
+		case spirv.OpTypeFloat:
+			floatWidth[instruction.Operands[0]] = instruction.Operands[1]
+		case spirv.OpTypeVector:
+			floatWidth[instruction.Operands[0]] = floatWidth[instruction.Operands[1]]
+		case spirv.OpPhi:
+			phis++
+		}
+		if instruction.Op == spirv.OpExtInst && instruction.Operands[3] == spirv.GLSL450Fma {
+			switch floatWidth[instruction.Operands[0]] {
+			case 16:
+				fma16++
+			case 32:
+				fma32++
+			}
+		}
+	}
+	if fma16 != 1 || fma32 != 1 || phis == 0 {
+		t.Fatalf("SPIR-V Fma/loop phi counts: float16=%d float32=%d phis=%d, want 1/1/>0", fma16, fma32, phis)
+	}
+}
+
 func TestViewProjectionIsValidSPIRV16(t *testing.T) {
 	bin := emitSource(t, "view.tach", `
-function paint[i](pixels: buffer<float32x4[]>) {
-  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) {
+  if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)
@@ -152,8 +198,8 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 
 func TestExternalViewUsesStandaloneSPIRVProjection(t *testing.T) {
 	bin := emitSource(t, "view.tach", `
-function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
-export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32): view<srgb8> {
+function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
+export function image(pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32): view<srgb8> {
   run paint(pixels) over width * height;
   return view(pixels, width, height);
 }`)

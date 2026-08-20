@@ -266,7 +266,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		}
 		e.values[p.ID] = p.Type
 	}
-	_, err := verifyBlock(m, f, f.Body, e, fmap, "return")
+	_, err := verifyBlock(m, f, f.Body, e, fmap, "return", nil)
 	if err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	return nil
 }
 
-func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string) (verifyEnv, error) {
+func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string, loopTypes []*types.Type) (verifyEnv, error) {
 	if b == nil {
 		return e, fmt.Errorf("nil block")
 	}
@@ -671,11 +671,11 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !types.Equal(ct, types.TBool) {
 				return e, fmt.Errorf("if condition is %s", ct)
 			}
-			te, err := verifyBlock(m, f, x.Then, e.clone(), fmap, "yield")
+			te, err := verifyBlock(m, f, x.Then, e.clone(), fmap, "yield", loopTypes)
 			if err != nil {
 				return e, fmt.Errorf("if then: %w", err)
 			}
-			ee, err := verifyBlock(m, f, x.Else, e.clone(), fmap, "yield")
+			ee, err := verifyBlock(m, f, x.Else, e.clone(), fmap, "yield", loopTypes)
 			if err != nil {
 				return e, fmt.Errorf("if else: %w", err)
 			}
@@ -722,7 +722,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				}
 				le.values[p.ID] = p.Type
 			}
-			ce, err := verifyBlock(m, f, x.Cond, le.clone(), fmap, "yield")
+			ce, err := verifyBlock(m, f, x.Cond, le.clone(), fmap, "yield", nil)
 			if err != nil {
 				return e, fmt.Errorf("loop condition: %w", err)
 			}
@@ -730,20 +730,19 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !ok || len(cy.Values) != 1 || !types.Equal(ce.values[cy.Values[0]], types.TBool) {
 				return e, fmt.Errorf("loop condition must yield one bool")
 			}
-			be, err := verifyBlock(m, f, x.Body, le.clone(), fmap, "continue")
+			carriedTypes := make([]*types.Type, len(x.Params))
+			for i, parameter := range x.Params {
+				carriedTypes[i] = parameter.Type
+			}
+			_, err = verifyBlock(m, f, x.Body, le.clone(), fmap, "continue", carriedTypes)
 			if err != nil {
 				return e, fmt.Errorf("loop body: %w", err)
 			}
-			co, ok := x.Body.Term.(*Continue)
-			if !ok {
-				return e, fmt.Errorf("loop body must continue")
-			}
-			if len(co.Values) != len(x.Params) || len(x.Results) != len(x.Params) {
+			if len(x.Results) != len(x.Params) {
 				return e, fmt.Errorf("loop carried arity mismatch")
 			}
 			for i, p := range x.Params {
-				t := be.values[co.Values[i]]
-				if !types.Equal(t, p.Type) || !types.Equal(x.Results[i].Type, p.Type) {
+				if !types.Equal(x.Results[i].Type, p.Type) {
 					return e, fmt.Errorf("loop carried value %d type mismatch", i)
 				}
 				if err := defVal(x.Results[i].ID, p.Type); err != nil {
@@ -754,7 +753,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if f.Kind != Stage {
 				return e, fmt.Errorf("scope outside stage")
 			}
-			if _, err := verifyBlock(m, f, x.Body, e.clone(), fmap, "exit_scope"); err != nil {
+			if _, err := verifyBlock(m, f, x.Body, e.clone(), fmap, "exit_scope", loopTypes); err != nil {
 				return e, fmt.Errorf("scope: %w", err)
 			}
 		default:
@@ -764,10 +763,26 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 	if b.Term == nil {
 		return e, fmt.Errorf("block has no terminator")
 	}
+	verifyTransfer := func(kind string, values []ValueID) error {
+		if loopTypes == nil {
+			return fmt.Errorf("unexpected %s terminator", kind)
+		}
+		if len(values) != len(loopTypes) {
+			return fmt.Errorf("%s carries %d values, want %d", kind, len(values), len(loopTypes))
+		}
+		for i, id := range values {
+			type_, err := val(id)
+			if err != nil {
+				return err
+			}
+			if !types.Equal(type_, loopTypes[i]) {
+				return fmt.Errorf("%s value %d is %s, want %s", kind, i, type_, loopTypes[i])
+			}
+		}
+		return nil
+	}
 	switch t := b.Term.(type) {
 	case *Return:
-		if termKind != "return" && termKind != "yield" && termKind != "continue" {
-		} // returns are legal nested control exits.
 		if f.Return.Kind == types.Void {
 			if t.HasValue {
 				return e, fmt.Errorf("void function returns a value")
@@ -794,13 +809,12 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 		}
 	case *Continue:
-		if termKind != "continue" {
-			return e, fmt.Errorf("unexpected continue terminator")
+		if err := verifyTransfer("continue", t.Values); err != nil {
+			return e, err
 		}
-		for _, id := range t.Values {
-			if _, err := val(id); err != nil {
-				return e, err
-			}
+	case *Break:
+		if err := verifyTransfer("break", t.Values); err != nil {
+			return e, err
 		}
 	case *Unreachable:
 		// Structured constructs whose every path exits can leave an unreachable merge.
@@ -815,98 +829,33 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 }
 
 func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
-	need := func(n int) error {
-		if len(args) != n {
-			return fmt.Errorf("intrinsic %s has %d args, want %d", x.Kind, len(args), n)
-		}
-		return nil
-	}
-	same := func() bool {
-		for _, t := range args {
-			if !types.Equal(t, args[0]) {
-				return false
-			}
-		}
-		return len(args) > 0
-	}
-	floatVec := func(t *types.Type) bool {
-		return t != nil && t.Kind == types.Vector && types.IsFloatLike(t.Elem)
-	}
-	switch x.Kind {
-	case IntrinsicAbs:
-		if err := need(1); err != nil {
-			return err
-		}
-		t := args[0]
-		baseOK := types.IsSignedNumeric(t)
-		if !baseOK || !types.Equal(x.Type, t) {
-			return fmt.Errorf("abs requires a signed numeric scalar or vector and preserves type")
-		}
-	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicRSqrt:
-		if err := need(1); err != nil {
-			return err
-		}
-		if !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("intrinsic %s requires a floating-point scalar/vector and preserves type", x.Kind)
-		}
-	case IntrinsicPow:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("pow requires matching floating-point scalar/vector operands")
-		}
-	case IntrinsicMin, IntrinsicMax:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !types.IsIntegerLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("%s requires matching integer scalar/vector operands", x.Kind)
-		}
-	case IntrinsicClamp:
-		if err := need(3); err != nil {
-			return err
-		}
-		if !same() || !types.IsIntegerLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("clamp requires three matching integer scalar/vector operands")
-		}
-	case IntrinsicDot:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
-			return fmt.Errorf("dot requires matching floating-point vectors and returns their component type")
-		}
-	case IntrinsicLength:
-		if err := need(1); err != nil {
-			return err
-		}
-		if !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
-			return fmt.Errorf("length requires a floating-point vector and returns its component type")
-		}
-	case IntrinsicDistance:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
-			return fmt.Errorf("distance requires matching floating-point vectors and returns their component type")
-		}
-	case IntrinsicCross:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !floatVec(args[0]) || args[0].Lanes != 3 || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("cross requires matching three-lane floating-point vectors")
-		}
-	case IntrinsicNormalize:
-		if err := need(1); err != nil {
-			return err
-		}
-		if !floatVec(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("normalize requires a floating-point vector and preserves type")
-		}
-	default:
+	rule := x.Kind.Rule()
+	if rule.Arity == 0 {
 		return fmt.Errorf("unknown intrinsic %d", x.Kind)
+	}
+	if len(args) != rule.Arity {
+		return fmt.Errorf("intrinsic %s has %d args, want %d", x.Kind, len(args), rule.Arity)
+	}
+	t := args[0]
+	element := t
+	lanes := 0
+	if t != nil && t.Kind == types.Vector {
+		element, lanes = t.Elem, t.Lanes
+	}
+	if !rule.Domain.Accepts(element) || rule.VectorOnly && lanes == 0 || rule.Lanes != 0 && lanes != rule.Lanes {
+		return fmt.Errorf("intrinsic %s does not accept %s", x.Kind, t)
+	}
+	for _, argument := range args[1:] {
+		if !types.Equal(argument, t) {
+			return fmt.Errorf("intrinsic %s requires matching operands", x.Kind)
+		}
+	}
+	out := t
+	if rule.ResultElement {
+		out = element
+	}
+	if !types.Equal(x.Type, out) {
+		return fmt.Errorf("intrinsic %s returns %s, got %s", x.Kind, out, x.Type)
 	}
 	return nil
 }

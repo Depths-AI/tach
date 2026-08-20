@@ -14,12 +14,7 @@ export function reduceLanes[i](data: buffer<uint32[]>) {
   if (base + 3 >= data.length) {
     return;
   }
-  const values = uint32x4(
-    data[base],
-    data[base + 1],
-    data[base + 2],
-    data[base + 3],
-  );
+  const values = vec(data[base], data[base + 1], data[base + 2], data[base + 3]);
   let sum = 0;
   // Dynamic indexing keeps the reduction independent of literal lane names.
   for (let lane = 0; lane < 4; lane++) {

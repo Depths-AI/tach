@@ -41,11 +41,28 @@ func TestEmptyIndexListIsRejected(t *testing.T) {
 	}
 }
 
+func TestVectorTypeUsesOneStructuralSpelling(t *testing.T) {
+	module, err := parser.Parse("vectors.tach", `
+function stage[i](out: buffer<vec<float32, 4>[]>) { out[i] = vec(1, 2, 3, 4); }
+export function vectors() {
+  const out = transient<vec<float32, 4>>(4);
+  run stage(out) over 4;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameter := module.Decls[0].(*ast.FunctionDecl).Params[0].Type.(*ast.GenericType)
+	vector := parameter.Args[0].(*ast.RuntimeArrayType).Elem.(*ast.VectorType)
+	if vector.Lanes != "4" || vector.Elem.(*ast.NamedType).Name != "float32" {
+		t.Fatalf("vector type = %#v", vector)
+	}
+}
+
 func TestDocumentationAttributesAttachToTheirContexts(t *testing.T) {
 	module, err := parser.Parse("docs.tach", `
 @docs(title("Particles"), summary("Simulation kernels."));
 @docs(summary("Position and velocity."), field(position, "World position."))
-type Particle = { position: float32x4 };
+type Particle = { position: vec<float32, 4> };
 @docs(summary("Advance particles."), coordinate(i, "Particle index."), param(particles, "State."))
 export function step[i](particles: buffer<Particle[]>) { }
 `)
@@ -54,6 +71,26 @@ export function step[i](particles: buffer<Particle[]>) { }
 	}
 	if len(module.Attrs) != 1 || len(module.Decls[0].(*ast.TypeDecl).Attrs) != 1 || len(module.Decls[1].(*ast.FunctionDecl).Attrs) != 1 {
 		t.Fatalf("documentation did not attach: %#v", module)
+	}
+}
+
+func TestBreakAndContinueStatements(t *testing.T) {
+	module, err := parser.Parse("control.tach", `
+export function control[i](out: buffer<uint32[]>) {
+  for (let step = 0; step < 8; step++) {
+    if (step == 2) { continue; }
+    if (step == 6) { break; }
+  }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := module.Decls[0].(*ast.FunctionDecl).Body.Stmts[0].(*ast.ForStmt).Body
+	if _, ok := body.Stmts[0].(*ast.IfStmt).Then.Stmts[0].(*ast.ContinueStmt); !ok {
+		t.Fatalf("continue statement = %T", body.Stmts[0])
+	}
+	if _, ok := body.Stmts[1].(*ast.IfStmt).Then.Stmts[0].(*ast.BreakStmt); !ok {
+		t.Fatalf("break statement = %T", body.Stmts[1])
 	}
 }
 

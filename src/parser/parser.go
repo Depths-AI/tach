@@ -177,6 +177,20 @@ func (p *parser) expectText(s string) (lexer.Token, error) {
 	return p.take(), nil
 }
 
+func (p *parser) typeGreater() (lexer.Token, error) {
+	if p.at(lexer.Greater) {
+		return p.take(), nil
+	}
+	if !p.at(lexer.ShiftRight) {
+		return lexer.Token{}, p.err(p.cur(), "expected >, found %q", p.cur().Text)
+	}
+	t := p.cur()
+	first := t
+	first.Kind, first.Text, first.Span.End = lexer.Greater, ">", source.Pos{Offset: t.Span.Start.Offset + 1, Line: t.Span.Start.Line, Column: t.Span.Start.Column + 1}
+	p.toks[p.i] = lexer.Token{Kind: lexer.Greater, Text: ">", Span: source.Span{File: t.Span.File, Start: first.Span.End, End: t.Span.End}}
+	return first, nil
+}
+
 func join(a, b source.Span) source.Span { a.End = b.End; return a }
 func assignment(k lexer.Kind) bool {
 	switch k {
@@ -372,27 +386,46 @@ func (p *parser) typeExpr() (ast.TypeExpr, error) {
 	var t ast.TypeExpr = &ast.NamedType{Name: n.Text, Span: n.Span}
 	if p.at(lexer.Less) {
 		p.take()
-		g := &ast.GenericType{Name: n.Text, Span: n.Span}
-		for {
-			x, err := p.typeExpr()
+		if n.Text == "vec" {
+			elem, err := p.typeExpr()
 			if err != nil {
 				return nil, err
 			}
-			g.Args = append(g.Args, x)
-			if !p.at(lexer.Comma) {
-				break
+			if _, err = p.expect(lexer.Comma); err != nil {
+				return nil, err
 			}
-			p.take()
-			if p.at(lexer.Greater) {
-				break
+			lanes, err := p.expect(lexer.Number)
+			if err != nil {
+				return nil, err
 			}
+			r, err := p.typeGreater()
+			if err != nil {
+				return nil, err
+			}
+			t = &ast.VectorType{Elem: elem, Lanes: lanes.Text, Span: join(n.Span, r.Span)}
+		} else {
+			g := &ast.GenericType{Name: n.Text, Span: n.Span}
+			for {
+				x, err := p.typeExpr()
+				if err != nil {
+					return nil, err
+				}
+				g.Args = append(g.Args, x)
+				if !p.at(lexer.Comma) {
+					break
+				}
+				p.take()
+				if p.at(lexer.Greater) {
+					break
+				}
+			}
+			r, err := p.typeGreater()
+			if err != nil {
+				return nil, err
+			}
+			g.Span = join(n.Span, r.Span)
+			t = g
 		}
-		r, err := p.expect(lexer.Greater)
-		if err != nil {
-			return nil, err
-		}
-		g.Span = join(n.Span, r.Span)
-		t = g
 	}
 	if p.at(lexer.LBracket) {
 		s := t.GetSpan()
@@ -605,6 +638,17 @@ func (p *parser) stmt() (ast.Stmt, error) {
 			return nil, err
 		}
 		return &ast.ForStmt{Init: init, Cond: cond, Post: post, Body: body, Span: join(start, body.Span)}, nil
+	case p.text("break") || p.text("continue"):
+		keyword := p.take()
+		semi, err := p.expect(lexer.Semicolon)
+		if err != nil {
+			return nil, err
+		}
+		span := join(keyword.Span, semi.Span)
+		if keyword.Text == "break" {
+			return &ast.BreakStmt{Span: span}, nil
+		}
+		return &ast.ContinueStmt{Span: span}, nil
 	case p.text("return"):
 		start := p.take().Span
 		var v ast.Expr

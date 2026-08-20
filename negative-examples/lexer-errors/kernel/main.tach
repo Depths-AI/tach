@@ -1,0 +1,7 @@
+function invalidCharacter(): uint32 {
+  return 1 # 2;
+}
+
+function invalidSuffix(): float32 {
+  return 1.0f;
+}

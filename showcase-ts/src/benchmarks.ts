@@ -6,10 +6,13 @@ import type {
   Tach,
 } from "@depths/tach";
 import {
+  complexEscapeFloat16,
+  complexEscapeFloat32,
   coupledOscillatorsFloat16,
   coupledOscillatorsFloat32,
   denseMatrixProductFloat16,
   denseMatrixProductFloat32,
+  type EscapeParams,
   type MeshParams,
   meshWorld,
   type MonteCarloParams,
@@ -618,6 +621,98 @@ function matrixFloat16Workload(gpu: Tach): Workload {
   );
 }
 
+type EscapeKernel<T extends FloatingArray> = (
+  output: ComputeBuffer<T>,
+  params: EscapeParams,
+) => ComputeCommand;
+
+function escapeWorkload<T extends FloatingArray>(
+  gpu: Tach,
+  precision: "FP16" | "FP32",
+  ArrayType: FloatingArrayConstructor<T>,
+  kernel: EscapeKernel<T>,
+): Workload {
+  const width = 1024;
+  const height = 1024;
+  const points = width * height;
+  const maxIterations = 192;
+  const output = gpu.buffer(new ArrayType(points * 2));
+  const params: EscapeParams = { width, height, maxIterations };
+  return {
+    id: `escape-${precision.toLowerCase()}`,
+    category: "mathematics",
+    name: `Adaptive complex dynamics (${precision})`,
+    problem:
+      `${width} x ${height} Julia-set recurrence with up to ${maxIterations} data-dependent iterations`,
+    dispatches: 1,
+    command: kernel(output, params),
+    buffers: [output],
+    units: points * maxIterations,
+    divisor: 1e6,
+    throughputUnit: "million recurrence iterations/s",
+    details: {
+      width,
+      height,
+      points,
+      maxIterations,
+      precision,
+      outputBytes: points * (precision === "FP16" ? 4 : 8),
+    },
+    readback: async () => {
+      const result = await output.read();
+      let iterations = 0;
+      let escaped = 0;
+      let energy = 0;
+      for (let offset = 0; offset < result.length; offset += 2) {
+        const count = result[offset]!;
+        const orbitEnergy = result[offset + 1]!;
+        if (
+          !Number.isFinite(count + orbitEnergy) || count < 0 ||
+          count > maxIterations || orbitEnergy < 0
+        ) {
+          throw new Error("invalid complex-dynamics result");
+        }
+        iterations += count;
+        energy += orbitEnergy;
+        if (count < maxIterations) escaped++;
+      }
+      if (escaped === 0 || escaped === points || energy === 0) {
+        throw new Error(
+          "complex-dynamics workload lacked mixed escape behavior",
+        );
+      }
+      return {
+        units: iterations,
+        details: {
+          actualIterations: iterations,
+          escapedPoints: escaped,
+          boundedPoints: points - escaped,
+          escapedPercent: escaped / points * 100,
+          orbitEnergy: energy,
+        },
+      };
+    },
+  };
+}
+
+function escapeFloat32Workload(gpu: Tach): Workload {
+  return escapeWorkload(
+    gpu,
+    "FP32",
+    Float32Array,
+    complexEscapeFloat32,
+  );
+}
+
+function escapeFloat16Workload(gpu: Tach): Workload {
+  return escapeWorkload(
+    gpu,
+    "FP16",
+    Float16Array,
+    complexEscapeFloat16,
+  );
+}
+
 type OscillatorKernel<T extends FloatingArray> = (
   positions: ComputeBuffer<T>,
   velocities: ComputeBuffer<T>,
@@ -968,6 +1063,8 @@ export async function runBenchmarks(
     meshWorkload,
     matrixFloat32Workload,
     matrixFloat16Workload,
+    escapeFloat32Workload,
+    escapeFloat16Workload,
     monteCarloWorkload,
     particleWorkload,
     waveWorkload,

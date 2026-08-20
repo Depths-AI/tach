@@ -2,6 +2,8 @@ package ir
 
 import (
 	"fmt"
+
+	"tach/src/source"
 )
 
 // Tach owns barrier legality at the semantic IR layer. The analysis is scoped
@@ -16,6 +18,17 @@ type uniformPlace struct {
 type uniformEnv struct {
 	values map[ValueID]bool
 	places map[PlaceID]uniformPlace
+	loop   *uniformLoop
+}
+
+type uniformTransfer struct {
+	values  []bool
+	control bool
+}
+
+type uniformLoop struct {
+	continues []uniformTransfer
+	breaks    []uniformTransfer
 }
 
 func newUniformEnv() uniformEnv {
@@ -30,7 +43,7 @@ func (e uniformEnv) clone() uniformEnv {
 	for k, x := range e.places {
 		p[k] = x
 	}
-	return uniformEnv{values: v, places: p}
+	return uniformEnv{values: v, places: p, loop: e.loop}
 }
 
 func verifyUniformity(m *Module, f *Function, fmap map[string]*Function) error {
@@ -119,7 +132,7 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 				if x.Kind == BarrierBuffer {
 					name = "bufferBarrier"
 				}
-				return e, control, fmt.Errorf("%s is reached through non-uniform control flow", name)
+				return e, control, &source.Diagnostic{Span: x.Span, Message: fmt.Sprintf("%s is reached through non-uniform control flow", name)}
 			}
 		case *If:
 			condUniform := value(x.Cond)
@@ -165,6 +178,21 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 			return e, control, fmt.Errorf("uniformity analysis does not understand %T", in)
 		}
 	}
+	transfer := func(values []ValueID) uniformTransfer {
+		out := uniformTransfer{values: make([]bool, len(values)), control: control}
+		for i, value := range values {
+			out.values[i] = e.values[value]
+		}
+		return out
+	}
+	if e.loop != nil {
+		switch term := b.Term.(type) {
+		case *Continue:
+			e.loop.continues = append(e.loop.continues, transfer(term.Values))
+		case *Break:
+			e.loop.breaks = append(e.loop.breaks, transfer(term.Values))
+		}
+	}
 	return e, control, nil
 }
 
@@ -188,14 +216,19 @@ func analyzeUniformLoop(m *Module, f *Function, loop *Loop, outer uniformEnv, fm
 		}
 		cy := loop.Cond.Term.(*Yield)
 		condUniform := ce.values[cy.Values[0]]
-		be, _, err := analyzeUniformBlock(m, f, loop.Body, le.clone(), fmap, control && condUniform, false)
+		state := &uniformLoop{}
+		bodyEnv := le.clone()
+		bodyEnv.loop = state
+		_, _, err = analyzeUniformBlock(m, f, loop.Body, bodyEnv, fmap, control && condUniform, false)
 		if err != nil {
 			return outer, control, fmt.Errorf("loop body uniformity: %w", err)
 		}
-		co := loop.Body.Term.(*Continue)
 		changed := false
 		for i := range paramUniform {
-			next := paramUniform[i] && be.values[co.Values[i]]
+			next := paramUniform[i] && condUniform
+			for _, transfer := range state.continues {
+				next = next && transfer.control && transfer.values[i]
+			}
 			if next != paramUniform[i] {
 				paramUniform[i] = next
 				changed = true
@@ -220,19 +253,34 @@ func analyzeUniformLoop(m *Module, f *Function, loop *Loop, outer uniformEnv, fm
 	}
 	cy := loop.Cond.Term.(*Yield)
 	condUniform := ce.values[cy.Values[0]]
-	be, _, err := analyzeUniformBlock(m, f, loop.Body, le.clone(), fmap, loopControl && condUniform, checkBarriers)
+	state := &uniformLoop{}
+	bodyEnv := le.clone()
+	bodyEnv.loop = state
+	_, _, err = analyzeUniformBlock(m, f, loop.Body, bodyEnv, fmap, loopControl && condUniform, checkBarriers)
 	if err != nil {
 		return outer, control, fmt.Errorf("loop body uniformity: %w", err)
 	}
-	co := loop.Body.Term.(*Continue)
 	for i, r := range loop.Results {
-		outer.values[r.ID] = paramUniform[i] && condUniform && be.values[co.Values[i]]
+		uniform := paramUniform[i] && condUniform
+		for _, transfer := range state.breaks {
+			uniform = uniform && transfer.control && transfer.values[i]
+		}
+		outer.values[r.ID] = uniform
 	}
 	// A varying iteration condition means invocations can leave the loop at
 	// different dynamic points. Tach conservatively tracks subsequent control as
 	// non-uniform, which keeps barrier legality target-independent.
-	if !condUniform {
+	if !condUniform || nonUniformTransfer(state.continues) || nonUniformTransfer(state.breaks) {
 		control = false
 	}
 	return outer, control, nil
+}
+
+func nonUniformTransfer(transfers []uniformTransfer) bool {
+	for _, transfer := range transfers {
+		if !transfer.control {
+			return true
+		}
+	}
+	return false
 }

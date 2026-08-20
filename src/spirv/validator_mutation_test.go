@@ -246,9 +246,9 @@ func TestValidatorRejectsUnsupportedGLSL450Instruction(t *testing.T) {
 
 func TestValidatorRejectsNonScalarDynamicVectorIndex(t *testing.T) {
 	bin := compileSourceForMutation(t, `
-function lane(value: uint32x4, index: uint32): uint32 { return value[index]; }
+function lane(value: vec<uint32, 4>, index: uint32): uint32 { return value[index]; }
 @workgroup(1)
-export function readLane[i](out: buffer<uint32>) { out = lane(uint32x4(1, 2, 3, 4), i); }
+export function readLane[i](out: buffer<uint32>) { out = lane(vec(1, 2, 3, 4), i); }
 `)
 	m, err := Decode(bin)
 	if err != nil {

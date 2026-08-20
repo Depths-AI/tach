@@ -258,11 +258,11 @@ exported, unindexed program and is constructed by the program's final
 statement:
 
 ```tach
-function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
+function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32) {
   if (i < pixels.length) {
     const x = i % width;
     const y = i / width;
-    pixels[i] = float32x4(
+    pixels[i] = vec(
       float32(x) / float32(width),
       float32(y) / float32(height),
       0.25,
@@ -272,14 +272,14 @@ function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
 }
 
 export function gradient(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels, width, height) over pixels.length;
   return view(pixels, width, height);
 }
 ```
 
 The first `view(...)` argument directly names a runtime
-`buffer<float32x4[]>` or transient containing linear RGBA. Width and height
+`buffer<vec<float32, 4>[]>` or transient containing linear RGBA. Width and height
 are checked program shapes. The source resource's exact final version must be
 defined by the preceding dispatches. At preparation, both dimensions and their
 product must be positive and the source must contain at least
@@ -526,24 +526,42 @@ stages, buffers, structs, locals, or expressions other than the final
 `return view(...)`. `srgb8` is the sole format and is likewise not an ordinary
 source type.
 
-Numeric vectors have two, three, or four lanes:
+`vec<T, N>` is the sole vector type syntax. `T` is one numeric scalar and `N`
+is exactly `2`, `3`, or `4`:
 
 ```text
-float16x2  float16x3  float16x4
-float32x2  float32x3  float32x4
-int32x2    int32x3    int32x4
-uint32x2   uint32x3   uint32x4
+vec<float16, 2>  vec<float16, 3>  vec<float16, 4>
+vec<float32, 2>  vec<float32, 3>  vec<float32, 4>
+vec<int32, 2>    vec<int32, 3>    vec<int32, 4>
+vec<uint32, 2>   vec<uint32, 3>   vec<uint32, 4>
 ```
 
-Constructors flatten scalar and vector arguments and require exactly the
-destination lane count. One scalar splats:
+`vec(...)` is the sole vector value constructor. It flattens numeric scalar
+and vector arguments and must receive exactly two, three, or four total lanes:
 
 ```tach
-function vectorValue(): float32x4 {
-  const joined = float32x4(float32x2(1, 2), 3, 4);
-  return joined + float32x4(0.5);
+function vectorValue(): vec<float32, 4> {
+  const joined: vec<float32, 4> = vec(vec(1, 2), 3, 4);
+  return joined + 0.5;
 }
 ```
+
+Its element type comes from the surrounding expression or a concrete
+argument:
+
+```tach
+function inferredVectors(direction: vec<float32, 3>): vec<float32, 4> {
+  const moved = direction + vec(1, 2, 3); // vec<float32, 3> from addition
+  return vec(moved, 1); // vec<float32, 4> from the result
+}
+```
+
+When neither source exists, whole-number lanes default to `uint32` and a
+fraction or exponent defaults the vector to `float32`. `vec` never converts a
+typed value and has no one-argument splat form. Repeat a scalar explicitly or
+rely on documented scalar/vector operator and intrinsic broadcast. To change
+a vector's element type, convert its scalar lanes explicitly and rebuild it
+with `vec(...)`.
 
 Swizzles use `x`, `y`, `z`, and `w`. One lane yields a scalar; several lanes
 yield a vector. `value[index]` dynamically selects one lane.
@@ -552,11 +570,11 @@ yield a vector. `value[index]` dynamically selects one lane.
 
 ```tach
 type Color = {
-  rgb: float32x3,
+  rgb: vec<float32, 3>,
   alpha: float32,
 };
 
-function opaque(rgb: float32x3): Color {
+function opaque(rgb: vec<float32, 3>): Color {
   return { alpha: 1, rgb: rgb };
 }
 ```
@@ -614,10 +632,14 @@ function literalValue(): float32 {
 }
 ```
 
-Suffixes such as `0u`, `1i`, and `1.0f` are rejected. Context selects the
-concrete type. Without context, a non-negative whole number is `uint32`, a
-fraction or exponent is `float32`, and unary `-` gives a whole literal
-`int32` context. Mixed literal pairs infer independent of operand order.
+Suffixes such as `0u`, `1i`, and `1.0f` are rejected. Inference is local to one
+expression and deterministic. Explicit types and conversions win, followed by
+the expected assignment, argument, return, field, or result type; concrete
+sibling operands; intrinsic requirements; and finally defaults. A
+non-negative whole number defaults to `uint32`, a fraction or exponent to
+`float32`, and unary `-` gives a whole literal `int32` context. An all-literal
+floating intrinsic defaults to `float32`; `abs(1)` defaults to `int32`.
+Operands are resolved collectively, so source order cannot change the result.
 
 `int32(value)`, `uint32(value)`, `float16(value)`, and `float32(value)` perform
 explicit numeric conversion. Integer-to-integer conversion preserves the low
@@ -631,7 +653,7 @@ intended. General implicit conversions do not exist.
 `const` is immutable; `let` may be rebound. Either may carry a type annotation:
 
 ```tach
-function sumFour(values: float32x4): float32 {
+function sumFour(values: vec<float32, 4>): float32 {
   let total: float32 = 0;
   for (let lane = 0; lane < 4; lane++) {
     total += values[lane];
@@ -707,7 +729,27 @@ function accumulated(count: uint32): uint32 {
 ```
 
 A `for` initializer is a `let`; its update is an assignment, compound
-assignment, `++`, or `--`. `break` and `continue` are not source constructs.
+assignment, `++`, or `--`. `break;` exits the nearest enclosing loop.
+`continue;` starts its next iteration; in a `for`, the update runs before the
+condition is tested again. Either statement may appear inside nested `if` or
+scope blocks, but only within a `while` or `for`. Statements after an
+unconditional `break`, `continue`, or `return` are rejected as unreachable.
+
+```tach
+function boundedSum(limit: uint32): float32 {
+  let total = 0.0;
+  for (let i = 0; i < limit; i++) {
+    if (i == 0) {
+      continue;
+    }
+    total = fma(float32(i), 0.5, total);
+    if (total > 100.0) {
+      break;
+    }
+  }
+  return total;
+}
+```
 
 A helper returns its declared type. A void helper or indexed stage may use
 `return;`. Statements after an unconditional return are rejected.
@@ -729,12 +771,21 @@ sqrt   rsqrt
 accepts matching floating values and may broadcast a scalar exponent across a
 vector base.
 
+`fma(a, b, c)` accepts `float16` or `float32` values and computes `a * b + c`,
+component by component for a vector. Vector operands must have the same width;
+scalars broadcast to that width. The arguments are inferred together, so
+`fma(value, 2, vec(1, 1, 1))` naturally follows a concrete three-lane `value`.
+It deliberately expresses a multiply-add operation to WGSL and SPIR-V. A
+backend or device may execute it as a fused instruction or as separate
+multiply and add operations; Tach promises the portable operation, not one
+physical instruction or one universal intermediate-rounding rule.
+
 `min`, `max`, and `clamp` accept integer scalars/vectors. Their floating forms
 remain unavailable until Tach defines one portable NaN and signed-zero policy.
 
 | Function | Input | Result |
 |---|---|---|
-| `dot(a, b)` | matching `float16xN` or `float32xN` | component type |
+| `dot(a, b)` | matching `vec<float16, N>` or `vec<float32, N>` | component type |
 | `length(value)` | floating vector | component type |
 | `distance(a, b)` | matching floating vectors | component type |
 | `cross(a, b)` | matching three-lane floating vectors | same vector type |
@@ -861,7 +912,8 @@ attribute       := "@" "workgroup" "(" NUMBER {"," NUMBER} ")"
 docs-attribute  := "@" "docs" "(" docs-clause {"," docs-clause} [","] ")"
 docs-clause     := IDENT "(" [IDENT ","] STRING ")"
 
-type            := IDENT ["<" type {"," type} ">"] ["[" [NUMBER] "]"]
+type            := (IDENT | "vec" "<" type "," NUMBER ">")
+                   ["[" [NUMBER] "]"]
 
 block           := "{" {statement} "}"
 statement       := variable-decl ";"
@@ -869,6 +921,7 @@ statement       := variable-decl ";"
                  | run-statement ";"
                  | simple-statement ";"
                  | if-statement | while-statement | for-statement
+                 | "break" ";" | "continue" ";"
                  | return-statement ";"
 
 variable-decl   := ("const" | "let") IDENT [":" type] "=" expression
@@ -918,9 +971,14 @@ identifier, string, or comment may exceed the target.
 
 ## 16. Deliberate boundaries
 
+Inference never crosses an expression boundary or inspects later uses, other
+functions, generated host code, or backend behavior. Parameters, results,
+struct fields, buffer elements, and public interfaces therefore stay explicit
+and readable. Every value has one concrete type before typed IR is created.
+
 Tach currently has no pointers, pointer arithmetic, binding annotations,
-ambient invocation objects, recursion, resource aliasing, `break`, `continue`,
-block comments, cross-project imports, named imports, re-exports, deeper source
+ambient invocation objects, recursion, resource aliasing, block comments,
+cross-project imports, named imports, re-exports, deeper source
 trees, or provider extensions.
 
 Public programs express multiple dispatches and temporary resources, but not

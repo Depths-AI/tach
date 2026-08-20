@@ -172,6 +172,10 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 			for _, id := range x.Values {
 				useValue(id)
 			}
+		case *Break:
+			for _, id := range x.Values {
+				useValue(id)
+			}
 		case *Return:
 			if x.HasValue {
 				useValue(x.Value)

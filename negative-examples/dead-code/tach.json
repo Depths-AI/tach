@@ -1,0 +1,1 @@
+{"name":"negative-dead-code","version":"0.2.0","javascript":{"package":"@tach-negative/dead-code"},"docs":{"title":"Dead code warnings","summary":"Unused bindings and unreachable private functions."}}

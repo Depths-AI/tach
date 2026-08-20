@@ -114,9 +114,9 @@ terminal view conversion alone may fold into its proven final writer. See
 ## 5. Types and ordinary computation
 
 Scalars are `bool`, `int32`, `uint32`, `float16`, `float32`, and helper-only
-`void`. Numeric vectors use any numeric scalar with `N` lanes, where `N` is
-2–4.
-Vector constructors flatten exact lane counts; one scalar splats. Structs are
+`void`. Numeric vectors are solely `vec<T, N>`, with `N` 2–4. Only `vec(...)`
+constructs them, flattening exactly 2–4 scalar/vector lanes without conversion.
+Structs are
 named value types with exact fields; literal order is irrelevant, declaration
 order affects storage. Runtime `T[]` occurs only directly in a buffer or as a
 struct's final field and cannot move as one value. Fixed `T[N]` is shared-memory
@@ -126,7 +126,7 @@ only. See §26: scalars,
 §29: arrays.
 
 `view<srgb8>` is not an ordinary value type. It is only an exported
-unindexed-program result over final linear `float32x4[]` pixels and checked
+unindexed-program result over final linear `vec<float32, 4>[]` pixels and checked
 positive width/height. Both backends pack one RGBA8 `uint32` word after IEC
 sRGB conversion; WebGPU stores it as an `rgba8unorm` texel and Vulkan as that
 word. Source never packs display bytes or names provider objects. See §18: view
@@ -148,14 +148,15 @@ Never add source padding or hand-pack buffers. See
 §32: host shapes, and
 §33: layout.
 
-Numbers have no shader suffix. Unconstrained nonnegative integers infer
-`uint32`, fractions/exponents `float32`, and negative whole literals `int32`.
-Use explicit `int32(...)`, `uint32(...)`, `float16(...)`, or `float32(...)`;
-binary16 is never inferred without context and is never silently widened. Do
-not expect JavaScript coercion. Prefer `const`; `let` is mutable; shadowing is forbidden.
-Operators, precedence, assignments, `if`/`while`/`for`, returns, and intrinsics
-are deliberately narrower than TypeScript. Check the exact tables before
-emitting unfamiliar math. See §34: literals,
+Inference is expression-local and order-independent: explicit type, expected
+context, typed sibling, intrinsic domain, default. Nonnegative
+whole literals default to `uint32`, negative whole literals to `int32`, and
+fractions to `float32`. Scalar constructors convert; binary16 is never inferred.
+`vec(...)` takes its element type from context or typed arguments, never
+converts values, and has no splat form.
+Prefer `const`; shadowing is forbidden. Nearest-loop `break`/`continue` is
+supported. FP16/FP32 `fma` permits scalar broadcast and expresses multiply-add,
+not instruction count. See §34: literals,
 §35: conversion,
 §36: scope,
 §37: operators,
@@ -187,28 +188,30 @@ and §64: numerical portability.
 Use only:
 
 ```text
-tach build [--verbose]
-tach check
-tach docs
-tach fmt
+tach build [--verbose] [--json]
+tach check [--json]
+tach docs [--json]
+tach fmt [--json]
 tach instructions [--details <section>...]
 tach version
 tach help | --help | -h
 ```
 
-Project commands discover the nearest project. `build` emits the complete
-browser/Deno package and replaces `build/`; `--verbose` only adds diagnostics.
-`check` validates both hosts without writes. `docs` preserves
-compiled artifacts while refreshing Markdown. `fmt` formats the whole project
-transactionally. `instructions` needs no project and returns this context or
-only the requested canonical sections. Normal order is `fmt -> check -> build`. See
+Project commands discover the nearest project. `build` replaces `build/` with
+the complete browser/Deno package; `--verbose` adds diagnostics. `check`
+validates both hosts without writes. `docs` refreshes Markdown without changing
+compiled artifacts. `fmt` is project-wide and transactional. `instructions`
+works anywhere. Normal order is `fmt -> check -> build`. See
 §46: formatting,
 §47: CLI, and
 §48: validation.
 
-Output is one package: `package.json`, `index.js`, `index.d.ts`, `kernel.wgsl.gz`,
+Prefer `tach check --json` for structured errors and warnings; otherwise Tach
+prints human source reports. See §47: CLI.
+
+Output: `package.json`, `index.js`, `index.d.ts`, `kernel.wgsl.gz`,
 SPIR-V 1.6 `kernel.spv`, README, and module docs. The same facade and
-declarations serve both hosts. Generated files are one immutable set; never edit or mix them. See
+declarations serve both hosts. Never edit or mix generated files. See
 §49: artifacts and
 §68: unified host boundary.
 

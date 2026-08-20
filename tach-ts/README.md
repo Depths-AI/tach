@@ -328,7 +328,7 @@ Coordinates can have one, two, or three axes:
 
 ```tach
 export function brighten[x, y](
-  pixels: buffer<float32x4[]>,
+  pixels: buffer<vec<float32, 4>[]>,
   width: uint32,
   height: uint32,
   amount: float32,
@@ -336,7 +336,7 @@ export function brighten[x, y](
   if (x < width && y < height) {
     const i = y * width + x;
     if (i < pixels.length) {
-      pixels[i] = pixels[i] + float32x4(amount, amount, amount, 0.0);
+      pixels[i] = pixels[i] + vec(amount, amount, amount, 0.0);
     }
   }
 }
@@ -392,8 +392,8 @@ stages:
 
 ```tach
 type Particle = {
-  position: float32x4,
-  velocity: float32x4,
+  position: vec<float32, 4>,
+  velocity: vec<float32, 4>,
 };
 
 function advance(particle: Particle, dt: float32): Particle {
@@ -516,19 +516,19 @@ type Frame = {
   time: float32,
 };
 
-function shade[i](pixels: buffer<float32x4[]>, frame: Frame) {
+function shade[i](pixels: buffer<vec<float32, 4>[]>, frame: Frame) {
   if (i < pixels.length) {
     const x = i % frame.width;
     const y = i / frame.width;
     const u = float32(x) / float32(frame.width);
     const v = float32(y) / float32(frame.height);
     const pulse = 0.5 + 0.5 * sin(frame.time);
-    pixels[i] = float32x4(u * pulse, v, 0.25, 1.0);
+    pixels[i] = vec(u * pulse, v, 0.25, 1.0);
   }
 }
 
 export function render(frame: Frame): view<srgb8> {
-  const pixels = transient<float32x4>(frame.width * frame.height);
+  const pixels = transient<vec<float32, 4>>(frame.width * frame.height);
   run shade(pixels, frame) over pixels.length;
   return view(pixels, frame.width, frame.height);
 }
@@ -536,7 +536,7 @@ export function render(frame: Frame): view<srgb8> {
 
 This result type is valid only on an exported unindexed program. Its final
 statement is exactly `return view(pixels, width, height);`, where `pixels` names
-the final defined version of a linear `float32x4[]` buffer. The buffer may be a
+the final defined version of a linear `vec<float32, 4>[]` buffer. The buffer may be a
 program-private transient, as above, or a public caller-owned buffer.
 
 The source stays backend-neutral:
@@ -695,19 +695,38 @@ package.
 | `float16` | IEEE 754 binary16 | `number` |
 | `float32` | 32-bit floating point | `number` |
 | `void` | absence of a helper result | no host value |
-| `int32x2..4` | signed vector | readonly numeric tuple |
-| `uint32x2..4` | unsigned vector | readonly numeric tuple |
-| `float16x2..4` | binary16 floating vector | readonly numeric tuple |
-| `float32x2..4` | floating vector | readonly numeric tuple |
+| `vec<int32, N>` | signed vector, `N` = 2, 3, or 4 | readonly numeric tuple |
+| `vec<uint32, N>` | unsigned vector, `N` = 2, 3, or 4 | readonly numeric tuple |
+| `vec<float16, N>` | binary16 vector, `N` = 2, 3, or 4 | readonly numeric tuple |
+| `vec<float32, N>` | floating vector, `N` = 2, 3, or 4 | readonly numeric tuple |
 
-Vector constructors either flatten the exact required lanes or splat one
-scalar:
+`vec<T, N>` is the only vector type spelling. `vec(...)` is the only vector
+value constructor and flattens exactly two, three, or four lanes:
 
 ```text
-float32x4(1.0)
-float32x4(1.0, 2.0, 3.0, 4.0)
-float32x4(float32x2(1.0, 2.0), float32x2(3.0, 4.0))
+vec(1.0, 1.0, 1.0, 1.0)
+vec(1.0, 2.0, 3.0, 4.0)
+vec(vec(1.0, 2.0), vec(3.0, 4.0))
 ```
+
+Use `vec(...)` when the surrounding expression or a typed argument should
+determine the vector type:
+
+```tach
+function direction(): vec<float16, 3> {
+  return vec(1, 2, 3);
+}
+
+function color(rgb: vec<float32, 3>): vec<float32, 4> {
+  return vec(rgb, 1);
+}
+```
+
+If nothing constrains its element type, whole lanes default to `uint32` and a
+fraction or exponent makes the vector `float32`. `vec` never converts an
+already typed value and has no single-scalar splat form. Repeat a scalar, use a
+documented broadcast operation, or explicitly convert each lane before
+rebuilding the vector.
 
 ### 10.2 Structs
 
@@ -715,14 +734,14 @@ Named structs become generated readonly TypeScript object types:
 
 ```tach
 type Particle = {
-  position: float32x4,
-  velocity: float32x4,
+  position: vec<float32, 4>,
+  velocity: vec<float32, 4>,
   mass: float32,
 };
 
 export function accelerate[i](
   particles: buffer<Particle[]>,
-  force: float32x4,
+  force: vec<float32, 4>,
 ) {
   if (i < particles.length) {
     const particle = particles[i];
@@ -763,8 +782,8 @@ Scalar arrays use matching typed arrays naturally:
 | `float32[]` | `Float32Array` |
 | `int32[]` | `Int32Array` |
 | `uint32[]` | `Uint32Array` |
-| `float16x2[]`, `float16x4[]` | flat `Float16Array` or tuple array |
-| `float32x2[]`, `float32x4[]` | flat `Float32Array` or tuple array |
+| `vec<float16, 2>[]`, `vec<float16, 4>[]` | flat `Float16Array` or tuple array |
+| `vec<float32, 2>[]`, `vec<float32, 4>[]` | flat `Float32Array` or tuple array |
 | three-lane vector array | tuple array |
 | struct array | readonly object array |
 
@@ -780,13 +799,20 @@ The same guarantee applies to a final scalar `float16[]` after a struct prefix.
 
 ### 10.4 Numbers and conversion
 
-Tach has no shader-style numeric suffixes:
+Tach has no shader-style numeric suffixes. Inference is confined to one
+expression and resolves explicit types, expected context, concrete sibling
+operands, intrinsic domains, then defaults. Therefore operand order does not
+change an inferred type:
 
 - unconstrained nonnegative whole literals infer `uint32`;
 - negative whole literals infer `int32`;
 - fractions and exponents infer `float32`; and
 - explicit `int32(...)`, `uint32(...)`, `float16(...)`, and `float32(...)`
   conversions resolve ambiguity.
+
+An all-literal floating intrinsic defaults to `float32`; `abs(1)` defaults to
+`int32`. Inference never consults later uses, other functions, generated
+TypeScript, or backend behavior.
 
 Unconstrained fractions infer `float32`; binary16 is chosen by a `float16`
 annotation, parameter/result context, or explicit constructor. Float16
@@ -810,6 +836,7 @@ Indexed functions support:
 - `if`/`else`;
 - `while`;
 - C-style `for`;
+- nearest-loop `break` and `continue`;
 - `return`; and
 - typed struct and vector construction.
 
@@ -822,6 +849,7 @@ Portable scalar/vector intrinsics include:
 | rounding | `floor`, `ceil`, `trunc` |
 | trigonometry | `sin`, `cos`, `tan` |
 | exponential | `exp`, `exp2`, `log`, `log2`, `pow` |
+| multiply-add | `fma` |
 | vector geometry | `dot`, `cross`, `length`, `distance`, `normalize` |
 
 `floor`, `ceil`, `trunc`, trigonometric, exponential, `sqrt`, and `rsqrt`
@@ -829,12 +857,21 @@ preserve a `float16` or `float32` scalar/vector type. `abs` accepts signed
 integer or floating scalar/vector values. `pow` accepts matching floating
 values and can broadcast a scalar exponent across a vector base.
 
+`fma(a, b, c)` accepts `float16` or `float32` values and computes `a * b + c`,
+component by component. Equal-width vector arguments may mix with scalars,
+which broadcast to that width. It carries explicit multiply-add intent into
+both generated targets. The adapter may use one fused hardware instruction or
+separate multiply and add operations, so do not assume one physical
+instruction or one universal intermediate-rounding rule.
+
 `min`, `max`, and `clamp` currently accept integer scalar/vector values so Tach
 does not silently choose a cross-backend floating-point NaN policy. `cross`
-accepts a matching `float16x3` or `float32x3`; the other geometry operations
-accept matching floating vectors and return their component width. Tach has no
-`break` or `continue`, function values, methods, or
-recursion.
+accepts a matching `vec<float16, 3>` or `vec<float32, 3>`; the other geometry operations
+accept matching floating vectors and return their component width. `break`
+exits the nearest enclosing loop. `continue` advances its nearest loop and, in
+a `for`, performs the update before testing the condition again. Neither may
+appear outside a loop. Tach has no labeled transfer, function values, methods,
+or recursion.
 
 Use `tach check` as the authority for exact overloads. `float32` has about
 seven decimal digits of precision; `float16` has roughly three and a maximum
@@ -1290,10 +1327,10 @@ application state; Tach does not hide recovery behind stale handles.
 The public command surface is intentionally small:
 
 ```text
-tach build [--verbose]
-tach check
-tach docs
-tach fmt
+tach build [--verbose] [--json]
+tach check [--json]
+tach docs [--json]
+tach fmt [--json]
 tach instructions [--details <section>...]
 tach version
 tach help
@@ -1319,6 +1356,55 @@ generated bindings, and documentation rendering.
 
 `fmt` and generated writes are transactional. One invalid file prevents a
 partially updated project.
+
+### Errors, warnings, and machine output
+
+Errors reject faulty projects. Warnings do not reject or change output; they
+identify only statically proven dead work or suspicious GPU access/control
+patterns. Each diagnostic has a stable `code`, an exact UTF-8 source span, the
+source line, related locations when several sites form one issue, and a
+specific `help` action when Tach can recommend one safely.
+
+Ordinary commands render a compact Markdown-like terminal report:
+
+```text
+## warning [unused-binding]
+
+local "discarded" is never used
+
+--> kernels/image.tach:8:3
+  |
+8 |   const discarded = 1;
+  |   ^^^^^^^^^^^^^^^^^^^^
+
+- help: remove the binding or use its value
+```
+
+Add `--json` to `build`, `check`, `docs`, or `fmt` for one JSON value on
+stdout and no human prose. The top-level record has `schema: 1`, `ok`,
+`command`, and `diagnostics`; a non-compiler usage/runtime failure instead adds
+an `error` object. Every diagnostic contains `severity`, `code`, `message`,
+`span`, optional `source` and `help`, and optional `related` locations. This is
+the preferred interface for agents, editors, and build automation.
+
+Current warnings are deliberately conservative:
+
+| Code | Proven condition |
+|---|---|
+| `unused-import` | no declaration from an imported file is referenced |
+| `unused-binding` | a parameter, index, local, or shared variable is never used |
+| `unreachable-function` | a private function is outside every exported dependency graph |
+| `discarded-value` | a pure expression is evaluated and ignored |
+| `constant-condition` | an `if` or conditional expression is fixed, or a loop is statically false |
+| `zero-dispatch` | a literal launch axis prevents a stage from running |
+| `no-effect-kernel` | a reachable kernel cannot affect externally visible memory |
+| `constant-write-index` | an unconditional non-atomic write address is invocation-independent |
+| `strided-access` | adjacent one-dimensional invocations provably use a non-unit buffer stride |
+
+Tach does not warn about folklore such as a particular workgroup multiple,
+integer division, or a possible `fma`: those depend on the algorithm, target,
+or driver and would train users to ignore the compiler. Related locations fold
+repeated instances of one proven access pattern into one report.
 
 ### Verbose diagnostics
 
@@ -1348,13 +1434,18 @@ Deno-native build tools can call project operations directly:
 import {
   build,
   check,
+  CompilerError,
   compilerPath,
   docs,
   format,
+  renderDiagnostics,
 } from "@depths/tach/compiler";
 
 const cwd = Deno.cwd();
-await check({ cwd });
+const checked = await check({ cwd });
+if (checked.diagnostics.length) {
+  console.warn(renderDiagnostics(checked.diagnostics));
+}
 await build({ cwd, verbose: true });
 await docs({ cwd });
 await format({ cwd });
@@ -1365,6 +1456,13 @@ This API operates on whole projects. It does not expose the private compiler
 protocol and must not be included in browser bundles. A script using it needs
 Deno read, write, environment, subprocess, and network permissions; `-A` is the
 simple choice for a trusted local build script.
+
+Successful `build`, `check`, and `docs` calls return warnings in
+`ProjectResult.diagnostics`. A source failure throws `CompilerError`, whose
+`diagnostics` property contains the machine records and whose message is the
+same report produced by `renderDiagnostics`. Catch `CompilerError` when a tool
+needs to distinguish source diagnostics from installation, subprocess, or
+filesystem failures.
 
 Compiler resolution checks an explicit `TACH_BIN`, a package-local binary, the
 repository development binary, then the exact release asset for the installed

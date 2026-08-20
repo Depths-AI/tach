@@ -54,6 +54,17 @@ function expectedFloat16Math(index: number): number[] {
   return [...unit, shaped + exponential + rounded];
 }
 
+function expectedContextualMath(index: number, scale: number): number[] {
+  const value = [index + 1, 2, 3], length = Math.hypot(...value);
+  const wave = Math.sin(1);
+  return [
+    value[0]! / length * scale + 1 + wave,
+    value[1]! / length * scale + 2 + wave,
+    value[2]! / length * scale + 3 + wave,
+    wave + 2 ** 3 + 32,
+  ];
+}
+
 async function verifyLanguage(gpu: Tach): Promise<void> {
   const counters = gpu.buffer({ total: 0 }),
     accumulation = programs.accumulate(counters);
@@ -75,6 +86,44 @@ async function verifyLanguage(gpu: Tach): Promise<void> {
     source.map((value) => value > 50 ? 100 : value * 2 + 1),
     "control flow",
   );
+
+  const scan = gpu.buffer([0, 0, 0, 0]),
+    scanInput = gpu.buffer([1, 2, 3, 4, 0, 6, 7, 8, 600, 10, 11, 12]);
+  await gpu.submit(programs.selectiveScan(scan, scanInput, {
+    stride: 4,
+    count: 12,
+    scale: 2,
+    threshold: 1000,
+  }));
+  equal(
+    await scan.read(),
+    [1202, 36, 42, 48],
+    "break, continue, and float32 fma",
+  );
+
+  const affine = gpu.buffer(new Float16Array([1, 2, 3, 4, 5, 6, 7, 8]));
+  await gpu.submit(programs.affineFloat16(affine, [2, 3, 4, 5], [1, 1, 1, 1]));
+  equal(
+    Array.from(await affine.read()),
+    [3, 7, 13, 21, 11, 19, 29, 41],
+    "float16 vector fma",
+  );
+
+  const contextual = gpu.buffer(
+    Array.from({ length: 4 }, () => [0, 0, 0, 0] as const),
+  );
+  await gpu.submit(programs.contextualMath(contextual, 2));
+  (await contextual.read()).flat().forEach((value, index) => {
+    const expected = expectedContextualMath(
+      Math.floor(index / 4),
+      2,
+    )[index % 4]!;
+    if (Math.abs(value - expected) > 0.0001) {
+      throw new Error(
+        `contextual inference[${index}]: ${value} != ${expected}`,
+      );
+    }
+  });
 
   const lanes = Array<number>(256).fill(0);
   lanes.splice(0, 4, 1, 2, 3, 4);
@@ -187,7 +236,9 @@ async function verifyViews(gpu: Tach): Promise<void> {
 const first = await tach(async (gpu) => {
   equal(Object.keys(programs).sort(), [
     "accumulate",
+    "affineFloat16",
     "bitwise",
+    "contextualMath",
     "float16Math",
     "gradient",
     "gradientInto",
@@ -197,6 +248,7 @@ const first = await tach(async (gpu) => {
     "reduceLanes",
     "scale",
     "scaleFloat16",
+    "selectiveScan",
     "swatch",
     "swatchInto",
     "transform",
@@ -210,4 +262,4 @@ const second = await tach(async (gpu) => {
   return gpu.adapter.name;
 });
 equal(second, first, "owner-neutral scalar view across sessions");
-console.log(`Vulkan execution: ${first}; 14 programs; 72 projected frames`);
+console.log(`Vulkan execution: ${first}; 17 programs; 72 projected frames`);

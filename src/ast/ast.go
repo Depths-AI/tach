@@ -99,6 +99,15 @@ type FixedArrayType struct {
 func (*FixedArrayType) typeNode()              {}
 func (t *FixedArrayType) GetSpan() source.Span { return t.Span }
 
+type VectorType struct {
+	Elem  TypeExpr
+	Lanes string
+	Span  source.Span
+}
+
+func (*VectorType) typeNode()              {}
+func (t *VectorType) GetSpan() source.Span { return t.Span }
+
 type GenericType struct {
 	Name string
 	Args []TypeExpr
@@ -196,6 +205,16 @@ type ForStmt struct {
 
 func (*ForStmt) stmtNode()              {}
 func (s *ForStmt) GetSpan() source.Span { return s.Span }
+
+type BreakStmt struct{ Span source.Span }
+
+func (*BreakStmt) stmtNode()              {}
+func (s *BreakStmt) GetSpan() source.Span { return s.Span }
+
+type ContinueStmt struct{ Span source.Span }
+
+func (*ContinueStmt) stmtNode()              {}
+func (s *ContinueStmt) GetSpan() source.Span { return s.Span }
 
 type ReturnStmt struct {
 	Value Expr

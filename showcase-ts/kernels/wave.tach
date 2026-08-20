@@ -27,8 +27,8 @@ type WaveParams = {
   param(params, "Grid and integration parameters."),
 )
 function step[i](
-  source: buffer<float32x2[]>,
-  destination: buffer<float32x2[]>,
+  source: buffer<vec<float32, 2>[]>,
+  destination: buffer<vec<float32, 2>[]>,
   params: WaveParams,
 ) {
   if (i < source.length && i < destination.length) {
@@ -36,13 +36,13 @@ function step[i](
     const y = i / params.width;
     if (x == 0 || y == 0 || x + 1 == params.width || y + 1 == params.height) {
       // A fixed zero boundary absorbs the stencil edge without wrapped reads.
-      destination[i] = float32x2(0.0, 0.0);
+      destination[i] = vec(0.0, 0.0);
     }else {
       const current = source[i];
       const laplacian = source[i - 1].x + source[i + 1].x + source[i - params.width].x
         + source[i + params.width].x - current.x * 4.0;
       const velocity = (current.y + laplacian * params.stiffness * params.dt) * params.damping;
-      destination[i] = float32x2(current.x + velocity * params.dt, velocity);
+      destination[i] = vec(current.x + velocity * params.dt, velocity);
     }
   }
 }
@@ -54,8 +54,8 @@ function step[i](
   param(params, "Grid and integration parameters."),
 )
 export function waveSimulation(
-  first: buffer<float32x2[]>,
-  second: buffer<float32x2[]>,
+  first: buffer<vec<float32, 2>[]>,
+  second: buffer<vec<float32, 2>[]>,
   params: WaveParams,
 ) {
   run step(first, second, params) over first.length;

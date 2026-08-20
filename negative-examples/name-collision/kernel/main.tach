@@ -1,0 +1,7 @@
+type Same = {
+  value: float32,
+};
+
+function Same(): float32 {
+  return 0;
+}

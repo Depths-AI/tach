@@ -27,6 +27,7 @@ const (
 	ShaderFloat16                 = "shaderFloat16"
 	StorageBuffer16BitAccess      = "storageBuffer16BitAccess"
 	UniformAndStorage16BitAccess  = "uniformAndStorageBuffer16BitAccess"
+	unitHelper                    = "$tach_unit"
 	srgbHelper                    = "$tach_srgb"
 )
 
@@ -207,7 +208,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 	}
 	for _, program := range cloned.Programs {
 		if program.View != nil {
-			executable.KernelModule.Functions = append(executable.KernelModule.Functions, srgbFunction())
+			executable.KernelModule.Functions = append(executable.KernelModule.Functions, unitFunction(), srgbFunction())
 			break
 		}
 	}
@@ -921,22 +922,37 @@ func srgbFunction() *ir.Function {
 		Return: types.TF32,
 		Body: &ir.Block{
 			Instrs: []ir.Instr{
+				&ir.Call{Result: 2, Type: types.TF32, Function: unitHelper, Args: []ir.ValueID{1}},
+				&ir.Const{Result: 3, Type: types.TF32, Raw: "0.0031308"},
+				&ir.Binary{Result: 4, Type: types.TBool, Op: "<=", Left: 2, Right: 3},
+				&ir.Const{Result: 5, Type: types.TF32, Raw: "12.92"},
+				&ir.Binary{Result: 6, Type: types.TF32, Op: "*", Left: 2, Right: 5},
+				&ir.Const{Result: 7, Type: types.TF32, Raw: "0.416666667"},
+				&ir.Intrinsic{Result: 8, Type: types.TF32, Kind: ir.IntrinsicPow, Args: []ir.ValueID{2, 7}},
+				&ir.Const{Result: 9, Type: types.TF32, Raw: "1.055"},
+				&ir.Binary{Result: 10, Type: types.TF32, Op: "*", Left: 8, Right: 9},
+				&ir.Const{Result: 11, Type: types.TF32, Raw: "0.055"},
+				&ir.Binary{Result: 12, Type: types.TF32, Op: "-", Left: 10, Right: 11},
+				&ir.If{Results: []ir.Result{{ID: 13, Type: types.TF32}}, Cond: 4, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{6}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{12}}}},
+			},
+			Term: &ir.Return{Value: 13, HasValue: true},
+		},
+	}
+}
+
+func unitFunction() *ir.Function {
+	return &ir.Function{
+		Name: unitHelper, Kind: ir.Helper, Params: []ir.Param{{Name: "value", ID: 1, Type: types.TF32}}, Return: types.TF32,
+		Body: &ir.Block{
+			Instrs: []ir.Instr{
 				&ir.Const{Result: 2, Type: types.TF32, Raw: "0.0"},
 				&ir.Const{Result: 3, Type: types.TF32, Raw: "1.0"},
-				&ir.Intrinsic{Result: 4, Type: types.TF32, Kind: ir.IntrinsicClamp, Args: []ir.ValueID{1, 2, 3}},
-				&ir.Const{Result: 5, Type: types.TF32, Raw: "0.0031308"},
-				&ir.Binary{Result: 6, Type: types.TBool, Op: "<=", Left: 4, Right: 5},
-				&ir.Const{Result: 7, Type: types.TF32, Raw: "12.92"},
-				&ir.Binary{Result: 8, Type: types.TF32, Op: "*", Left: 4, Right: 7},
-				&ir.Const{Result: 9, Type: types.TF32, Raw: "0.416666667"},
-				&ir.Intrinsic{Result: 10, Type: types.TF32, Kind: ir.IntrinsicPow, Args: []ir.ValueID{4, 9}},
-				&ir.Const{Result: 11, Type: types.TF32, Raw: "1.055"},
-				&ir.Binary{Result: 12, Type: types.TF32, Op: "*", Left: 10, Right: 11},
-				&ir.Const{Result: 13, Type: types.TF32, Raw: "0.055"},
-				&ir.Binary{Result: 14, Type: types.TF32, Op: "-", Left: 12, Right: 13},
-				&ir.If{Results: []ir.Result{{ID: 15, Type: types.TF32}}, Cond: 6, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{8}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{14}}}},
+				&ir.Binary{Result: 4, Type: types.TBool, Op: ">", Left: 1, Right: 2},
+				&ir.Binary{Result: 5, Type: types.TBool, Op: "<", Left: 1, Right: 3},
+				&ir.If{Results: []ir.Result{{ID: 6, Type: types.TF32}}, Cond: 5, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{1}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{3}}}},
+				&ir.If{Results: []ir.Result{{ID: 7, Type: types.TF32}}, Cond: 4, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{6}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{2}}}},
 			},
-			Term: &ir.Return{Value: 15, HasValue: true},
+			Term: &ir.Return{Value: 7, HasValue: true},
 		},
 	}
 }
@@ -986,12 +1002,8 @@ func packRGBA(value ir.ValueID, next *ir.ValueID) ([]ir.Instr, ir.ValueID) {
 		instructions = append(instructions, &ir.Call{Result: encoded, Type: types.TF32, Function: srgbHelper, Args: []ir.ValueID{channels[index]}})
 		channels[index] = encoded
 	}
-	zero, one, alpha := newValue(), newValue(), newValue()
-	instructions = append(instructions,
-		&ir.Const{Result: zero, Type: types.TF32, Raw: "0.0"},
-		&ir.Const{Result: one, Type: types.TF32, Raw: "1.0"},
-		&ir.Intrinsic{Result: alpha, Type: types.TF32, Kind: ir.IntrinsicClamp, Args: []ir.ValueID{channels[3], zero, one}},
-	)
+	alpha := newValue()
+	instructions = append(instructions, &ir.Call{Result: alpha, Type: types.TF32, Function: unitHelper, Args: []ir.ValueID{channels[3]}})
 	channels[3] = alpha
 	scale, half := newValue(), newValue()
 	instructions = append(instructions,
@@ -1031,6 +1043,9 @@ func Verify(executable *Executable) error {
 	}
 	if err := flow.Verify(executable.Logical); err != nil {
 		return fmt.Errorf("logical module: %w", err)
+	}
+	if err := ir.Verify(executable.KernelModule); err != nil {
+		return fmt.Errorf("physical kernel module: %w", err)
 	}
 	entries := map[string]bool{}
 	for i, kernel := range executable.PhysicalKernels {

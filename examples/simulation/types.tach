@@ -20,6 +20,6 @@ type ParticleParams = {
   field(velocity, "Velocity applied during integration."),
 )
 type Particle = {
-  position: float32x4,
-  velocity: float32x4,
+  position: vec<float32, 4>,
+  velocity: vec<float32, 4>,
 };
