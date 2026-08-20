@@ -153,9 +153,9 @@ Numbers have no shader suffix. Unconstrained nonnegative integers infer
 Use explicit `int32(...)`, `uint32(...)`, `float16(...)`, or `float32(...)`;
 binary16 is never inferred without context and is never silently widened. Do
 not expect JavaScript coercion. Prefer `const`; `let` is mutable; shadowing is forbidden.
-Operators, precedence, assignments, `if`/`while`/`for`, returns, and intrinsics
-are deliberately narrower than TypeScript. Check the exact tables before
-emitting unfamiliar math. See §34: literals,
+Control supports nearest-loop `break`/`continue`; a `for` continue runs its
+update. FP16/FP32 `fma(a, b, c)` expresses multiply-add,
+not instruction count. Exact operator and intrinsic rules follow. See §34: literals,
 §35: conversion,
 §36: scope,
 §37: operators,

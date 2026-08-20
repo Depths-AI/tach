@@ -810,6 +810,7 @@ Indexed functions support:
 - `if`/`else`;
 - `while`;
 - C-style `for`;
+- nearest-loop `break` and `continue`;
 - `return`; and
 - typed struct and vector construction.
 
@@ -822,6 +823,7 @@ Portable scalar/vector intrinsics include:
 | rounding | `floor`, `ceil`, `trunc` |
 | trigonometry | `sin`, `cos`, `tan` |
 | exponential | `exp`, `exp2`, `log`, `log2`, `pow` |
+| multiply-add | `fma` |
 | vector geometry | `dot`, `cross`, `length`, `distance`, `normalize` |
 
 `floor`, `ceil`, `trunc`, trigonometric, exponential, `sqrt`, and `rsqrt`
@@ -829,12 +831,21 @@ preserve a `float16` or `float32` scalar/vector type. `abs` accepts signed
 integer or floating scalar/vector values. `pow` accepts matching floating
 values and can broadcast a scalar exponent across a vector base.
 
+`fma(a, b, c)` requires three values of the same `float16` or `float32`
+scalar/vector type and computes `a * b + c`, component by component. It carries
+explicit multiply-add intent into both generated targets. The adapter may use
+one fused hardware instruction or separate multiply and add operations, so do
+not assume one physical instruction or one universal intermediate-rounding
+rule.
+
 `min`, `max`, and `clamp` currently accept integer scalar/vector values so Tach
 does not silently choose a cross-backend floating-point NaN policy. `cross`
 accepts a matching `float16x3` or `float32x3`; the other geometry operations
-accept matching floating vectors and return their component width. Tach has no
-`break` or `continue`, function values, methods, or
-recursion.
+accept matching floating vectors and return their component width. `break`
+exits the nearest enclosing loop. `continue` advances its nearest loop and, in
+a `for`, performs the update before testing the condition again. Neither may
+appear outside a loop. Tach has no labeled transfer, function values, methods,
+or recursion.
 
 Use `tach check` as the authority for exact overloads. `float32` has about
 seven decimal digits of precision; `float16` has roughly three and a maximum

@@ -303,6 +303,14 @@ generated modules record and enforce its optional GPU requirements. Projects
 without `float16` keep the ordinary feature floor.
 Struct types are always emitted into the TypeScript API.
 
+Inside a helper or indexed stage, ordinary structured `if`, `while`, and `for`
+control is available. `break` exits the nearest loop; `continue` advances it
+and still performs a `for` update. Portable math includes scalar/vector FP16
+and FP32 `fma(a, b, c)`, which carries multiply-add intent to both backends
+without claiming one physical instruction on every adapter. The
+[examples guide](examples/README.md) demonstrates these alongside the simpler
+forms rather than hiding them inside a large kernel.
+
 Files import other project files by extensionless module/kernel identity:
 
 ```tach

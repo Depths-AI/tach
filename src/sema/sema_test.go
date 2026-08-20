@@ -225,6 +225,82 @@ export function halfMath[i](values: buffer<float16x4[]>, factor: float16) {
 	}
 }
 
+func TestLoopControlAndFmaLowerToCoreIR(t *testing.T) {
+	parsed, err := parser.Parse("control.tach", `
+export function control[i](out: buffer<float32[]>, half: buffer<float16[]>, limit: uint32) {
+  let total: float32 = 0;
+  for (let step = 0; step < limit; step++) {
+    if (step == 2) { continue; }
+    total = fma(float32(step), 0.5, total);
+    if (total > 10.0) { break; }
+  }
+  if (i < out.length && i < half.length) {
+    out[i] = total;
+    half[i] = fma(half[i], float16(2), float16(1));
+  }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := sema.CheckAndLower(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump := ir.Dump(module.Kernel)
+	for _, want := range []string{"intrinsic fma", "continue [", "break ["} {
+		if !strings.Contains(dump, want) {
+			t.Fatalf("control/FMA IR missing %q:\n%s", want, dump)
+		}
+	}
+
+	for _, test := range []struct{ source, want string }{
+		{`export function bad[i](out: buffer<uint32[]>) { break; }`, "break is only valid inside a loop"},
+		{`export function bad[i](out: buffer<uint32[]>) { continue; }`, "continue is only valid inside a loop"},
+		{`export function bad[i](out: buffer<uint32[]>) { out[i] = fma(1, 2, 3); }`, "matching floating-point"},
+		{`export function bad[i](out: buffer<float32[]>) { out[i] = fma(1.0, 2.0); }`, "expects 3 argument"},
+	} {
+		parsed, parseErr := parser.Parse("invalid-control.tach", test.source)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil || !strings.Contains(checkErr.Error(), test.want) {
+			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
+		}
+	}
+}
+
+func TestLoopControlPreservesBarrierUniformity(t *testing.T) {
+	for _, source := range []string{
+		`@workgroup(4) export function valid[i](out: buffer<uint32[]>) { for (let step = 0; step < 4; step++) { if (step == 2) { break; } } workgroupBarrier(); out[i] = i; }`,
+		`@workgroup(4) export function valid[i](out: buffer<uint32[]>) { for (let step = 0; step < 4; step++) { if (step == 2) { continue; } } workgroupBarrier(); out[i] = i; }`,
+	} {
+		parsed, err := parser.Parse("uniform-control.tach", source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sema.CheckAndLower(parsed); err != nil {
+			t.Fatalf("uniform loop transfer rejected: %v", err)
+		}
+	}
+	for _, keyword := range []string{"break", "continue"} {
+		parsed, err := parser.Parse("varying-control.tach", `
+@workgroup(4)
+export function invalid[i](out: buffer<uint32[]>) {
+  for (let step = 0; step < 4; step++) {
+    if (i == step) { `+keyword+`; }
+  }
+  workgroupBarrier();
+  out[i] = i;
+}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sema.CheckAndLower(parsed); err == nil || !strings.Contains(err.Error(), "non-uniform control flow") {
+			t.Fatalf("varying %s barrier error = %v", keyword, err)
+		}
+	}
+}
+
 func TestFloat16Encoding(t *testing.T) {
 	for _, test := range []struct {
 		value float64

@@ -57,6 +57,26 @@ export function step[i](particles: buffer<Particle[]>) { }
 	}
 }
 
+func TestBreakAndContinueStatements(t *testing.T) {
+	module, err := parser.Parse("control.tach", `
+export function control[i](out: buffer<uint32[]>) {
+  for (let step = 0; step < 8; step++) {
+    if (step == 2) { continue; }
+    if (step == 6) { break; }
+  }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := module.Decls[0].(*ast.FunctionDecl).Body.Stmts[0].(*ast.ForStmt).Body
+	if _, ok := body.Stmts[0].(*ast.IfStmt).Then.Stmts[0].(*ast.ContinueStmt); !ok {
+		t.Fatalf("continue statement = %T", body.Stmts[0])
+	}
+	if _, ok := body.Stmts[1].(*ast.IfStmt).Then.Stmts[0].(*ast.BreakStmt); !ok {
+		t.Fatalf("break statement = %T", body.Stmts[1])
+	}
+}
+
 func TestModuleDocumentationMustComeFirst(t *testing.T) {
 	_, err := parser.Parse("docs.tach", `type X = { value: uint32 }; @docs(summary("Too late."));`)
 	if err == nil || !strings.Contains(err.Error(), "must precede declarations") {

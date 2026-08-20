@@ -605,6 +605,17 @@ func (p *parser) stmt() (ast.Stmt, error) {
 			return nil, err
 		}
 		return &ast.ForStmt{Init: init, Cond: cond, Post: post, Body: body, Span: join(start, body.Span)}, nil
+	case p.text("break") || p.text("continue"):
+		keyword := p.take()
+		semi, err := p.expect(lexer.Semicolon)
+		if err != nil {
+			return nil, err
+		}
+		span := join(keyword.Span, semi.Span)
+		if keyword.Text == "break" {
+			return &ast.BreakStmt{Span: span}, nil
+		}
+		return &ast.ContinueStmt{Span: span}, nil
 	case p.text("return"):
 		start := p.take().Span
 		var v ast.Expr

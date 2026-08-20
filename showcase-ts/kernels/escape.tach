@@ -1,0 +1,87 @@
+@docs(
+  title("Adaptive complex dynamics"),
+  summary("Compares binary32 and binary16 Julia-set iteration with data-dependent exits and orbit sampling."),
+);
+
+@docs(
+  summary("Dimensions and iteration ceiling for one complex plane."),
+  field(width, "Complex-plane samples per row."),
+  field(height, "Complex-plane sample rows."),
+  field(maxIterations, "Maximum recurrence iterations per sample."),
+)
+type EscapeParams = {
+  width: uint32,
+  height: uint32,
+  maxIterations: uint32,
+};
+
+@docs(
+  summary("Measures binary32 Julia-set escape depth and post-transient orbit energy."),
+  coordinate(i, "Linear complex-plane sample index."),
+  param(output, "Escape iteration and orbit-energy pair per sample."),
+  param(params, "Plane dimensions and iteration ceiling."),
+)
+export function complexEscapeFloat32[i](
+  output: buffer<float32x2[]>,
+  params: EscapeParams,
+) {
+  if (i < output.length) {
+    const column = i % params.width;
+    const row = i / params.width;
+    let real = float32(column) / float32(params.width) * 3.2 - 1.6;
+    let imaginary = float32(row) / float32(params.height) * 2.0 - 1.0;
+    let iterations = 0;
+    let energy = 0.0;
+    for (let step = 0; step < params.maxIterations; step++) {
+      const radiusSquared = fma(real, real, imaginary * imaginary);
+      if (radiusSquared > 16.0) {
+        break;
+      }
+      const nextReal = fma(real, real, -0.745 - imaginary * imaginary);
+      imaginary = fma(real + real, imaginary, 0.113);
+      real = nextReal;
+      iterations++;
+      // Ignore the initial transient before measuring the settled orbit.
+      if (step < 8) {
+        continue;
+      }
+      energy = fma(real, real, energy + imaginary * imaginary);
+    }
+    output[i] = float32x2(float32(iterations), energy);
+  }
+}
+
+@docs(
+  summary("Measures the same Julia-set recurrence and orbit energy in binary16."),
+  coordinate(i, "Linear complex-plane sample index."),
+  param(output, "Binary16 escape iteration and orbit-energy pair per sample."),
+  param(params, "Plane dimensions and iteration ceiling."),
+)
+export function complexEscapeFloat16[i](
+  output: buffer<float16x2[]>,
+  params: EscapeParams,
+) {
+  if (i < output.length) {
+    const column = i % params.width;
+    const row = i / params.width;
+    let real = float16(column) / float16(params.width) * 3.2 - 1.6;
+    let imaginary = float16(row) / float16(params.height) * 2.0 - 1.0;
+    let iterations = 0;
+    let energy = float16(0.0);
+    for (let step = 0; step < params.maxIterations; step++) {
+      const radiusSquared = fma(real, real, imaginary * imaginary);
+      if (radiusSquared > 16.0) {
+        break;
+      }
+      const nextReal = fma(real, real, -0.745 - imaginary * imaginary);
+      imaginary = fma(real + real, imaginary, 0.113);
+      real = nextReal;
+      iterations++;
+      if (step < 8) {
+        continue;
+      }
+      energy = fma(real, real, energy + imaginary * imaginary);
+    }
+    output[i] = float16x2(float16(iterations), energy);
+  }
+}

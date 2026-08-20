@@ -266,7 +266,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 		}
 		e.values[p.ID] = p.Type
 	}
-	_, err := verifyBlock(m, f, f.Body, e, fmap, "return")
+	_, err := verifyBlock(m, f, f.Body, e, fmap, "return", nil)
 	if err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	return nil
 }
 
-func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string) (verifyEnv, error) {
+func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string, loopTypes []*types.Type) (verifyEnv, error) {
 	if b == nil {
 		return e, fmt.Errorf("nil block")
 	}
@@ -671,11 +671,11 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !types.Equal(ct, types.TBool) {
 				return e, fmt.Errorf("if condition is %s", ct)
 			}
-			te, err := verifyBlock(m, f, x.Then, e.clone(), fmap, "yield")
+			te, err := verifyBlock(m, f, x.Then, e.clone(), fmap, "yield", loopTypes)
 			if err != nil {
 				return e, fmt.Errorf("if then: %w", err)
 			}
-			ee, err := verifyBlock(m, f, x.Else, e.clone(), fmap, "yield")
+			ee, err := verifyBlock(m, f, x.Else, e.clone(), fmap, "yield", loopTypes)
 			if err != nil {
 				return e, fmt.Errorf("if else: %w", err)
 			}
@@ -722,7 +722,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				}
 				le.values[p.ID] = p.Type
 			}
-			ce, err := verifyBlock(m, f, x.Cond, le.clone(), fmap, "yield")
+			ce, err := verifyBlock(m, f, x.Cond, le.clone(), fmap, "yield", nil)
 			if err != nil {
 				return e, fmt.Errorf("loop condition: %w", err)
 			}
@@ -730,20 +730,19 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !ok || len(cy.Values) != 1 || !types.Equal(ce.values[cy.Values[0]], types.TBool) {
 				return e, fmt.Errorf("loop condition must yield one bool")
 			}
-			be, err := verifyBlock(m, f, x.Body, le.clone(), fmap, "continue")
+			carriedTypes := make([]*types.Type, len(x.Params))
+			for i, parameter := range x.Params {
+				carriedTypes[i] = parameter.Type
+			}
+			_, err = verifyBlock(m, f, x.Body, le.clone(), fmap, "continue", carriedTypes)
 			if err != nil {
 				return e, fmt.Errorf("loop body: %w", err)
 			}
-			co, ok := x.Body.Term.(*Continue)
-			if !ok {
-				return e, fmt.Errorf("loop body must continue")
-			}
-			if len(co.Values) != len(x.Params) || len(x.Results) != len(x.Params) {
+			if len(x.Results) != len(x.Params) {
 				return e, fmt.Errorf("loop carried arity mismatch")
 			}
 			for i, p := range x.Params {
-				t := be.values[co.Values[i]]
-				if !types.Equal(t, p.Type) || !types.Equal(x.Results[i].Type, p.Type) {
+				if !types.Equal(x.Results[i].Type, p.Type) {
 					return e, fmt.Errorf("loop carried value %d type mismatch", i)
 				}
 				if err := defVal(x.Results[i].ID, p.Type); err != nil {
@@ -754,7 +753,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if f.Kind != Stage {
 				return e, fmt.Errorf("scope outside stage")
 			}
-			if _, err := verifyBlock(m, f, x.Body, e.clone(), fmap, "exit_scope"); err != nil {
+			if _, err := verifyBlock(m, f, x.Body, e.clone(), fmap, "exit_scope", loopTypes); err != nil {
 				return e, fmt.Errorf("scope: %w", err)
 			}
 		default:
@@ -764,10 +763,26 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 	if b.Term == nil {
 		return e, fmt.Errorf("block has no terminator")
 	}
+	verifyTransfer := func(kind string, values []ValueID) error {
+		if loopTypes == nil {
+			return fmt.Errorf("unexpected %s terminator", kind)
+		}
+		if len(values) != len(loopTypes) {
+			return fmt.Errorf("%s carries %d values, want %d", kind, len(values), len(loopTypes))
+		}
+		for i, id := range values {
+			type_, err := val(id)
+			if err != nil {
+				return err
+			}
+			if !types.Equal(type_, loopTypes[i]) {
+				return fmt.Errorf("%s value %d is %s, want %s", kind, i, type_, loopTypes[i])
+			}
+		}
+		return nil
+	}
 	switch t := b.Term.(type) {
 	case *Return:
-		if termKind != "return" && termKind != "yield" && termKind != "continue" {
-		} // returns are legal nested control exits.
 		if f.Return.Kind == types.Void {
 			if t.HasValue {
 				return e, fmt.Errorf("void function returns a value")
@@ -794,13 +809,12 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 		}
 	case *Continue:
-		if termKind != "continue" {
-			return e, fmt.Errorf("unexpected continue terminator")
+		if err := verifyTransfer("continue", t.Values); err != nil {
+			return e, err
 		}
-		for _, id := range t.Values {
-			if _, err := val(id); err != nil {
-				return e, err
-			}
+	case *Break:
+		if err := verifyTransfer("break", t.Values); err != nil {
+			return e, err
 		}
 	case *Unreachable:
 		// Structured constructs whose every path exits can leave an unreachable merge.
@@ -869,6 +883,13 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 		}
 		if !same() || !types.IsIntegerLike(args[0]) || !types.Equal(x.Type, args[0]) {
 			return fmt.Errorf("clamp requires three matching integer scalar/vector operands")
+		}
+	case IntrinsicFma:
+		if err := need(3); err != nil {
+			return err
+		}
+		if !same() || !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
+			return fmt.Errorf("fma requires three matching floating-point scalar/vector operands")
 		}
 	case IntrinsicDot:
 		if err := need(2); err != nil {

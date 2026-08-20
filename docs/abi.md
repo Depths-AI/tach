@@ -679,6 +679,9 @@ The runtime builds layouts from metadata and never parses WGSL.
 When the logical module contains binary16, WGSL begins with `enable f16;` and
 the Web target records `shader-f16`. `openWeb` requests that optional adapter
 feature, and module preparation rejects a device that did not enable it.
+Kernel IR loop transfers remain lexical WGSL `break` and `continue` after
+assigning generated loop-carrier locals. The target-neutral `fma` intrinsic
+maps directly to the matching WGSL builtin and changes no layout or binding.
 For a scalar `float16[]` whose byte range may need four-byte binding padding,
 whether direct or after a struct prefix, the entry's private parameter block
 also carries the metadata-derived logical length; generated `arrayLength` use
@@ -701,6 +704,9 @@ host-ABI alignment, including the 16-byte struct floor. Workgroup and Input
 use the logical pointee alignment (max member or element; `{uint32, uint32}`
 shared is 4, not 16). StorageBuffer, Uniform, and Workgroup also carry
 NonPrivatePointer; Input does not.
+Loop `continue` and `break` edges feed the structured continuation and merge
+blocks, including their exact `OpPhi` operands. `fma` maps to GLSL.std.450
+`Fma`; these control and arithmetic mappings add no host ABI fields.
 Storage-buffer atomics use QueueFamily scope; workgroup atomics use Workgroup
 scope. Source barriers add MakeAvailable and MakeVisible.
 

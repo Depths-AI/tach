@@ -197,6 +197,16 @@ type ForStmt struct {
 func (*ForStmt) stmtNode()              {}
 func (s *ForStmt) GetSpan() source.Span { return s.Span }
 
+type BreakStmt struct{ Span source.Span }
+
+func (*BreakStmt) stmtNode()              {}
+func (s *BreakStmt) GetSpan() source.Span { return s.Span }
+
+type ContinueStmt struct{ Span source.Span }
+
+func (*ContinueStmt) stmtNode()              {}
+func (s *ContinueStmt) GetSpan() source.Span { return s.Span }
+
 type ReturnStmt struct {
 	Value Expr
 	Span  source.Span

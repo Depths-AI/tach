@@ -131,6 +131,44 @@ export function half[i](values: buffer<float16[]>, factor: float16) {
 	}
 }
 
+func TestLoopControlAndFmaSPIRV(t *testing.T) {
+	bin := emitSource(t, "control.tach", `
+export function control[i](out: buffer<float32[]>, half: buffer<float16[]>, limit: uint32) {
+  let total: float32 = 0;
+  for (let step = 0; step < limit; step++) {
+    if (step == 2) { continue; }
+    total = fma(float32(step), 0.5, total);
+    if (total > 10.0) { break; }
+  }
+  if (i < out.length && i < half.length) {
+    out[i] = total;
+    half[i] = fma(half[i], float16(2), float16(1));
+  }
+}`)
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fma32, fma16 int
+	floatWidth := map[uint32]uint32{}
+	for _, instruction := range m.Instructions {
+		if instruction.Op == spirv.OpTypeFloat {
+			floatWidth[instruction.Operands[0]] = instruction.Operands[1]
+		}
+		if instruction.Op == spirv.OpExtInst && instruction.Operands[3] == spirv.GLSL450Fma {
+			switch floatWidth[instruction.Operands[0]] {
+			case 16:
+				fma16++
+			case 32:
+				fma32++
+			}
+		}
+	}
+	if fma16 != 1 || fma32 != 1 {
+		t.Fatalf("SPIR-V Fma counts: float16=%d float32=%d, want 1 each", fma16, fma32)
+	}
+}
+
 func TestViewProjectionIsValidSPIRV16(t *testing.T) {
 	bin := emitSource(t, "view.tach", `
 function paint[i](pixels: buffer<float32x4[]>) {

@@ -199,6 +199,10 @@ loads/stores, atomics, barriers, workgroup declarations, and structured
 values. Bindings, descriptor sets, padding, target pointer types, and builtin
 variable names do not appear.
 
+`Continue` and `Break` terminators carry the loop values for their exact CFG
+edge, so early transfer remains valid SSA rather than source-level control that
+a backend must rediscover. `fma` remains one target-neutral typed intrinsic.
+
 ### Flow IR: public program semantics
 
 `src/flow` represents host-callable work around indexed stages:
@@ -407,7 +411,8 @@ so physical padding cannot become a phantom logical element.
 1. indexes physical and helper function coordinate requirements;
 2. emits structs, resources, parameter blocks, helpers, and private entries;
 3. maps structured Kernel IR directly to structured WGSL, including the
-   shared view-pack helper;
+   shared view-pack helper, carrier assignments before `break`/`continue`, and
+   the WGSL `fma` builtin;
 4. stores a fused or standalone view by unpacking the packed word with
    `unpack4x8unorm` into an `rgba8unorm` storage texture; and
 5. reparses the exact generated WGSL subset with its in-tree validator.
@@ -436,6 +441,11 @@ GLSL.std.450 math where required. It owns result IDs,
 logical/physical types,
 interface variables, decorations, structured CFG construction, phi nodes,
 access chains, atomics, barriers, and extended instructions.
+
+Early loop transfers become edges to the structured continuation or merge
+block and contribute their carried values to that block's `OpPhi` nodes.
+`fma` becomes GLSL.std.450 `Fma`; neither mapping changes its target-neutral
+source type contract.
 
 Host-visible StorageBuffer/uniform aggregates use decorated physical types.
 SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
@@ -653,17 +663,20 @@ Tests mirror ownership:
 - `browser-test` builds the example project once and checks every generated
   endpoint through its exact generated WGSL in WebGPU, including fused and
   fallback views, exact 8-bit swatch presentation, sustained CPU-selected
-  canvas presentation, Float16 math/storage/parameters, an odd direct f16
-  array, and a prefixed f16 runtime tail;
+  canvas presentation, nearest-loop early exits and skips, FP16/FP32 `fma`,
+  Float16 math/storage/parameters, an odd direct f16 array, and
+  a prefixed f16 runtime tail;
 - `deno-test` independently builds the same example project, validates its
   SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
   including fused/fallback offscreen projection, the same swatch pair,
-  owner-neutral recipes, repeated logical sessions, and the same Float16 seams;
-- `showcase-ts` builds seven workload kernels plus one shared color file and
-  runs nine host-neutral rendering, mathematical, and physics workloads through
-  both WebGPU and Vulkan, including matched FP32/FP16 matrix and
-  arithmetic-dense oscillator pairs; browser renderers use direct canvas
-  presentation while native renderers exercise packed view projection;
+  owner-neutral recipes, repeated logical sessions, and the same loop,
+  multiply-add, and Float16 seams;
+- `showcase-ts` builds eight workload kernels plus one shared color file and
+  runs eleven host-neutral rendering, mathematical, and physics workloads
+  through both WebGPU and Vulkan, including matched FP32/FP16 matrix,
+  data-dependent complex recurrence, and arithmetic-dense oscillator pairs;
+  browser renderers use direct canvas presentation while native renderers
+  exercise packed view projection;
   and
 - `dupl`, `deadcode`, and `staticcheck` provide structural duplication,
   whole-program reachability, and correctness audits beyond behavioral tests.

@@ -5,7 +5,7 @@ through a library. These files are how Tach asks you to *describe* GPU work
 yourself: small functions that look like TypeScript, compiled once, then
 called from ordinary application code.
 
-This folder is not an app and not a speed test. It is a set of fourteen short
+This folder is not an app and not a speed test. It is a set of sixteen short
 programs that together cover the language you will actually write. Each
 program exists because it teaches one idea that is easy to miss if you only
 ever saw `array.map`. Read them in order the first time. After that, jump
@@ -80,6 +80,7 @@ examples/
     scalars.tach     multiply float32 and float16 arrays
     bitwise.tach     integer bit operations
     control.tach     loops and branches
+    loop-control.tach break, continue, and fused multiply-add
     for.tach         for-loops and vectors
     math.tach        sin, length, and friends
     view.tach        turn pixels into something a canvas can show
@@ -100,6 +101,8 @@ under it. There is no source list and no webpack config for kernels.
 | `halveFloat16` | `core/scalars.tach` | Carry a binary16 constant through an orchestration plan. |
 | `bitwise` | `core/bitwise.tach` | Do the same bit math at every index. |
 | `transform` | `core/control.tach` | Walk a strided slice, add, maybe write back. |
+| `selectiveScan` | `core/loop-control.tach` | Skip empty values and stop a strided scan at a threshold. |
+| `affineFloat16` | `core/loop-control.tach` | Apply a component-wise binary16 fused multiply-add. |
 | `reduceLanes` | `core/for.tach` | Sum each group of four integers. |
 | `math` | `core/math.tach` | Run the standard math functions at each index. |
 | `gradient` | `core/view.tach` | Paint a gradient and return a displayable image. |
@@ -192,6 +195,27 @@ branch, and the flag all have to work together.
 The `@workgroup(64)` above the function is the team size those 64-apart
 strides are built for. You can ignore workgroups until you need this kind
 of teamwork. `scale` never mentions them.
+
+## `loop-control.tach` - skip work, stop work, and multiply-add
+
+Loops do not always consume every item. `selectiveScan` gives each invocation
+one strided lane, uses `continue` to ignore zero values, and uses `break` once
+its accumulated result reaches a caller-supplied threshold. In a `for` loop,
+`continue` still performs the update (`i += params.stride`) before testing the
+condition again. `break` exits only the nearest enclosing loop and preserves
+the values computed before it.
+
+The accepted values are accumulated with `fma(value, params.scale, total)`.
+That operation expresses `value * params.scale + total` as one multiply-add
+to both backends. It gives the GPU an explicit opportunity to use fused
+hardware, but Tach does not promise that every adapter executes one physical
+instruction or one rounding step.
+
+`affineFloat16` demonstrates the same intrinsic on a `float16x4`. All three
+arguments have the same type, and the operation applies component by
+component. Together the two programs cover scalar float32 and vector float16
+without replacing the simpler arithmetic examples that teach those types
+first.
 
 ## `reduceLanes` - vectors and `for`
 
@@ -360,7 +384,7 @@ imports `tach` from `@depths/tach`. The same TypeScript runs in a
 browser (WebGPU) and in Deno (Vulkan). You do not choose a backend.
 
 The repository's browser and Deno tests compile this project and call
-every public function. They are how we know the fourteen programs still
+every public function. They are how we know the sixteen programs still
 mean the same thing on both hosts. A separate project, `showcase-ts`,
 measures large workloads. It is not this folder.
 

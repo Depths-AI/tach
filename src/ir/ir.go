@@ -223,6 +223,7 @@ const (
 	IntrinsicMin
 	IntrinsicMax
 	IntrinsicClamp
+	IntrinsicFma
 	IntrinsicDot
 	IntrinsicLength
 	IntrinsicDistance
@@ -418,6 +419,10 @@ type Continue struct{ Values []ValueID }
 
 func (*Continue) termNode() {}
 
+type Break struct{ Values []ValueID }
+
+func (*Break) termNode() {}
+
 type Return struct {
 	Value    ValueID
 	HasValue bool
@@ -564,6 +569,10 @@ func cloneTerm(term Term) Term {
 		y := *x
 		y.Values = append([]ValueID(nil), x.Values...)
 		return &y
+	case *Break:
+		y := *x
+		y.Values = append([]ValueID(nil), x.Values...)
+		return &y
 	case *Return:
 		y := *x
 		return &y
@@ -637,6 +646,8 @@ func (k IntrinsicKind) String() string {
 		return "max"
 	case IntrinsicClamp:
 		return "clamp"
+	case IntrinsicFma:
+		return "fma"
 	case IntrinsicDot:
 		return "dot"
 	case IntrinsicLength:
@@ -801,6 +812,8 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 		fmt.Fprintf(b, "%syield %v\n", ind, t.Values)
 	case *Continue:
 		fmt.Fprintf(b, "%scontinue %v\n", ind, t.Values)
+	case *Break:
+		fmt.Fprintf(b, "%sbreak %v\n", ind, t.Values)
 	case *Return:
 		if t.HasValue {
 			fmt.Fprintf(b, "%sreturn %%%d\n", ind, t.Value)

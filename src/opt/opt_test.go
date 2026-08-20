@@ -180,3 +180,21 @@ export function synchronized[i](data: buffer<uint32[]>, steps: uint32) {
 		t.Fatalf("synchronized memory update was incorrectly promoted:\n%s", dump)
 	}
 }
+
+func TestLoopBufferPromotionStopsAtEarlyTransfer(t *testing.T) {
+	for _, transfer := range []string{"break", "continue"} {
+		kernel := optimized(t, transfer+"-loop.tach", `
+@workgroup(1)
+export function controlled[i](data: buffer<float32[]>, steps: uint32) {
+  for (let step = 0; step < steps; step++) {
+    data[i] += 1.0;
+    if (data[i] > 4.0) { `+transfer+`; }
+  }
+}`)
+		dump := ir.Dump(kernel)
+		loop := strings.Index(dump, "loop params=")
+		if loop < 0 || !strings.Contains(dump[loop:], "store &") {
+			t.Fatalf("%s loop memory update was incorrectly promoted:\n%s", transfer, dump)
+		}
+	}
+}

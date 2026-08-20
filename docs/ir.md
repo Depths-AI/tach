@@ -321,6 +321,7 @@ A block is an instruction list plus exactly one terminator:
 |---|---|
 | `Yield` | return values from an `If` branch or loop condition |
 | `Continue` | provide next loop-carried values |
+| `Break` | leave the nearest loop with its current carried values |
 | `Return` | leave helper/stage, optionally with helper value |
 | `ExitScope` | leave a backend-created scope without leaving the stage |
 | `Unreachable` | explicit terminal state |
@@ -356,10 +357,15 @@ loop params=[(%index <- %initial), (%sum <- %zero)] {
 }
 ```
 
-The condition yields one bool. The body supplies one next value per loop
-parameter. When the condition is false, current parameters become results.
-Source `while` and `for`, plus safe backend repeat internalization, share this
-model.
+The condition yields one bool. Every `Continue`, including one nested inside a
+branch, supplies one next value per loop parameter. Every `Break` supplies the
+current values that become the loop results. A false condition supplies those
+results from the loop header. WGSL assigns generated carrier locals before an
+early transfer. SPIR-V records every transfer edge and forms continuation and
+merge `OpPhi` nodes. Source `while` and `for`, plus safe backend repeat
+internalization, share this model. A source `continue` in a `for` lowers the
+source update before its `Continue`, so no backend has to reconstruct that
+language rule.
 
 `Scope` lets backend-created wrappers rewrite an ordinary stage `return` into
 `ExitScope`, preserving early return inside an outer repeat loop.
@@ -418,6 +424,7 @@ Vulkan 1.3 feature.
 - valid module types, function roles, and workgroup constraints;
 - unique nonzero value/place definitions and structured availability;
 - exact operand, result, yield, loop-carrier, call, and return types;
+- legal nearest-loop `Break` and `Continue` transfers with exact carried types;
 - valid source-parameter mappings and at least one stage buffer;
 - legal buffer/workgroup roots and field/index projections;
 - read/write access through every place;
@@ -542,6 +549,7 @@ stores the word in a storage buffer.
 | `If` result | private mutable local | merge block and `OpPhi` |
 | `Loop` carrier | generated mutable local | header `OpPhi` |
 | intrinsic | WGSL builtin | core or GLSL.std.450 instruction |
+| `fma` | `fma` builtin | GLSL.std.450 `Fma` |
 | `float16` | `f16` after `enable f16;` | 16-bit `OpTypeFloat` plus exact capabilities |
 | f16/f32 conversion | constructor conversion | `OpFConvert` |
 | atomic | WGSL atomic builtin | `OpAtomic*` at QueueFamily or Workgroup |

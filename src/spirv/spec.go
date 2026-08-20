@@ -150,6 +150,7 @@ const (
 	GLSL450FClamp      uint32 = 43
 	GLSL450UClamp      uint32 = 44
 	GLSL450SClamp      uint32 = 45
+	GLSL450Fma         uint32 = 50
 	GLSL450Length      uint32 = 66
 	GLSL450Distance    uint32 = 67
 	GLSL450Cross       uint32 = 68

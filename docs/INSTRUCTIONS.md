@@ -1552,8 +1552,26 @@ for (let lane: uint32 = 0; lane < 4; lane++) {
 ```
 
 A `for` initializer is a `let` declaration. Its update is assignment,
-compound assignment, `++`, or `--`. Tach has no `break`, `continue`, `switch`,
-exceptions, labels, `do while`, `for of`, or `for in`.
+compound assignment, `++`, or `--`. `break;` exits the nearest enclosing
+`while` or `for`. `continue;` starts the nearest loop's next iteration; in a
+`for`, its update executes first. Both may sit inside nested branches and
+scopes, but neither may occur outside a loop. Code after an unconditional
+`break`, `continue`, or `return` is unreachable and rejected.
+
+```tach
+for (let i = start; i < values.length; i += stride) {
+  if (values[i] == 0.0) {
+    continue;
+  }
+  total = fma(values[i], scale, total);
+  if (total >= threshold) {
+    break;
+  }
+}
+```
+
+Tach has no labeled transfer, `switch`, exceptions, `do while`, `for of`, or
+`for in`. A transfer always targets the lexically nearest loop.
 
 A helper returns its declared value; a void helper or indexed stage may use
 `return;`. Statements after an unconditional return are rejected. Public
@@ -1575,6 +1593,8 @@ Additional rules:
 - `abs` accepts `int32`, `float16`, or `float32` scalars/vectors.
 - `pow` accepts matching floating values and can broadcast a scalar exponent
   across a vector base.
+- `fma(a, b, c)` requires three exactly matching `float16` or `float32`
+  scalar/vector values and computes component-wise `a * b + c`.
 - `min`, `max`, and `clamp` accept integer scalars/vectors.
 - Floating `min`, `max`, and `clamp` are intentionally unavailable.
 
@@ -1591,6 +1611,9 @@ Geometric intrinsics are:
 Intrinsic names are reserved. Do not redefine them as types or functions.
 Remember that both floating widths have finite precision and target-portable
 GPU math may not be bit-identical to CPU double precision.
+`fma` explicitly carries multiply-add intent through WGSL and SPIR-V, but a
+backend or device may still choose fused hardware or separate operations. Do
+not rely on a particular physical instruction count or intermediate rounding.
 
 ## 42. Shared workgroup memory
 
@@ -3006,7 +3029,7 @@ Do not generate Tach code that assumes any of the following exist:
 - cross-project, npm, URL, relative, named, aliased, or transitive imports;
 - namespaces, overloads, methods, closures, or function values;
 - pointers, references, pointer arithmetic, or user binding annotations;
-- recursion, `break`, `continue`, `switch`, exceptions, or block comments;
+- recursion, labeled transfers, `switch`, exceptions, or block comments;
 - strings as runtime values;
 - implicit general numeric conversion or JavaScript coercion;
 - matrices, 64-bit numbers, floating atomics, or floating `min/max/clamp`;
@@ -3061,6 +3084,8 @@ statement       := variable-decl ";"
                  | if-statement
                  | while-statement
                  | for-statement
+                 | "break" ";"
+                 | "continue" ";"
                  | return-statement ";"
 
 variable-decl   := ("const" | "let") IDENT [":" type]

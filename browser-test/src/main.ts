@@ -78,6 +78,28 @@ async function verifyLanguage(gpu: Tach): Promise<void> {
     "control flow",
   );
 
+  const scan = gpu.buffer([0, 0, 0, 0]),
+    scanInput = gpu.buffer([1, 2, 3, 4, 0, 6, 7, 8, 600, 10, 11, 12]);
+  await gpu.submit(programs.selectiveScan(scan, scanInput, {
+    stride: 4,
+    count: 12,
+    scale: 2,
+    threshold: 1000,
+  }));
+  equal(
+    await scan.read(),
+    [1202, 36, 42, 48],
+    "break, continue, and float32 fma",
+  );
+
+  const affine = gpu.buffer(new Float16Array([1, 2, 3, 4, 5, 6, 7, 8]));
+  await gpu.submit(programs.affineFloat16(affine, [2, 3, 4, 5], [1, 1, 1, 1]));
+  equal(
+    Array.from(await affine.read()),
+    [3, 7, 13, 21, 11, 19, 29, 41],
+    "float16 vector fma",
+  );
+
   const lanes = Array<number>(256).fill(0);
   lanes.splice(0, 4, 1, 2, 3, 4);
   const reduced = gpu.buffer(lanes);
@@ -206,6 +228,7 @@ async function verifySwatch(gpu: Tach, fused: boolean): Promise<void> {
 const run = tach(async (gpu) => {
   equal(Object.keys(programs).sort(), [
     "accumulate",
+    "affineFloat16",
     "bitwise",
     "float16Math",
     "gradient",
@@ -216,6 +239,7 @@ const run = tach(async (gpu) => {
     "reduceLanes",
     "scale",
     "scaleFloat16",
+    "selectiveScan",
     "swatch",
     "swatchInto",
     "transform",

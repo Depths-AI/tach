@@ -134,6 +134,38 @@ export function half[i](values: buffer<float16x2[]>, factor: float16) {
 	}
 }
 
+func TestLoopControlAndFmaWGSL(t *testing.T) {
+	a, err := parser.Parse("control.tach", `
+export function control[i](out: buffer<float32[]>, limit: uint32) {
+  let total: float32 = 0;
+  for (let step = 0; step < limit; step++) {
+    if (step == 2) { continue; }
+    total = fma(float32(step), 0.5, total);
+    if (total > 10.0) { break; }
+  }
+  if (i < out.length) { out[i] = total; }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"fma(", "continue;", "break;"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("WGSL missing %q:\n%s", want, out)
+		}
+	}
+	if err := wgsl.Validate(out); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestViewProjectsStraightIntoStorageTexture(t *testing.T) {
 	a, err := parser.Parse("view.tach", `
 function paint[i](pixels: buffer<float32x4[]>) {

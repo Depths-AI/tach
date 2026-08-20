@@ -1,0 +1,63 @@
+@docs(
+  title("Loop exits and fused multiply-add"),
+  summary("Demonstrates early exit, skipped iterations, and component-wise float16 and float32 FMA."),
+);
+
+@docs(
+  summary("Controls a strided scan with skipped zeros and an early threshold exit."),
+  field(stride, "Distance between values owned by one invocation."),
+  field(count, "Number of input values available to scan."),
+  field(scale, "Multiplier applied to every accepted value."),
+  field(threshold, "Accumulation value that stops the scan."),
+)
+type ScanParams = {
+  stride: uint32,
+  count: uint32,
+  scale: float32,
+  threshold: float32,
+};
+
+@docs(
+  summary("Scans one strided lane, ignoring zero values and stopping at the threshold."),
+  coordinate(start, "First input index in this invocation's strided lane."),
+  param(output, "One accumulated result per launched lane."),
+  param(input, "Values scanned without modification."),
+  param(params, "Stride, bounds, scale, and stopping threshold."),
+)
+export function selectiveScan[start](
+  output: buffer<float32[]>,
+  input: buffer<float32[]>,
+  params: ScanParams,
+) {
+  let total = 0.0;
+  for (let i = start; i < params.count && i < input.length; i += params.stride) {
+    const value = input[i];
+    if (value == 0.0) {
+      continue;
+    }
+    total = fma(value, params.scale, total);
+    if (total >= params.threshold) {
+      break;
+    }
+  }
+  if (start < output.length) {
+    output[start] = total;
+  }
+}
+
+@docs(
+  summary("Applies one component-wise binary16 multiply-add to every vector."),
+  coordinate(i, "Vector index."),
+  param(values, "Binary16 vectors updated in place."),
+  param(multiplier, "Per-lane binary16 multiplier."),
+  param(addend, "Per-lane binary16 addend."),
+)
+export function affineFloat16[i](
+  values: buffer<float16x4[]>,
+  multiplier: float16x4,
+  addend: float16x4,
+) {
+  if (i < values.length) {
+    values[i] = fma(values[i], multiplier, addend);
+  }
+}

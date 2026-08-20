@@ -718,6 +718,7 @@ type fnEmitter struct {
 	currentLabel uint32
 	terminated   bool
 	scopeMerges  []uint32
+	loops        []loopTarget
 }
 
 func (b *builder) emitFunction(f *ir.Function) error {
@@ -922,7 +923,6 @@ type blockMode uint8
 const (
 	blockNormal blockMode = iota
 	blockYield
-	blockContinue
 	blockScope
 )
 
@@ -933,9 +933,40 @@ type blockExit struct {
 	falls bool
 }
 
+type phiIncoming struct{ value, label uint32 }
+
+type loopTarget struct {
+	merge, continuing uint32
+	breaks, continues [][]phiIncoming
+}
+
 func (s *fnEmitter) emitBlock(bl *ir.Block, mode blockMode) error {
 	_, err := s.emitBlockExit(bl, mode)
 	return err
+}
+
+func (s *fnEmitter) emitLoopTransfer(values []ir.ValueID, pred uint32, breaking bool) (blockExit, error) {
+	if len(s.loops) == 0 {
+		return blockExit{}, fmt.Errorf("loop transfer outside loop")
+	}
+	loop := &s.loops[len(s.loops)-1]
+	incoming, target, name := loop.continues, loop.continuing, "continue"
+	if breaking {
+		incoming, target, name = loop.breaks, loop.merge, "break"
+	}
+	if len(values) != len(incoming) {
+		return blockExit{}, fmt.Errorf("%s carries %d values, want %d", name, len(values), len(incoming))
+	}
+	for i, id := range values {
+		value, err := s.value(id)
+		if err != nil {
+			return blockExit{}, err
+		}
+		incoming[i] = append(incoming[i], phiIncoming{value, pred})
+	}
+	emit(&s.b.functions, OpBranch, target)
+	s.terminated = true
+	return blockExit{pred: pred}, nil
 }
 
 func (s *fnEmitter) emitBlockExit(bl *ir.Block, mode blockMode) (blockExit, error) {
@@ -979,18 +1010,9 @@ func (s *fnEmitter) emitBlockExit(bl *ir.Block, mode blockMode) (blockExit, erro
 		}
 		return blockExit{kind: blockYield, vals: vals, pred: pred, falls: true}, nil
 	case *ir.Continue:
-		if mode != blockContinue {
-			return blockExit{}, fmt.Errorf("continue outside loop")
-		}
-		vals := make([]uint32, len(t.Values))
-		for i, id := range t.Values {
-			v, err := s.value(id)
-			if err != nil {
-				return blockExit{}, err
-			}
-			vals[i] = v
-		}
-		return blockExit{kind: blockContinue, vals: vals, pred: pred, falls: true}, nil
+		return s.emitLoopTransfer(t.Values, pred, false)
+	case *ir.Break:
+		return s.emitLoopTransfer(t.Values, pred, true)
 	case *ir.ExitScope:
 		if len(s.scopeMerges) == 0 {
 			return blockExit{}, fmt.Errorf("exit_scope outside scope")
@@ -1403,6 +1425,8 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		} else {
 			inst = GLSL450UClamp
 		}
+	case ir.IntrinsicFma:
+		inst = GLSL450Fma
 	case ir.IntrinsicLength:
 		inst = GLSL450Length
 	case ir.IntrinsicDistance:
@@ -1908,8 +1932,7 @@ func (s *fnEmitter) emitIf(x *ir.If) error {
 	emit(&s.b.functions, OpBranchConditional, cond, thenLabel, elseLabel)
 	s.terminated = true
 
-	type incoming struct{ val, label uint32 }
-	incomingByResult := make([][]incoming, len(x.Results))
+	incomingByResult := make([][]phiIncoming, len(x.Results))
 
 	emit(&s.b.functions, OpLabel, thenLabel)
 	s.currentLabel, s.terminated = thenLabel, false
@@ -1922,7 +1945,7 @@ func (s *fnEmitter) emitIf(x *ir.If) error {
 			return fmt.Errorf("then yield count mismatch")
 		}
 		for i, v := range te.vals {
-			incomingByResult[i] = append(incomingByResult[i], incoming{v, te.pred})
+			incomingByResult[i] = append(incomingByResult[i], phiIncoming{v, te.pred})
 		}
 		emit(&s.b.functions, OpBranch, mergeLabel)
 		s.terminated = true
@@ -1939,7 +1962,7 @@ func (s *fnEmitter) emitIf(x *ir.If) error {
 			return fmt.Errorf("else yield count mismatch")
 		}
 		for i, v := range ee.vals {
-			incomingByResult[i] = append(incomingByResult[i], incoming{v, ee.pred})
+			incomingByResult[i] = append(incomingByResult[i], phiIncoming{v, ee.pred})
 		}
 		emit(&s.b.functions, OpBranch, mergeLabel)
 		s.terminated = true
@@ -1953,14 +1976,14 @@ func (s *fnEmitter) emitIf(x *ir.If) error {
 			return fmt.Errorf("selection result %%%d has no incoming value", r.ID)
 		}
 		if len(incs) == 1 {
-			s.def(r.ID, incs[0].val, r.Type)
+			s.def(r.ID, incs[0].value, r.Type)
 			continue
 		}
 		tid, _ := s.b.typeID(r.Type, typeLogical)
 		id := s.b.id()
 		ops := []uint32{tid, id}
 		for _, in := range incs {
-			ops = append(ops, in.val, in.label)
+			ops = append(ops, in.value, in.label)
 		}
 		emit(&s.b.functions, OpPhi, ops...)
 		s.def(r.ID, id, r.Type)
@@ -1980,6 +2003,7 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 	s.currentLabel, s.terminated = header, false
 
 	patches := make([]int, len(x.Params))
+	params := make([]uint32, len(x.Params))
 	for i, p := range x.Params {
 		init, err := s.value(p.Init)
 		if err != nil {
@@ -1989,8 +2013,8 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 		phi := s.b.id()
 		start := emit(&s.b.functions, OpPhi, tid, phi, init, preheader, 0, cont)
 		patches[i] = start + 5 // first word + operands: type,result,init,pre,back,cont
+		params[i] = phi
 		s.def(p.ID, phi, p.Type)
-		s.def(x.Results[i].ID, phi, x.Results[i].Type)
 	}
 
 	// Keep the SPIR-V loop header minimal and structurally stable. Tach's loop
@@ -2009,24 +2033,46 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 	if !ce.falls || len(ce.vals) != 1 {
 		return fmt.Errorf("loop condition must yield one bool")
 	}
+	conditionExit := ce.pred
 	emit(&s.b.functions, OpBranchConditional, ce.vals[0], body, merge)
 	s.terminated = true
 
 	emit(&s.b.functions, OpLabel, body)
 	s.currentLabel, s.terminated = body, false
-	be, err := s.emitBlockExit(x.Body, blockContinue)
+	s.loops = append(s.loops, loopTarget{
+		merge:      merge,
+		continuing: cont,
+		breaks:     make([][]phiIncoming, len(x.Params)),
+		continues:  make([][]phiIncoming, len(x.Params)),
+	})
+	_, err = s.emitBlockExit(x.Body, blockNormal)
 	if err != nil {
 		return err
 	}
-	if !be.falls || len(be.vals) != len(x.Params) {
-		return fmt.Errorf("loop body must continue with %d carried values", len(x.Params))
-	}
-	emit(&s.b.functions, OpBranch, cont)
-	s.terminated = true
+	loop := s.loops[len(s.loops)-1]
+	s.loops = s.loops[:len(s.loops)-1]
 
 	emit(&s.b.functions, OpLabel, cont)
 	s.currentLabel, s.terminated = cont, false
-	for i, back := range be.vals {
+	for i, incoming := range loop.continues {
+		back := uint32(0)
+		switch len(incoming) {
+		case 0:
+			back, err = s.value(x.Params[i].Init)
+		case 1:
+			back = incoming[0].value
+		default:
+			tid, _ := s.b.typeID(x.Params[i].Type, typeLogical)
+			back = s.b.id()
+			ops := []uint32{tid, back}
+			for _, value := range incoming {
+				ops = append(ops, value.value, value.label)
+			}
+			emit(&s.b.functions, OpPhi, ops...)
+		}
+		if err != nil {
+			return err
+		}
 		s.b.functions[patches[i]] = back
 	}
 	emit(&s.b.functions, OpBranch, header)
@@ -2034,5 +2080,20 @@ func (s *fnEmitter) emitLoop(x *ir.Loop) error {
 
 	emit(&s.b.functions, OpLabel, merge)
 	s.currentLabel, s.terminated = merge, false
+	for i, result := range x.Results {
+		incoming := append([]phiIncoming{{params[i], conditionExit}}, loop.breaks[i]...)
+		if len(incoming) == 1 {
+			s.def(result.ID, incoming[0].value, result.Type)
+			continue
+		}
+		tid, _ := s.b.typeID(result.Type, typeLogical)
+		id := s.b.id()
+		ops := []uint32{tid, id}
+		for _, value := range incoming {
+			ops = append(ops, value.value, value.label)
+		}
+		emit(&s.b.functions, OpPhi, ops...)
+		s.def(result.ID, id, result.Type)
+	}
 	return nil
 }

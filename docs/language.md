@@ -707,7 +707,27 @@ function accumulated(count: uint32): uint32 {
 ```
 
 A `for` initializer is a `let`; its update is an assignment, compound
-assignment, `++`, or `--`. `break` and `continue` are not source constructs.
+assignment, `++`, or `--`. `break;` exits the nearest enclosing loop.
+`continue;` starts its next iteration; in a `for`, the update runs before the
+condition is tested again. Either statement may appear inside nested `if` or
+scope blocks, but only within a `while` or `for`. Statements after an
+unconditional `break`, `continue`, or `return` are rejected as unreachable.
+
+```tach
+function boundedSum(limit: uint32): float32 {
+  let total = 0.0;
+  for (let i = 0; i < limit; i++) {
+    if (i == 0) {
+      continue;
+    }
+    total = fma(float32(i), 0.5, total);
+    if (total > 100.0) {
+      break;
+    }
+  }
+  return total;
+}
+```
 
 A helper returns its declared type. A void helper or indexed stage may use
 `return;`. Statements after an unconditional return are rejected.
@@ -728,6 +748,13 @@ sqrt   rsqrt
 `abs` accepts `int32`, `float16`, or `float32` scalar/vector values. `pow`
 accepts matching floating values and may broadcast a scalar exponent across a
 vector base.
+
+`fma(a, b, c)` accepts three values of exactly the same `float16` or `float32`
+scalar/vector type and computes `a * b + c`, component by component for a
+vector. It deliberately expresses a multiply-add operation to WGSL and
+SPIR-V. A backend or device may execute it as a fused instruction or as
+separate multiply and add operations; Tach promises the portable operation,
+not one physical instruction or one universal intermediate-rounding rule.
 
 `min`, `max`, and `clamp` accept integer scalars/vectors. Their floating forms
 remain unavailable until Tach defines one portable NaN and signed-zero policy.
@@ -869,6 +896,7 @@ statement       := variable-decl ";"
                  | run-statement ";"
                  | simple-statement ";"
                  | if-statement | while-statement | for-statement
+                 | "break" ";" | "continue" ";"
                  | return-statement ";"
 
 variable-decl   := ("const" | "let") IDENT [":" type] "=" expression
@@ -919,8 +947,8 @@ identifier, string, or comment may exceed the target.
 ## 16. Deliberate boundaries
 
 Tach currently has no pointers, pointer arithmetic, binding annotations,
-ambient invocation objects, recursion, resource aliasing, `break`, `continue`,
-block comments, cross-project imports, named imports, re-exports, deeper source
+ambient invocation objects, recursion, resource aliasing, block comments,
+cross-project imports, named imports, re-exports, deeper source
 trees, or provider extensions.
 
 Public programs express multiple dispatches and temporary resources, but not

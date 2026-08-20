@@ -170,7 +170,7 @@
       "patterns": [
         {
           "name": "keyword.control.tach",
-          "match": "\\b(import|export|function|type|run|over|if|else|while|for|return)\\b"
+          "match": "\\b(import|export|function|type|run|over|if|else|while|for|break|continue|return)\\b"
         },
         {
           "name": "storage.modifier.tach",
@@ -198,7 +198,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.tach",
-          "match": "\\b(abs|floor|ceil|trunc|sin|cos|tan|exp|exp2|log|log2|sqrt|rsqrt|pow|min|max|clamp|dot|length|distance|cross|normalize|ceilDiv|workgroupBarrier|bufferBarrier|atomicLoad|atomicStore|atomicAdd|atomicSub|atomicMin|atomicMax|atomicAnd|atomicOr|atomicXor|atomicExchange)(?=\\s*\\()"
+          "match": "\\b(abs|floor|ceil|trunc|sin|cos|tan|exp|exp2|log|log2|sqrt|rsqrt|pow|min|max|clamp|fma|dot|length|distance|cross|normalize|ceilDiv|workgroupBarrier|bufferBarrier|atomicLoad|atomicStore|atomicAdd|atomicSub|atomicMin|atomicMax|atomicAnd|atomicOr|atomicXor|atomicExchange)(?=\\s*\\()"
         }
       ]
     },

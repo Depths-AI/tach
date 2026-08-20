@@ -288,7 +288,7 @@ function markdown(): string {
   lines.push(
     "## Contract",
     "",
-    "Both hosts execute the same nine Tach programs and generated package facade. Each workload receives one untimed warmup followed by five timed samples in one persistent Tach session. Every sample measures command submission through GPU completion. Allocation, initial upload, readback, PNG encoding, report generation, and validation are excluded.",
+    "Both hosts execute the same eleven Tach programs and generated package facade. Each workload receives one untimed warmup followed by five timed samples in one persistent Tach session. Every sample measures command submission through GPU completion. Allocation, initial upload, readback, PNG encoding, report generation, and validation are excluded.",
     "",
   );
   return lines.join("\n");

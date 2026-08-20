@@ -73,6 +73,13 @@ type fnBuilder struct {
 	ids   *idAllocator
 	block *ir.Block
 	top   bool
+	loop  *loopContext
+}
+
+type loopContext struct {
+	names []string
+	base  env
+	post  ast.Stmt
 }
 
 func (b *fnBuilder) value() ir.ValueID {
@@ -87,7 +94,7 @@ func (b *fnBuilder) emit(i ir.Instr) { b.block.Instrs = append(b.block.Instrs, i
 func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	// Structured regions share one allocator. SSA/place IDs are function-global
 	// identities even when definitions have region-scoped visibility.
-	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block}
+	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block, loop: b.loop}
 }
 
 func CheckAndLower(m *ast.Module) (*flow.Module, error) {
@@ -850,6 +857,17 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		return c.lowerWhile(b, e, x)
 	case *ast.ForStmt:
 		return c.lowerFor(b, e, x)
+	case *ast.BreakStmt:
+		if b.loop == nil {
+			return diag(x.Span, "break is only valid inside a loop")
+		}
+		b.block.Term = &ir.Break{Values: loopValues(b.loop.names, e)}
+		return nil
+	case *ast.ContinueStmt:
+		if b.loop == nil {
+			return diag(x.Span, "continue is only valid inside a loop")
+		}
+		return c.continueLoop(b, e)
 	default:
 		return fmt.Errorf("unknown statement %T", s)
 	}
@@ -1043,8 +1061,38 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 	}
 	return nil
 }
-func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
-	names := carriedNames([]*ast.BlockStmt{x.Body}, e)
+func loopValues(names []string, e env) []ir.ValueID {
+	values := make([]ir.ValueID, len(names))
+	for i, name := range names {
+		values[i] = e.syms[name].value
+	}
+	return values
+}
+
+func (c *Checker) continueLoop(b *fnBuilder, e env) error {
+	loop := b.loop
+	if loop.post != nil {
+		postEnv := loop.base.clone()
+		for _, name := range loop.names {
+			symbol := postEnv.syms[name]
+			symbol.value = e.syms[name].value
+			postEnv.syms[name] = symbol
+		}
+		if err := c.lowerStmt(b, postEnv, loop.post); err != nil {
+			return err
+		}
+		e = postEnv
+	}
+	b.block.Term = &ir.Continue{Values: loopValues(loop.names, e)}
+	return nil
+}
+
+func (c *Checker) lowerLoop(b *fnBuilder, e env, cond ast.Expr, body *ast.BlockStmt, post ast.Stmt, span source.Span) error {
+	blocks := []*ast.BlockStmt{body}
+	if post != nil {
+		blocks = append(blocks, &ast.BlockStmt{Stmts: []ast.Stmt{post}})
+	}
+	names := carriedNames(blocks, e)
 	params := make([]ir.LoopParam, len(names))
 	results := make([]ir.Result, len(names))
 	loopEnv := e.clone()
@@ -1059,41 +1107,37 @@ func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
 	}
 	condBlock := &ir.Block{}
 	cb := b.child(condBlock)
-	cv, ct, err := c.lowerExpr(cb, loopEnv, x.Cond, types.TBool)
+	cv, ct, err := c.lowerExpr(cb, loopEnv, cond, types.TBool)
 	if err != nil {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "while condition is %s, want bool", ct)
+		return diag(cond.GetSpan(), "loop condition is %s, want bool", ct)
 	}
 	condBlock.Term = &ir.Yield{Values: []ir.ValueID{cv}}
 	bodyBlock := &ir.Block{}
 	bb := b.child(bodyBlock)
+	bb.loop = &loopContext{names: names, base: loopEnv, post: post}
 	bodyEnv := loopEnv.clone()
-	if err := c.lowerBlock(bb, x.Body, bodyEnv, "loop"); err != nil {
+	if err := c.lowerBlock(bb, body, bodyEnv, "loop"); err != nil {
 		return err
 	}
 	if bodyBlock.Term == nil {
-		vals := make([]ir.ValueID, len(names))
-		for i, n := range names {
-			vals[i] = bodyEnv.syms[n].value
-		}
-		bodyBlock.Term = &ir.Continue{Values: vals}
-	} else {
-		if _, ok := bodyBlock.Term.(*ir.Return); ok {
-			return diag(x.Body.Span, "a while body that unconditionally returns is better expressed as if; Tach loops currently require a continuing path")
-		}
-		if _, ok := bodyBlock.Term.(*ir.Unreachable); ok {
-			return diag(x.Body.Span, "while body has no continuing path")
+		if err := c.continueLoop(bb, bodyEnv); err != nil {
+			return err
 		}
 	}
-	b.emit(&ir.Loop{Results: results, Params: params, Cond: condBlock, Body: bodyBlock, Span: x.Span})
+	b.emit(&ir.Loop{Results: results, Params: params, Cond: condBlock, Body: bodyBlock, Span: span})
 	for i, n := range names {
 		sym := e.syms[n]
 		sym.value = results[i].ID
 		e.syms[n] = sym
 	}
 	return nil
+}
+
+func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
+	return c.lowerLoop(b, e, x.Cond, x.Body, nil, x.Span)
 }
 
 func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
@@ -1103,10 +1147,7 @@ func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
 	if err := c.lowerStmt(b, loopEnv, x.Init); err != nil {
 		return err
 	}
-	body := &ast.BlockStmt{Span: x.Body.Span}
-	body.Stmts = append(body.Stmts, x.Body.Stmts...)
-	body.Stmts = append(body.Stmts, x.Post)
-	if err := c.lowerWhile(b, loopEnv, &ast.WhileStmt{Cond: x.Cond, Body: body, Span: x.Span}); err != nil {
+	if err := c.lowerLoop(b, loopEnv, x.Cond, x.Body, x.Post, x.Span); err != nil {
 		return err
 	}
 	// The initializer is lexically scoped to the for-loop. Mutations to symbols
@@ -1692,6 +1733,8 @@ func intrinsicBuiltin(name string) (ir.IntrinsicKind, bool) {
 		return ir.IntrinsicMax, true
 	case "clamp":
 		return ir.IntrinsicClamp, true
+	case "fma":
+		return ir.IntrinsicFma, true
 	case "dot":
 		return ir.IntrinsicDot, true
 	case "length":
@@ -1714,7 +1757,7 @@ func ReservedName(name string) bool {
 	if _, ok := atomicBuiltin(name); ok {
 		return true
 	}
-	if name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" || name == "view" || name == "srgb8" {
+	if name == "break" || name == "continue" || name == "workgroupBarrier" || name == "bufferBarrier" || name == "run" || name == "over" || name == "transient" || name == "ceilDiv" || name == "view" || name == "srgb8" {
 		return true
 	}
 	return types.ParseBuiltin(name) != nil
@@ -1733,7 +1776,7 @@ func intrinsicArity(kind ir.IntrinsicKind) int {
 	switch kind {
 	case ir.IntrinsicPow, ir.IntrinsicMin, ir.IntrinsicMax, ir.IntrinsicDot, ir.IntrinsicDistance, ir.IntrinsicCross:
 		return 2
-	case ir.IntrinsicClamp:
+	case ir.IntrinsicClamp, ir.IntrinsicFma:
 		return 3
 	default:
 		return 1
@@ -1813,6 +1856,10 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		// See the float-bound decision above; clamp inherits the same ceiling.
 		if !same() || !types.IsIntegerLike(argTypes[0]) {
 			return 0, nil, diag(x.Span, "clamp requires three matching integer scalar/vector operands")
+		}
+	case ir.IntrinsicFma:
+		if !same() || !types.IsFloatLike(argTypes[0]) {
+			return 0, nil, diag(x.Span, "fma requires three matching floating-point scalar/vector operands")
 		}
 	case ir.IntrinsicDot:
 		if !same() || !floatVec(argTypes[0]) {

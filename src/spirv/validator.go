@@ -1600,6 +1600,13 @@ func (v *validation) validateExtInst(in Instruction) error {
 		if !allResultType() || base.kind != typeFloat {
 			return fmt.Errorf("%s FClamp requires matching floating scalar/vector operands and result", ctx)
 		}
+	case GLSL450Fma:
+		if err := need(3); err != nil {
+			return err
+		}
+		if !allResultType() || base.kind != typeFloat {
+			return fmt.Errorf("%s Fma requires matching floating scalar/vector operands and result", ctx)
+		}
 	case GLSL450SClamp:
 		if err := need(3); err != nil {
 			return err

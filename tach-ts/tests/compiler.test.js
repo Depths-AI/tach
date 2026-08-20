@@ -190,7 +190,7 @@ Deno.test("one build emits the complete dual-backend package", async () => {
         type: "module",
         sideEffects: false,
         exports: { ".": { types: "./index.d.ts", default: "./index.js" } },
-        dependencies: { "@depths/tach": "0.1.3" },
+        dependencies: { "@depths/tach": "0.2.0" },
       },
     );
     const artifacts = [
