@@ -1,0 +1,7 @@
+@workgroup(64)
+export function divergent[i](out: buffer<uint32[]>) {
+  if (i < out.length) {
+    bufferBarrier();
+    out[i] = i;
+  }
+}

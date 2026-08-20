@@ -1,0 +1,9 @@
+function unknownName(): float32 {
+  return misspelled;
+}
+
+export function wrongType[i](out: buffer<float32[]>) {
+  if (i < out.length) {
+    out[i] = true;
+  }
+}

@@ -83,62 +83,62 @@ func loadProject(cwd string, workers int) (*project, error) {
 		return nil, err
 	}
 	manifestPath := filepath.Join(root, "tach.json")
-	manifest, err := readManifest(manifestPath)
+	manifest, manifestSource, err := readManifest(manifestPath)
 	if err != nil {
-		data, _ := os.ReadFile(manifestPath)
 		span := fileSpan("tach.json")
 		var syntax *json.SyntaxError
 		if errors.As(err, &syntax) {
-			span.Start = position(string(data), int(syntax.Offset)-1)
+			span.Start = position(manifestSource, int(syntax.Offset)-1)
 			span.End = span.Start
 			span.End.Column++
 			span.End.Offset++
 		}
 		message := strings.TrimPrefix(err.Error(), "tach.json: ")
-		return nil, &diagnosticError{diagnostics: source.Diagnostics{{Kind: "manifest", Span: span, Message: message}}, sources: map[string]string{"tach.json": string(data)}}
+		return nil, newDiagnosticError(source.Diagnostics{{Kind: "manifest", Span: span, Message: message}}, map[string]string{"tach.json": manifestSource})
 	}
 	kernels, diagnostics := discover(root)
 	if len(kernels) == 0 {
 		diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan("tach.json"), Message: "project contains no module kernel files"})
 	}
-	project := &project{Root: root, Manifest: manifest, Kernels: kernels, sources: map[string]string{}}
+	project := &project{Root: root, Manifest: manifest, Kernels: kernels, sources: map[string]string{"tach.json": manifestSource}}
 	project.parse(workers, &diagnostics)
 	project.validate(&diagnostics)
 	if len(diagnostics) > 0 {
-		return nil, &diagnosticError{diagnostics: diagnostics.Sorted(), sources: project.sources}
+		return nil, newDiagnosticError(diagnostics, project.sources)
 	}
 	return project, nil
 }
 
-func readManifest(path string) (manifest, error) {
+func readManifest(path string) (manifest, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return manifest{}, err
+		return manifest{}, "", err
 	}
-	if err := rejectDuplicateKeys(json.NewDecoder(strings.NewReader(string(data)))); err != nil {
-		return manifest{}, fmt.Errorf("tach.json: %w", err)
+	source := string(data)
+	if err := rejectDuplicateKeys(json.NewDecoder(strings.NewReader(source))); err != nil {
+		return manifest{}, source, fmt.Errorf("tach.json: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder := json.NewDecoder(strings.NewReader(source))
 	decoder.DisallowUnknownFields()
 	var result manifest
 	if err := decoder.Decode(&result); err != nil {
-		return manifest{}, fmt.Errorf("tach.json: %w", err)
+		return manifest{}, source, fmt.Errorf("tach.json: %w", err)
 	}
 	if err := requireEOF(decoder); err != nil {
-		return manifest{}, fmt.Errorf("tach.json: %w", err)
+		return manifest{}, source, fmt.Errorf("tach.json: %w", err)
 	}
 	for _, field := range [][2]string{{"name", result.Name}, {"version", result.Version}, {"javascript.package", result.JavaScript.Package}, {"docs.title", result.Docs.Title}, {"docs.summary", result.Docs.Summary}} {
 		if strings.TrimSpace(field[1]) == "" {
-			return manifest{}, fmt.Errorf("tach.json: %s is required and must be non-empty", field[0])
+			return manifest{}, source, fmt.Errorf("tach.json: %s is required and must be non-empty", field[0])
 		}
 	}
 	if !semverPattern.MatchString(result.Version) {
-		return manifest{}, fmt.Errorf("tach.json: version %q is not semantic versioning", result.Version)
+		return manifest{}, source, fmt.Errorf("tach.json: version %q is not semantic versioning", result.Version)
 	}
 	if !npmPattern.MatchString(result.JavaScript.Package) || len(result.JavaScript.Package) > 214 {
-		return manifest{}, fmt.Errorf("tach.json: javascript.package %q is not a valid npm package name", result.JavaScript.Package)
+		return manifest{}, source, fmt.Errorf("tach.json: javascript.package %q is not a valid npm package name", result.JavaScript.Package)
 	}
-	return result, nil
+	return result, source, nil
 }
 
 func rejectDuplicateKeys(decoder *json.Decoder) error {
@@ -484,7 +484,6 @@ func graphDiagnostics(kernels []kernel, modules bool) source.Diagnostics {
 
 type diagnosticError struct {
 	diagnostics source.Diagnostics
-	sources     map[string]string
 }
 
 func (e *diagnosticError) Error() string {
@@ -494,25 +493,55 @@ func (e *diagnosticError) Error() string {
 			out.WriteByte('\n')
 		}
 		fmt.Fprintf(&out, "%s: %s", diagnostic.Span, diagnostic.Message)
-		line := sourceLine(e.sources[diagnostic.Span.File], diagnostic.Span.Start.Line)
-		if line != "" {
-			fmt.Fprintf(&out, "\n  %s\n  %s%s", line, strings.Repeat(" ", max(0, diagnostic.Span.Start.Column-1)), strings.Repeat("^", max(1, diagnostic.Span.End.Column-diagnostic.Span.Start.Column)))
+		if diagnostic.Source != "" {
+			fmt.Fprintf(&out, "\n  %s\n  %s%s", diagnostic.Source, strings.Repeat(" ", max(0, diagnostic.Span.Start.Column-1)), strings.Repeat("^", max(1, diagnostic.Span.End.Column-diagnostic.Span.Start.Column)))
 		}
 		for _, related := range diagnostic.Related {
 			fmt.Fprintf(&out, "\n  related %s: %s", related.Span, related.Message)
+		}
+		if diagnostic.Help != "" {
+			fmt.Fprintf(&out, "\n  help: %s", diagnostic.Help)
 		}
 	}
 	return out.String()
 }
 
+func newDiagnosticError(diagnostics source.Diagnostics, sources map[string]string) *diagnosticError {
+	return &diagnosticError{diagnostics: enrichDiagnostics(diagnostics, sources, "error")}
+}
+
+func enrichDiagnostics(diagnostics source.Diagnostics, sources map[string]string, severity string) source.Diagnostics {
+	out := append(source.Diagnostics(nil), diagnostics...)
+	for i := range out {
+		if out[i].Severity == "" {
+			out[i].Severity = severity
+		}
+		out[i].Source = sourceLine(sources[out[i].Span.File], out[i].Span.Start.Line)
+		out[i].Related = append([]source.Related(nil), out[i].Related...)
+		for j := range out[i].Related {
+			related := &out[i].Related[j]
+			related.Source = sourceLine(sources[related.Span.File], related.Span.Start.Line)
+		}
+	}
+	return out.Sorted()
+}
+
+func ErrorDiagnostics(err error) (source.Diagnostics, bool) {
+	var diagnostics *diagnosticError
+	if !errors.As(err, &diagnostics) {
+		return nil, false
+	}
+	return append(source.Diagnostics(nil), diagnostics.diagnostics...), true
+}
+
 func (p *project) semanticError(err error) error {
 	var diagnostics source.Diagnostics
 	if errors.As(err, &diagnostics) {
-		return &diagnosticError{diagnostics: diagnostics.Sorted(), sources: p.sources}
+		return newDiagnosticError(diagnostics, p.sources)
 	}
 	var diagnostic *source.Diagnostic
 	if errors.As(err, &diagnostic) {
-		return &diagnosticError{diagnostics: source.Diagnostics{*diagnostic}, sources: p.sources}
+		return newDiagnosticError(source.Diagnostics{*diagnostic}, p.sources)
 	}
 	return err
 }

@@ -197,6 +197,11 @@ npx tach build
 project through both targets without writing output. `build` writes one
 cohesive generated package:
 
+Errors and optimization warnings include an exact source location, source
+line, stable code, and help where Tach can prescribe a safe action. Use
+`npx tach check --json` when an editor, agent, or build tool needs the same
+diagnostics as structured data instead of the terminal report.
+
 ```text
 build/
   package.json

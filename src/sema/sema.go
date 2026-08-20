@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -166,6 +167,10 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
 	if err := ir.Verify(c.mod); err != nil {
+		var diagnostic *source.Diagnostic
+		if errors.As(err, &diagnostic) {
+			return nil, nil, appendError(documentationDiagnostics, diagnostic).Sorted()
+		}
 		return nil, nil, fmt.Errorf("internal IR verification failed: %w", err)
 	}
 	if err := c.lowerPrograms(); err != nil {

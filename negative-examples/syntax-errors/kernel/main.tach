@@ -1,0 +1,8 @@
+// Missing expressions and parameter names are parser errors.
+export function missingValue[i](out: buffer<float32[]>) {
+  if (i < out.length) {
+    out[i] = ;
+  }
+}
+
+function missingName(: float32) {}

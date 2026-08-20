@@ -1,0 +1,11 @@
+function fill[i](out: buffer<float32[]>) {
+  if (true) {
+    if (i < out.length) {
+      out[i] = 1;
+    }
+  }
+}
+
+export function launch(out: buffer<float32[]>) {
+  run fill(out) over 0;
+}

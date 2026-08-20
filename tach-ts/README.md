@@ -1327,10 +1327,10 @@ application state; Tach does not hide recovery behind stale handles.
 The public command surface is intentionally small:
 
 ```text
-tach build [--verbose]
-tach check
-tach docs
-tach fmt
+tach build [--verbose] [--json]
+tach check [--json]
+tach docs [--json]
+tach fmt [--json]
 tach instructions [--details <section>...]
 tach version
 tach help
@@ -1356,6 +1356,55 @@ generated bindings, and documentation rendering.
 
 `fmt` and generated writes are transactional. One invalid file prevents a
 partially updated project.
+
+### Errors, warnings, and machine output
+
+Errors reject faulty projects. Warnings do not reject or change output; they
+identify only statically proven dead work or suspicious GPU access/control
+patterns. Each diagnostic has a stable `code`, an exact UTF-8 source span, the
+source line, related locations when several sites form one issue, and a
+specific `help` action when Tach can recommend one safely.
+
+Ordinary commands render a compact Markdown-like terminal report:
+
+```text
+## warning [unused-binding]
+
+local "discarded" is never used
+
+--> kernels/image.tach:8:3
+  |
+8 |   const discarded = 1;
+  |   ^^^^^^^^^^^^^^^^^^^^
+
+- help: remove the binding or use its value
+```
+
+Add `--json` to `build`, `check`, `docs`, or `fmt` for one JSON value on
+stdout and no human prose. The top-level record has `schema: 1`, `ok`,
+`command`, and `diagnostics`; a non-compiler usage/runtime failure instead adds
+an `error` object. Every diagnostic contains `severity`, `code`, `message`,
+`span`, optional `source` and `help`, and optional `related` locations. This is
+the preferred interface for agents, editors, and build automation.
+
+Current warnings are deliberately conservative:
+
+| Code | Proven condition |
+|---|---|
+| `unused-import` | no declaration from an imported file is referenced |
+| `unused-binding` | a parameter, index, local, or shared variable is never used |
+| `unreachable-function` | a private function is outside every exported dependency graph |
+| `discarded-value` | a pure expression is evaluated and ignored |
+| `constant-condition` | an `if` or conditional expression is fixed, or a loop is statically false |
+| `zero-dispatch` | a literal launch axis prevents a stage from running |
+| `no-effect-kernel` | a reachable kernel cannot affect externally visible memory |
+| `constant-write-index` | an unconditional non-atomic write address is invocation-independent |
+| `strided-access` | adjacent one-dimensional invocations provably use a non-unit buffer stride |
+
+Tach does not warn about folklore such as a particular workgroup multiple,
+integer division, or a possible `fma`: those depend on the algorithm, target,
+or driver and would train users to ignore the compiler. Related locations fold
+repeated instances of one proven access pattern into one report.
 
 ### Verbose diagnostics
 
@@ -1385,13 +1434,18 @@ Deno-native build tools can call project operations directly:
 import {
   build,
   check,
+  CompilerError,
   compilerPath,
   docs,
   format,
+  renderDiagnostics,
 } from "@depths/tach/compiler";
 
 const cwd = Deno.cwd();
-await check({ cwd });
+const checked = await check({ cwd });
+if (checked.diagnostics.length) {
+  console.warn(renderDiagnostics(checked.diagnostics));
+}
 await build({ cwd, verbose: true });
 await docs({ cwd });
 await format({ cwd });
@@ -1402,6 +1456,13 @@ This API operates on whole projects. It does not expose the private compiler
 protocol and must not be included in browser bundles. A script using it needs
 Deno read, write, environment, subprocess, and network permissions; `-A` is the
 simple choice for a trusted local build script.
+
+Successful `build`, `check`, and `docs` calls return warnings in
+`ProjectResult.diagnostics`. A source failure throws `CompilerError`, whose
+`diagnostics` property contains the machine records and whose message is the
+same report produced by `renderDiagnostics`. Catch `CompilerError` when a tool
+needs to distinguish source diagnostics from installation, subprocess, or
+filesystem failures.
 
 Compiler resolution checks an explicit `TACH_BIN`, a package-local binary, the
 repository development binary, then the exact release asset for the installed

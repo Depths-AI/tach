@@ -1,0 +1,5 @@
+export function valid[i](out: buffer<float32[]>) {
+  if (i < out.length) {
+    out[i] = 0;
+  }
+}

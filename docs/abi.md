@@ -587,6 +587,39 @@ Schema 2 is compiler/runtime internal while Tach is pre-1.0. Rebuild all
 artifacts together rather than treating it as a stable third-party wire
 format.
 
+### Compiler diagnostics: schema 1
+
+Private compiler operations reserve stdout for successful project/runtime
+payloads and write one diagnostic envelope to stderr when errors or warnings
+exist:
+
+```ts
+interface DiagnosticSpan {
+  file: string;
+  start: { offset: number; line: number; column: number };
+  end: { offset: number; line: number; column: number };
+}
+
+interface DiagnosticEnvelope {
+  schema: 1;
+  diagnostics: Array<{
+    severity: "error" | "warning";
+    code: string;
+    span: DiagnosticSpan;
+    message: string;
+    source?: string;
+    help?: string;
+    related?: Array<{ span: DiagnosticSpan; message: string; source?: string }>;
+  }>;
+}
+```
+
+Offsets count UTF-8 bytes; lines and columns are one-based Unicode source
+positions. Errors accompany a nonzero compiler exit. Warnings accompany a
+successful exit and never change artifacts. The public CLI validates this
+private envelope, renders it for humans, or emits its own schema-1 command
+result under `--json`; callers must not parse the human layout.
+
 ### Target-neutral project description: schema 2
 
 The private compiler engine writes one schema-2 JSON value to the TypeScript

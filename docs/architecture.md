@@ -535,6 +535,16 @@ returns, documentation, project identity, and JavaScript-package identity
 without importing or spelling TypeScript. `tach-ts` owns JSDoc/Markdown presentation,
 the generated usage sample, module-document filenames, and npm metadata.
 
+Diagnostics cross the native/TypeScript boundary as one schema-1 JSON envelope
+on the private compiler's stderr. This keeps stdout reserved for project and
+runtime descriptions while allowing successful operations to carry warnings.
+Each record has severity, stable code, byte offset plus line/column span,
+message, captured source line, optional help, and related source locations.
+The public TypeScript layer validates the envelope once. It then exposes the
+same records through `ProjectResult.diagnostics`, `CompilerError.diagnostics`,
+Markdown-like terminal rendering, or the public CLI's `--json` result. No
+frontend or backend owns a second rendering or message model.
+
 ### Artifact transaction
 
 The public TypeScript CLI owns a uniquely named staging directory beside the

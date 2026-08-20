@@ -1,0 +1,5 @@
+import "library/absent";
+
+function value(): uint32 {
+  return 1;
+}

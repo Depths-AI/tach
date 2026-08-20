@@ -1,14 +1,23 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-env --allow-run --allow-net
 
-import { build, check, docs, format, packageVersion } from "./compiler.ts";
+import {
+  build,
+  check,
+  CompilerError,
+  docs,
+  format,
+  packageVersion,
+  type ProjectResult,
+  renderDiagnostics,
+} from "./compiler.ts";
 
-const help = `Tach — lean typed GPGPU compiler
+const help = `Tach - lean typed GPGPU compiler
 
 Usage:
-  tach build [--verbose]
-  tach check
-  tach docs
-  tach fmt
+  tach build [--verbose] [--json]
+  tach check [--json]
+  tach docs [--json]
+  tach fmt [--json]
   tach instructions [--details <section>...]
   tach version
   tach help
@@ -21,6 +30,9 @@ Commands:
   instructions  print AI-agent guidance or selected numbered detail sections
   version       print the installed Tach version
   help          print this help
+
+Options:
+  --json        emit one machine-readable result instead of human prose
 `;
 
 function write(value: string): Promise<void> {
@@ -28,6 +40,47 @@ function write(value: string): Promise<void> {
 }
 
 const args = Deno.args;
+const json = args.includes("--json");
+
+function flags(allowed: readonly string[]): Set<string> {
+  const values = new Set(args.slice(1));
+  if (
+    values.size !== args.length - 1 ||
+    [...values].some((value) => !allowed.includes(value))
+  ) {
+    throw new Error(
+      `usage: tach ${args[0]} ${allowed.map((flag) => `[${flag}]`).join(" ")}`
+        .trimEnd(),
+    );
+  }
+  return values;
+}
+
+async function complete(
+  command: string,
+  message: string,
+  result?: ProjectResult,
+): Promise<void> {
+  if (json) {
+    await write(
+      `${
+        JSON.stringify({
+          schema: 1,
+          ok: true,
+          command,
+          root: result?.root,
+          diagnostics: result?.diagnostics ?? [],
+        })
+      }\n`,
+    );
+  } else {
+    if (result?.diagnostics.length) {
+      console.error(renderDiagnostics(result.diagnostics));
+    }
+    console.log(message);
+  }
+}
+
 try {
   switch (args[0]) {
     case "help":
@@ -71,26 +124,23 @@ try {
       break;
     }
     case "build": {
-      if (args.length > 2 || args.length === 2 && args[1] !== "--verbose") {
-        throw new Error("usage: tach build [--verbose]");
-      }
-      const result = await build({ verbose: args.length === 2 });
-      console.log(`built ${result.root}`);
+      const options = flags(["--verbose", "--json"]);
+      const result = await build({ verbose: options.has("--verbose") });
+      await complete("build", `built ${result.root}`, result);
       break;
     }
     case "check":
-      if (args.length !== 1) throw new Error("check accepts no arguments");
-      await check();
-      console.log("ok");
+      flags(["--json"]);
+      await complete("check", "ok", await check());
       break;
     case "docs":
-      if (args.length !== 1) throw new Error("docs accepts no arguments");
-      await docs();
-      console.log("updated documentation");
+      flags(["--json"]);
+      await complete("docs", "updated documentation", await docs());
       break;
     case "fmt":
-      if (args.length !== 1) throw new Error("fmt accepts no arguments");
+      flags(["--json"]);
       await format();
+      await complete("fmt", "formatted");
       break;
     default:
       throw new Error(
@@ -104,10 +154,32 @@ try {
     readonly code?: unknown;
     readonly message?: unknown;
   };
-  console.error(
-    `tach: ${typeof value.code === "string" ? `[${value.code}] ` : ""}${
-      typeof value.message === "string" ? value.message : String(error)
-    }`,
-  );
+  const message = typeof value.message === "string"
+    ? value.message
+    : String(error);
+  if (json) {
+    await write(`${
+      JSON.stringify({
+        schema: 1,
+        ok: false,
+        command: args[0] ?? null,
+        diagnostics: error instanceof CompilerError ? error.diagnostics : [],
+        ...(error instanceof CompilerError ? {} : {
+          error: {
+            code: typeof value.code === "string" ? value.code : "usage",
+            message,
+          },
+        }),
+      })
+    }\n`);
+  } else {
+    console.error(
+      error instanceof CompilerError
+        ? message
+        : `tach: ${
+          typeof value.code === "string" ? `[${value.code}] ` : ""
+        }${message}`,
+    );
+  }
   Deno.exitCode = 1;
 }

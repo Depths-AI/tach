@@ -188,28 +188,30 @@ and §64: numerical portability.
 Use only:
 
 ```text
-tach build [--verbose]
-tach check
-tach docs
-tach fmt
+tach build [--verbose] [--json]
+tach check [--json]
+tach docs [--json]
+tach fmt [--json]
 tach instructions [--details <section>...]
 tach version
 tach help | --help | -h
 ```
 
-Project commands discover the nearest project. `build` emits the complete
-browser/Deno package and replaces `build/`; `--verbose` only adds diagnostics.
-`check` validates both hosts without writes. `docs` preserves
-compiled artifacts while refreshing Markdown. `fmt` formats the whole project
-transactionally. `instructions` needs no project and returns this context or
-only the requested canonical sections. Normal order is `fmt -> check -> build`. See
+Project commands discover the nearest project. `build` replaces `build/` with
+the complete browser/Deno package; `--verbose` adds diagnostics. `check`
+validates both hosts without writes. `docs` refreshes Markdown without changing
+compiled artifacts. `fmt` is project-wide and transactional. `instructions`
+works anywhere. Normal order is `fmt -> check -> build`. See
 §46: formatting,
 §47: CLI, and
 §48: validation.
 
-Output is one package: `package.json`, `index.js`, `index.d.ts`, `kernel.wgsl.gz`,
+Prefer `tach check --json` for structured errors and warnings; otherwise Tach
+prints human source reports. See §47: CLI.
+
+Output: `package.json`, `index.js`, `index.d.ts`, `kernel.wgsl.gz`,
 SPIR-V 1.6 `kernel.spv`, README, and module docs. The same facade and
-declarations serve both hosts. Generated files are one immutable set; never edit or mix them. See
+declarations serve both hosts. Never edit or mix generated files. See
 §49: artifacts and
 §68: unified host boundary.
 

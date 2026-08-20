@@ -1821,10 +1821,10 @@ is project-wide.
 The npm package exposes this complete public command set:
 
 ```text
-tach build [--verbose]
-tach check
-tach docs
-tach fmt
+tach build [--verbose] [--json]
+tach check [--json]
+tach docs [--json]
+tach fmt [--json]
 tach instructions [--details <section>...]
 tach version
 tach help
@@ -1846,6 +1846,14 @@ source-file argument.
 | `tach instructions --details N [N ...]` | print only the requested numbered detail sections |
 | `tach version` | report installed Tach version |
 | `tach help`, `--help`, `-h` | show command help |
+
+`--json` is valid on `build`, `check`, `docs`, and `fmt`. It emits one
+schema-1 result to stdout and suppresses human prose. Read `ok` first, then
+inspect `diagnostics[]`; each item provides `severity`, stable `code`, exact
+`span`, `message`, optional source/help, and related locations. Prefer this
+surface when operating as an agent. Without `--json`, Tach prints the same
+records as Markdown-like source reports. Errors reject the command; warnings
+are successful, actionable observations and never alter generated output.
 
 Every command except `instructions`, `version`, and help operates on the nearest
 complete Tach project and accepts no source-file argument. `instructions` is
