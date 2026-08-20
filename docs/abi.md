@@ -67,6 +67,10 @@ API names remain available because all runtime types use compiler-private
 `$...` aliases. Private helpers, stages, physical entries, wrappers, and fields
 may be mangled.
 
+Source inference cannot alter this boundary. Public parameters, results,
+struct fields, and buffer element types are declared explicitly, and every
+expression has a concrete type before program or binding ABI construction.
+
 An exported indexed shorthand receives `LaunchOptions`:
 
 ```ts
@@ -168,7 +172,7 @@ boundary.
 | `float16` | 2 | 2 |
 | `int32`, `uint32`, `float32` | 4 | 4 |
 | `atomic<int32>`, `atomic<uint32>` | 4 | 4 |
-| `float16x2`, `float16x3`, `float16x4` | 4 / 6 / 8 | 4 / 8 / 8 |
+| `vec<float16, 2>`, `vec<float16, 3>`, `vec<float16, 4>` | 4 / 6 / 8 | 4 / 8 / 8 |
 | 32-bit two-lane numeric vector | 8 | 8 |
 | 32-bit three-lane numeric vector | 12 | 16 |
 | 32-bit four-lane numeric vector | 16 | 16 |
@@ -185,9 +189,9 @@ structs use the logical max member alignment and do not inherit this floor.
 
 ```tach
 type Particle = {
-  position: float32x3,
+  position: vec<float32, 3>,
   mass: float32,
-  velocity: float32x3,
+  velocity: vec<float32, 3>,
 };
 
 export function preserve[i](particles: buffer<Particle[]>) {
@@ -369,7 +373,7 @@ does not internalize or repeat terminal projection.
 
 ### View color and extent contract
 
-A Flow view names a runtime `float32x4[]` source, its exact final defined
+A Flow view names a runtime `vec<float32, 4>[]` source, its exact final defined
 version, and positive checked `uint32` width and height shapes. Preparation
 checks that `width * height` is a positive safe product and that an unfused
 source contains at least that many complete 16-byte pixels. Extra source
@@ -689,7 +693,7 @@ is replaced by that parameter.
 
 A Web view output binding is `texture_storage_2d<rgba8unorm, write>`. A fused
 terminal entry packs its own final pixel and unpacks that word into the
-texture. A fallback entry reads the final `float32x4[]` resource over
+texture. A fallback entry reads the final `vec<float32, 4>[]` resource over
 `[width, height]`, applies the same pack, and writes the texture.
 The generated package stores this complete module as deterministic gzip in
 `kernel.wgsl.gz`; the browser driver decompresses it before module creation.

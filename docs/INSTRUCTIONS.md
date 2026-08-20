@@ -502,8 +502,8 @@ semicolon after the attribute:
   field(velocity, "Velocity applied during integration."),
 )
 type Particle = {
-  position: float32x4,
-  velocity: float32x4,
+  position: vec<float32, 4>,
+  velocity: vec<float32, 4>,
 };
 ```
 
@@ -606,7 +606,7 @@ Tach source.
 A helper has no coordinate list and is never exposed to JavaScript:
 
 ```tach
-function squaredLength(value: float32x3): float32 {
+function squaredLength(value: vec<float32, 3>): float32 {
   return dot(value, value);
 }
 ```
@@ -744,11 +744,11 @@ exported unindexed program, and the last statement must be exactly the
 form `return view(pixels, width, height);`:
 
 ```tach
-function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
+function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32) {
   if (i < pixels.length) {
     const x = i % width;
     const y = i / width;
-    pixels[i] = float32x4(
+    pixels[i] = vec(
       float32(x) / float32(width),
       float32(y) / float32(height),
       0.25,
@@ -758,14 +758,14 @@ function paint[i](pixels: buffer<float32x4[]>, width: uint32, height: uint32) {
 }
 
 export function gradient(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels, width, height) over pixels.length;
   return view(pixels, width, height);
 }
 ```
 
 `pixels` directly names a public buffer or transient of runtime
-`float32x4[]`. Width and height are positive checked shape expressions. Their
+`vec<float32, 4>[]`. Width and height are positive checked shape expressions. Their
 product cannot exceed the available pixel count. The source resource's exact
 final version must be defined, so a transient frame needs a preceding complete
 write.
@@ -811,7 +811,7 @@ Coordinates appear after an indexed function name:
 
 ```tach
 function line[i](out: buffer<uint32[]>) { ... }
-function image[x, y](out: buffer<float32x4[]>) { ... }
+function image[x, y](out: buffer<vec<float32, 4>[]>) { ... }
 function volume[x, y, z](out: buffer<float32[]>) { ... }
 ```
 
@@ -853,10 +853,10 @@ Declare an explicit shape with `@workgroup`:
 
 ```tach
 @workgroup(16, 16)
-export function shade[x, y](pixels: buffer<float32x4[]>, width: uint32) {
+export function shade[x, y](pixels: buffer<vec<float32, 4>[]>, width: uint32) {
   const index = y * width + x;
   if (index < pixels.length) {
-    pixels[index] = float32x4(0, 0, 0, 1);
+    pixels[index] = vec(0, 0, 0, 1);
   }
 }
 ```
@@ -1070,26 +1070,43 @@ documented `uint32` convention such as `0` and `1`.
 
 ## 27. Numeric vectors
 
-Tach provides two-, three-, and four-lane vectors for every numeric scalar:
+`vec<T, N>` is Tach's sole vector type syntax. `T` must be numeric and `N`
+must be `2`, `3`, or `4`:
 
 ```text
-float16x2  float16x3  float16x4
-float32x2  float32x3  float32x4
-int32x2    int32x3    int32x4
-uint32x2   uint32x3   uint32x4
+vec<float16, 2>  vec<float16, 3>  vec<float16, 4>
+vec<float32, 2>  vec<float32, 3>  vec<float32, 4>
+vec<int32, 2>    vec<int32, 3>    vec<int32, 4>
+vec<uint32, 2>   vec<uint32, 3>   vec<uint32, 4>
 ```
 
-Constructors flatten scalar and vector arguments to the exact destination lane
-count:
+`vec(...)` is the sole vector value constructor. It flattens numeric scalar
+and vector arguments to exactly two, three, or four total lanes:
 
 ```tach
-const a = float32x4(1, 2, 3, 4);
-const b = float32x4(float32x2(1, 2), 3, 4);
-const allHalf = float32x4(0.5);
+const a = vec(1, 2, 3, 4);
+const b = vec(vec(1, 2), 3, 4);
+const allHalf = vec(0.5, 0.5, 0.5, 0.5);
 ```
 
-One scalar argument splats to all lanes. Other argument combinations must
-flatten to exactly the vector width.
+Context determines its element type and the arguments determine its width:
+
+```tach
+function direction(): vec<float16, 3> {
+  return vec(1, 2, 3);
+}
+
+function extend(value: vec<float32, 3>): vec<float32, 4> {
+  return vec(value, 1);
+}
+```
+
+The surrounding type or a concrete argument constrains `vec`; otherwise whole
+lanes default to `uint32` and any fraction/exponent defaults the vector to
+`float32`. It never converts a typed value. There is no one-argument splat and
+no alternate named vector constructor. Repeat a scalar explicitly, use a
+documented scalar/vector broadcast operation, or explicitly convert each lane
+and rebuild the vector.
 
 Swizzles use `x`, `y`, `z`, and `w`:
 
@@ -1112,8 +1129,8 @@ Structs are named object-shaped value types:
 
 ```tach
 type Particle = {
-  position: float32x4,
-  velocity: float32x4,
+  position: vec<float32, 4>,
+  velocity: vec<float32, 4>,
 };
 ```
 
@@ -1121,7 +1138,7 @@ Construct a struct with an object literal in a context that determines its
 named type:
 
 ```tach
-function makeParticle(position: float32x4, velocity: float32x4): Particle {
+function makeParticle(position: vec<float32, 4>, velocity: vec<float32, 4>): Particle {
   return {
     velocity: velocity,
     position: position,
@@ -1293,7 +1310,7 @@ explain memory-size differences and prevent incorrect typed-array assumptions:
 |---|---:|---:|
 | `float16` | 2 | 2 |
 | `int32`, `uint32`, `float32`, integer atomic | 4 | 4 |
-| `float16x2`, `float16x3`, `float16x4` | 4 / 6 / 8 | 4 / 8 / 8 |
+| `vec<float16, 2>`, `vec<float16, 3>`, `vec<float16, 4>` | 4 / 6 / 8 | 4 / 8 / 8 |
 | 32-bit two-lane numeric vector | 8 | 8 |
 | 32-bit three-lane numeric vector | 12 | 16 |
 | 32-bit four-lane numeric vector | 16 | 16 |
@@ -1305,9 +1322,9 @@ For example:
 
 ```tach
 type Particle = {
-  position: float32x3,
+  position: vec<float32, 3>,
   mass: float32,
-  velocity: float32x3,
+  velocity: vec<float32, 3>,
 };
 ```
 
@@ -1341,20 +1358,26 @@ const fraction = 1.25;
 const exponent = 6.022e2;
 ```
 
-Shader suffixes such as `0u`, `1i`, and `1.0f` are invalid. Type comes from
-context where available. Without context:
+Shader suffixes such as `0u`, `1i`, and `1.0f` are invalid. Inference is
+expression-local. Its deterministic precedence is explicit types and
+conversions, expected assignment/argument/return/field/result context,
+concrete sibling operands, intrinsic domains, then defaults. Without context:
 
 - a non-negative whole literal infers `uint32`;
 - a fractional or exponent literal infers `float32`; and
 - unary minus gives a whole literal signed `int32` context.
 
+An all-literal floating intrinsic defaults to `float32`; `abs(1)` defaults to
+`int32`. Multi-operand expressions and intrinsics resolve their operands
+collectively, so swapping a contextual literal from left to right cannot
+change the result.
+
 There is no unconstrained `float16` inference. A binary16 literal receives its
 type from an annotation, parameter/result/assignment context, or
 `float16(...)`; it must be finite and within `-65504` to `65504`.
 
-Inference considers both operands without making expression meaning depend on
-operand order. Still, use an annotation or explicit conversion when a literal's
-intended domain is not obvious:
+Use an annotation or explicit conversion when a literal's intended domain is
+not obvious:
 
 ```tach
 const signed: int32 = -1;
@@ -1394,9 +1417,10 @@ been made explicit by the algorithm.
 `float32(float16Value)` explicitly widens. Neither conversion changes the
 precision already lost by prior binary16 computation.
 
-Vector constructors build vectors; scalar conversion constructors convert
-scalars. Do not assume a vector can be converted by naming another vector type
-unless the accepted constructor operands exactly satisfy that destination.
+`vec(...)` builds vectors; the four functions above convert scalars. Vector
+conversion is deliberately lane-explicit: extract and convert each component,
+then rebuild it with `vec(...)`. Tach has no second vector constructor or
+implicit aggregate conversion path.
 
 Host TypeScript numbers are validated when a command is prepared or a buffer
 is materialized. Passing `1.5` to a generated `uint32` parameter remains an
@@ -1593,8 +1617,9 @@ Additional rules:
 - `abs` accepts `int32`, `float16`, or `float32` scalars/vectors.
 - `pow` accepts matching floating values and can broadcast a scalar exponent
   across a vector base.
-- `fma(a, b, c)` requires three exactly matching `float16` or `float32`
-  scalar/vector values and computes component-wise `a * b + c`.
+- `fma(a, b, c)` accepts `float16` or `float32` values and computes
+  component-wise `a * b + c`; equal-width vectors may mix with scalars, which
+  broadcast to that width.
 - `min`, `max`, and `clamp` accept integer scalars/vectors.
 - Floating `min`, `max`, and `clamp` are intentionally unavailable.
 
@@ -1602,7 +1627,7 @@ Geometric intrinsics are:
 
 | Function | Input | Result |
 |---|---|---|
-| `dot(a, b)` | matching `float16xN` or `float32xN` | component type |
+| `dot(a, b)` | matching `vec<float16, N>` or `vec<float32, N>` | component type |
 | `length(value)` | floating vector | component type |
 | `distance(a, b)` | matching floating vectors | component type |
 | `cross(a, b)` | matching three-lane floating vectors | same vector type |
@@ -2749,11 +2774,11 @@ type ImageParams = {
   param(pixels, "Linear RGBA output."),
   param(params, "Image extent."),
 )
-function shadeGradient[i](pixels: buffer<float32x4[]>, params: ImageParams) {
+function shadeGradient[i](pixels: buffer<vec<float32, 4>[]>, params: ImageParams) {
   if (i < pixels.length) {
     const x = i % params.width;
     const y = i / params.width;
-    pixels[i] = float32x4(
+    pixels[i] = vec(
       float32(x) / float32(params.width),
       float32(y) / float32(params.height),
       0.25,
@@ -2768,7 +2793,7 @@ function shadeGradient[i](pixels: buffer<float32x4[]>, params: ImageParams) {
   returns("The complete sRGB display view."),
 )
 export function imageGradient(params: ImageParams): view<srgb8> {
-  const pixels = transient<float32x4>(params.width * params.height);
+  const pixels = transient<vec<float32, 4>>(params.width * params.height);
   run shadeGradient(pixels, params) over pixels.length;
   return view(pixels, params.width, params.height);
 }
@@ -2807,8 +2832,8 @@ Place shared declarations in a lower dependency file.
   field(velocity, "Current velocity."),
 )
 type Particle = {
-  position: float32x4,
-  velocity: float32x4,
+  position: vec<float32, 4>,
+  velocity: vec<float32, 4>,
 };
 
 @docs(
@@ -3032,6 +3057,7 @@ Do not generate Tach code that assumes any of the following exist:
 - recursion, labeled transfers, `switch`, exceptions, or block comments;
 - strings as runtime values;
 - implicit general numeric conversion or JavaScript coercion;
+- whole-program, later-use, host-TypeScript, or backend-dependent inference;
 - matrices, 64-bit numbers, floating atomics, or floating `min/max/clamp`;
 - public resource aliasing;
 - global synchronization inside one dispatch;
@@ -3073,7 +3099,7 @@ docs-attribute  := "@" "docs" "(" docs-clause
                    {"," docs-clause} [","] ")"
 docs-clause     := IDENT "(" [IDENT ","] STRING ")"
 
-type            := IDENT ["<" type {"," type} ">"]
+type            := (IDENT | "vec" "<" type "," NUMBER ">")
                    ["[" [NUMBER] "]"]
 
 block           := "{" {statement} "}"
@@ -3174,7 +3200,7 @@ Answer these questions explicitly in reasoning:
 - Is device-wide sequencing necessary, requiring multiple stages?
 - Which intermediates must persist to the caller, and which are transient?
 - Is the result a display frame, and can its final writer satisfy one complete
-  `float32x4` pixel per linear index?
+  `vec<float32, 4>` pixel per linear index?
 - Can every `run` shape be expressed with checked public `uint32` data?
 - Does synchronization stay within a workgroup, or is another dispatch needed?
 - What exact TypeScript host shape will initialize each public buffer?
@@ -3197,8 +3223,10 @@ Before considering Tach source complete, verify:
   complete bounds reasoning.
 - Explicit programs contain only shape/transient `const`, `run`, and an
   optional required final view return.
-- Every view source is runtime `float32x4`, fully defined, and large enough for
+- Every view source is runtime `vec<float32, 4>`, fully defined, and large enough for
   its positive width and height.
+- Every inferred numeric expression has an obvious local type; ambiguous
+  domain changes use an annotation or explicit constructor.
 - Every shape is checked-`uint32` safe and nonzero for valid calls.
 - Runtime arrays appear only in supported storage positions.
 - Fixed arrays appear only in shared memory.

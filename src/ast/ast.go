@@ -99,6 +99,15 @@ type FixedArrayType struct {
 func (*FixedArrayType) typeNode()              {}
 func (t *FixedArrayType) GetSpan() source.Span { return t.Span }
 
+type VectorType struct {
+	Elem  TypeExpr
+	Lanes string
+	Span  source.Span
+}
+
+func (*VectorType) typeNode()              {}
+func (t *VectorType) GetSpan() source.Span { return t.Span }
+
 type GenericType struct {
 	Name string
 	Args []TypeExpr

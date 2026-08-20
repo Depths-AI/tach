@@ -114,9 +114,9 @@ terminal view conversion alone may fold into its proven final writer. See
 ## 5. Types and ordinary computation
 
 Scalars are `bool`, `int32`, `uint32`, `float16`, `float32`, and helper-only
-`void`. Numeric vectors use any numeric scalar with `N` lanes, where `N` is
-2–4.
-Vector constructors flatten exact lane counts; one scalar splats. Structs are
+`void`. Numeric vectors are solely `vec<T, N>`, with `N` 2–4. Only `vec(...)`
+constructs them, flattening exactly 2–4 scalar/vector lanes without conversion.
+Structs are
 named value types with exact fields; literal order is irrelevant, declaration
 order affects storage. Runtime `T[]` occurs only directly in a buffer or as a
 struct's final field and cannot move as one value. Fixed `T[N]` is shared-memory
@@ -126,7 +126,7 @@ only. See §26: scalars,
 §29: arrays.
 
 `view<srgb8>` is not an ordinary value type. It is only an exported
-unindexed-program result over final linear `float32x4[]` pixels and checked
+unindexed-program result over final linear `vec<float32, 4>[]` pixels and checked
 positive width/height. Both backends pack one RGBA8 `uint32` word after IEC
 sRGB conversion; WebGPU stores it as an `rgba8unorm` texel and Vulkan as that
 word. Source never packs display bytes or names provider objects. See §18: view
@@ -148,14 +148,15 @@ Never add source padding or hand-pack buffers. See
 §32: host shapes, and
 §33: layout.
 
-Numbers have no shader suffix. Unconstrained nonnegative integers infer
-`uint32`, fractions/exponents `float32`, and negative whole literals `int32`.
-Use explicit `int32(...)`, `uint32(...)`, `float16(...)`, or `float32(...)`;
-binary16 is never inferred without context and is never silently widened. Do
-not expect JavaScript coercion. Prefer `const`; `let` is mutable; shadowing is forbidden.
-Control supports nearest-loop `break`/`continue`; a `for` continue runs its
-update. FP16/FP32 `fma(a, b, c)` expresses multiply-add,
-not instruction count. Exact operator and intrinsic rules follow. See §34: literals,
+Inference is expression-local and order-independent: explicit type, expected
+context, typed sibling, intrinsic domain, default. Nonnegative
+whole literals default to `uint32`, negative whole literals to `int32`, and
+fractions to `float32`. Scalar constructors convert; binary16 is never inferred.
+`vec(...)` takes its element type from context or typed arguments, never
+converts values, and has no splat form.
+Prefer `const`; shadowing is forbidden. Nearest-loop `break`/`continue` is
+supported. FP16/FP32 `fma` permits scalar broadcast and expresses multiply-add,
+not instruction count. See §34: literals,
 §35: conversion,
 §36: scope,
 §37: operators,

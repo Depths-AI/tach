@@ -536,6 +536,7 @@ func FuzzFormatterPreservesSyntaxAndStabilizes(f *testing.F) {
 		`// comment
 @docs(summary("Scales.")) @workgroup(64) export function scale[i](out: buffer<float32[]>, factor: float32,) { if (!false && i < out.length) { out[i] = factor < 0.0 ? -factor : factor; } }`,
 		`import "base/data"; function value(x: float32): float32 { return (~uint32(x) & 3) == 0 ? -x : x; }`,
+		`function fill[i](out: buffer<vec<float32, 4>[]>) { if (i < out.length) { out[i] = vec(1, 2, 3, 4); } } export function make() { const out = transient<vec<float32, 4>>(4); run fill(out) over 4; }`,
 	} {
 		f.Add(seed)
 	}

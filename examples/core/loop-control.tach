@@ -1,6 +1,6 @@
 @docs(
-  title("Loop exits and fused multiply-add"),
-  summary("Demonstrates early exit, skipped iterations, and component-wise float16 and float32 FMA."),
+  title("Loop control and contextual math"),
+  summary("Demonstrates early exit, skipped iterations, inferred vectors, and float16 and float32 math."),
 );
 
 @docs(
@@ -53,11 +53,34 @@ export function selectiveScan[start](
   param(addend, "Per-lane binary16 addend."),
 )
 export function affineFloat16[i](
-  values: buffer<float16x4[]>,
-  multiplier: float16x4,
-  addend: float16x4,
+  values: buffer<vec<float16, 4>[]>,
+  multiplier: vec<float16, 4>,
+  addend: vec<float16, 4>,
 ) {
   if (i < values.length) {
     values[i] = fma(values[i], multiplier, addend);
+  }
+}
+
+@docs(
+  summary("Uses the float16 result context to infer two binary16 vectors."),
+  returns("Binary16 dot product."),
+)
+function contextualHalfDot(): float16 {
+  return dot(vec(1, 2, 3), vec(4, 5, 6));
+}
+
+@docs(
+  summary("Builds vectors and floating math from local context without implicit conversion."),
+  coordinate(i, "Output index and first direction component."),
+  param(output, "Normalized, scaled, and translated directions with a math summary in w."),
+  param(scale, "Scalar broadcast across the three direction lanes."),
+)
+export function contextualMath[i](output: buffer<vec<float32, 4>[]>, scale: float32) {
+  if (i < output.length) {
+    const direction = normalize(vec(float32(i) + 1, 2, 3));
+    let transformed = fma(direction, scale, vec(1, 2, 3));
+    transformed += sin(1);
+    output[i] = vec(transformed, sin(1) + pow(2, 3) + float32(contextualHalfDot()));
   }
 }

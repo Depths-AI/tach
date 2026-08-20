@@ -104,8 +104,8 @@ export function clearSeries[i](data: buffer<Series>) {
 
 func TestFloat16WGSLFeatureAndTypes(t *testing.T) {
 	a, err := parser.Parse("float16.tach", `
-export function half[i](values: buffer<float16x2[]>, factor: float16) {
-  if (i < values.length) { values[i] = sin(values[i]) * float16x2(factor); }
+export function half[i](values: buffer<vec<float16, 2>[]>, factor: float16) {
+  if (i < values.length) { values[i] = sin(values[i]) * factor; }
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -168,11 +168,11 @@ export function control[i](out: buffer<float32[]>, limit: uint32) {
 
 func TestViewProjectsStraightIntoStorageTexture(t *testing.T) {
 	a, err := parser.Parse("view.tach", `
-function paint[i](pixels: buffer<float32x4[]>) {
-  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) {
+  if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)
@@ -202,8 +202,8 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 
 func TestExternalViewUsesStandaloneProjection(t *testing.T) {
 	a, err := parser.Parse("view.tach", `
-function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
-export function image(pixels: buffer<float32x4[]>, width: uint32, height: uint32): view<srgb8> {
+function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
+export function image(pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32): view<srgb8> {
   run paint(pixels) over width * height;
   return view(pixels, width, height);
 }`)

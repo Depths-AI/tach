@@ -829,105 +829,33 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 }
 
 func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
-	need := func(n int) error {
-		if len(args) != n {
-			return fmt.Errorf("intrinsic %s has %d args, want %d", x.Kind, len(args), n)
-		}
-		return nil
-	}
-	same := func() bool {
-		for _, t := range args {
-			if !types.Equal(t, args[0]) {
-				return false
-			}
-		}
-		return len(args) > 0
-	}
-	floatVec := func(t *types.Type) bool {
-		return t != nil && t.Kind == types.Vector && types.IsFloatLike(t.Elem)
-	}
-	switch x.Kind {
-	case IntrinsicAbs:
-		if err := need(1); err != nil {
-			return err
-		}
-		t := args[0]
-		baseOK := types.IsSignedNumeric(t)
-		if !baseOK || !types.Equal(x.Type, t) {
-			return fmt.Errorf("abs requires a signed numeric scalar or vector and preserves type")
-		}
-	case IntrinsicFloor, IntrinsicCeil, IntrinsicTrunc, IntrinsicSin, IntrinsicCos, IntrinsicTan, IntrinsicExp, IntrinsicExp2, IntrinsicLog, IntrinsicLog2, IntrinsicSqrt, IntrinsicRSqrt:
-		if err := need(1); err != nil {
-			return err
-		}
-		if !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("intrinsic %s requires a floating-point scalar/vector and preserves type", x.Kind)
-		}
-	case IntrinsicPow:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("pow requires matching floating-point scalar/vector operands")
-		}
-	case IntrinsicMin, IntrinsicMax:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !types.IsIntegerLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("%s requires matching integer scalar/vector operands", x.Kind)
-		}
-	case IntrinsicClamp:
-		if err := need(3); err != nil {
-			return err
-		}
-		if !same() || !types.IsIntegerLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("clamp requires three matching integer scalar/vector operands")
-		}
-	case IntrinsicFma:
-		if err := need(3); err != nil {
-			return err
-		}
-		if !same() || !types.IsFloatLike(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("fma requires three matching floating-point scalar/vector operands")
-		}
-	case IntrinsicDot:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
-			return fmt.Errorf("dot requires matching floating-point vectors and returns their component type")
-		}
-	case IntrinsicLength:
-		if err := need(1); err != nil {
-			return err
-		}
-		if !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
-			return fmt.Errorf("length requires a floating-point vector and returns its component type")
-		}
-	case IntrinsicDistance:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !floatVec(args[0]) || !types.Equal(x.Type, args[0].Elem) {
-			return fmt.Errorf("distance requires matching floating-point vectors and returns their component type")
-		}
-	case IntrinsicCross:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !same() || !floatVec(args[0]) || args[0].Lanes != 3 || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("cross requires matching three-lane floating-point vectors")
-		}
-	case IntrinsicNormalize:
-		if err := need(1); err != nil {
-			return err
-		}
-		if !floatVec(args[0]) || !types.Equal(x.Type, args[0]) {
-			return fmt.Errorf("normalize requires a floating-point vector and preserves type")
-		}
-	default:
+	rule := x.Kind.Rule()
+	if rule.Arity == 0 {
 		return fmt.Errorf("unknown intrinsic %d", x.Kind)
+	}
+	if len(args) != rule.Arity {
+		return fmt.Errorf("intrinsic %s has %d args, want %d", x.Kind, len(args), rule.Arity)
+	}
+	t := args[0]
+	element := t
+	lanes := 0
+	if t != nil && t.Kind == types.Vector {
+		element, lanes = t.Elem, t.Lanes
+	}
+	if !rule.Domain.Accepts(element) || rule.VectorOnly && lanes == 0 || rule.Lanes != 0 && lanes != rule.Lanes {
+		return fmt.Errorf("intrinsic %s does not accept %s", x.Kind, t)
+	}
+	for _, argument := range args[1:] {
+		if !types.Equal(argument, t) {
+			return fmt.Errorf("intrinsic %s requires matching operands", x.Kind)
+		}
+	}
+	out := t
+	if rule.ResultElement {
+		out = element
+	}
+	if !types.Equal(x.Type, out) {
+		return fmt.Errorf("intrinsic %s returns %s, got %s", x.Kind, out, x.Type)
 	}
 	return nil
 }

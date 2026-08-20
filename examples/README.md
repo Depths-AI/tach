@@ -5,7 +5,7 @@ through a library. These files are how Tach asks you to *describe* GPU work
 yourself: small functions that look like TypeScript, compiled once, then
 called from ordinary application code.
 
-This folder is not an app and not a speed test. It is a set of sixteen short
+This folder is not an app and not a speed test. It is a set of seventeen short
 programs that together cover the language you will actually write. Each
 program exists because it teaches one idea that is easy to miss if you only
 ever saw `array.map`. Read them in order the first time. After that, jump
@@ -59,7 +59,7 @@ is the most common first bug.
 
 **Typed numbers.** There is no JavaScript `number`. `float16` is a 16-bit
 float, `float32` is a 32-bit float, `int32` / `uint32` are 32-bit integers,
-and `float32x4` is four floats in one value (a pixel, a position, a color).
+and `vec<float32, 4>` is four floats in one value (a pixel, a position, a color).
 Binary16 is explicit because it trades range and precision for half-sized
 storage and hardware throughput where supported.
 
@@ -80,7 +80,7 @@ examples/
     scalars.tach     multiply float32 and float16 arrays
     bitwise.tach     integer bit operations
     control.tach     loops and branches
-    loop-control.tach break, continue, and fused multiply-add
+    loop-control.tach loop transfer, inferred vectors, and contextual math
     for.tach         for-loops and vectors
     math.tach        sin, length, and friends
     view.tach        turn pixels into something a canvas can show
@@ -103,6 +103,7 @@ under it. There is no source list and no webpack config for kernels.
 | `transform` | `core/control.tach` | Walk a strided slice, add, maybe write back. |
 | `selectiveScan` | `core/loop-control.tach` | Skip empty values and stop a strided scan at a threshold. |
 | `affineFloat16` | `core/loop-control.tach` | Apply a component-wise binary16 fused multiply-add. |
+| `contextualMath` | `core/loop-control.tach` | Infer numeric literals, vectors, and scalar broadcast from one shared expression context. |
 | `reduceLanes` | `core/for.tach` | Sum each group of four integers. |
 | `math` | `core/math.tach` | Run the standard math functions at each index. |
 | `gradient` | `core/view.tach` | Paint a gradient and return a displayable image. |
@@ -196,7 +197,7 @@ The `@workgroup(64)` above the function is the team size those 64-apart
 strides are built for. You can ignore workgroups until you need this kind
 of teamwork. `scale` never mentions them.
 
-## `loop-control.tach` - skip work, stop work, and multiply-add
+## `loop-control.tach` - loop transfer and contextual math
 
 Loops do not always consume every item. `selectiveScan` gives each invocation
 one strided lane, uses `continue` to ignore zero values, and uses `break` once
@@ -211,15 +212,33 @@ to both backends. It gives the GPU an explicit opportunity to use fused
 hardware, but Tach does not promise that every adapter executes one physical
 instruction or one rounding step.
 
-`affineFloat16` demonstrates the same intrinsic on a `float16x4`. All three
+`affineFloat16` demonstrates the same intrinsic on a `vec<float16, 4>`. All three
 arguments have the same type, and the operation applies component by
 component. Together the two programs cover scalar float32 and vector float16
 without replacing the simpler arithmetic examples that teach those types
 first.
 
+`contextualMath` demonstrates contextual inference. `vec(...)` flattens
+numeric scalar/vector components into two through four lanes. A typed
+component, result, assignment, parameter, or intrinsic supplies its element
+type; otherwise ordinary literal defaults apply. Thus
+`normalize(vec(float32(i) + 1, 2, 3))` is `vec<float32, 3>`, and the scalar `scale`
+in `fma(direction, scale, vec(1, 2, 3))` is explicitly splatted in typed IR.
+The helper's `float16` result similarly makes both all-literal `vec` arguments
+binary16. No typed value is converted implicitly.
+
+The subsequent `transformed += sin(1)` proves compound assignment uses that
+same contextual resolver: it is semantically identical to writing the expanded
+addition, including binary width inference and scalar broadcast.
+
+The unadorned `sin(1)` and `pow(2, 3)` are float32 because those intrinsics
+require floating operands and no narrower context exists. This inference is
+local to the expression and independent of operand order; Tach never searches
+later statements to guess a declaration's type.
+
 ## `reduceLanes` - vectors and `for`
 
-A `uint32x4` is four unsigned integers in one value. `core/for.tach`
+A `vec<uint32, 4>` is four unsigned integers in one value. `core/for.tach`
 loads four neighbors, then sums them with a `for` loop that indexes the
 vector as `values[lane]`.
 
@@ -238,7 +257,7 @@ your head.
 `core/math.tach` is a tour of Tach's math library: `sin`, `cos`, `sqrt`,
 `length`, `normalize`, `dot`, `cross`, `pow`, rounding, and integer
 `min` / `max` / `clamp`. Each invocation seeds a 3D vector from its
-index and writes a `float32x4` result.
+index and writes a `vec<float32, 4>` result.
 
 The names match `Math` and everyday graphics code on purpose. Two
 differences matter:
@@ -384,7 +403,7 @@ imports `tach` from `@depths/tach`. The same TypeScript runs in a
 browser (WebGPU) and in Deno (Vulkan). You do not choose a backend.
 
 The repository's browser and Deno tests compile this project and call
-every public function. They are how we know the sixteen programs still
+every public function. They are how we know the seventeen programs still
 mean the same thing on both hosts. A separate project, `showcase-ts`,
 measures large workloads. It is not this folder.
 

@@ -52,13 +52,17 @@ operations therefore emphasize sustained arithmetic rather than memory
 bandwidth. The reports preserve both results even when a backend does not make
 FP16 faster.
 
+The escape pair also exercises contextual vector construction and
+order-independent FP16 expression inference in a data-dependent recurrence;
+both lower through the same ordinary typed IR operations as explicit forms.
+
 The procedural renderer runs traversal, lighting, and post-processing. The mesh
 renderer runs vertex projection, visibility clear, per-triangle bounding-box
 rasterization with atomic depth ownership, perspective-correct normal/material
 reconstruction, lighting, and post-processing. The mesh is a heterogeneous world
 of arbitrary curved elements rather than a regular proxy grid.
 
-Both rendering programs return `view<srgb8>` from linear `float32x4` pixels.
+Both rendering programs return `view<srgb8>` from linear `vec<float32, 4>` pixels.
 They never pack display bytes in Tach source. Tach converts those floats to
 8-bit sRGB. The browser draws that picture on a canvas; Deno computes the same
 bytes offscreen. When the last pixel stage already writes each pixel once,

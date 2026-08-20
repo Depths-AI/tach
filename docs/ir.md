@@ -205,7 +205,7 @@ A view is a terminal program result, not a Kernel IR value:
 ```text
 View
   Format       SRGB8
-  Source       runtime float32x4 resource
+  Source       runtime vec<float32, 4> resource
   Input        exact final resource version
   Width        checked shape
   Height       checked shape
@@ -239,7 +239,7 @@ output buffer.
 - current-version consumption and correct mutable output versions;
 - definition before every read; and
 - valid public/literal/shape sources for stage value formals; and
-- a supported view format, runtime `float32x4` source, exact defined final
+- a supported view format, runtime `vec<float32, 4>` source, exact defined final
   source version, and valid width/height shapes when a view is present.
 
 Because definition and version checks live here, neither backend runtime needs
@@ -293,7 +293,11 @@ regions. Value-producing instructions are:
 | `Atomic` | atomic result except store |
 
 Every result carries its resolved type. Emitters never repeat literal
-inference or overload selection.
+inference or overload selection. The source-only `vec(...)` constructor lowers
+to `Composite`; inferred scalar broadcast lowers to a `Composite` splat before
+the consuming operator or intrinsic. Neither requires another IR operation.
+Source `vec<T, N>` types are already structural vector types here. There is no
+scalar-plus-lane type spelling or typed vector constructor.
 
 ### Places
 

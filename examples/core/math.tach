@@ -8,12 +8,12 @@
   coordinate(i, "Output vector index and numeric input seed."),
   param(out, "Four-component results for every in-range invocation."),
 )
-export function math[i](out: buffer<float32x4[]>) {
+export function math[i](out: buffer<vec<float32, 4>[]>) {
   if (i < out.length) {
     // The first three lanes expose the normalized seed vector.
-    const a = float32x3(float32(i) + 1.0, 2.0, 3.0);
+    const a = vec(float32(i) + 1.0, 2.0, 3.0);
     const b = normalize(a);
-    const axis = float32x3(0.0, 1.0, 0.0);
+    const axis = vec(0.0, 1.0, 0.0);
     const c = cross(a, axis);
     const len = length(a);
     const dist = distance(a, c);
@@ -25,6 +25,6 @@ export function math[i](out: buffer<float32x4[]>) {
     const rounded = floor(powered) + ceil(dist) + trunc(shaped);
     const bounded: uint32 = clamp(min(i, 1024), 1, max(i, 1));
     // The final lane combines the scalar intrinsic results into one observable value.
-    out[i] = float32x4(b.x, b.y, b.z, shaped + expo + rounded + float32(bounded));
+    out[i] = vec(b.x, b.y, b.z, shaped + expo + rounded + float32(bounded));
   }
 }

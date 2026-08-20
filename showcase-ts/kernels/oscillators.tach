@@ -11,15 +11,15 @@
   param(steps, "Integration steps performed before writing state."),
 )
 export function coupledOscillatorsFloat32[i](
-  positions: buffer<float32x4[]>,
-  velocities: buffer<float32x4[]>,
+  positions: buffer<vec<float32, 4>[]>,
+  velocities: buffer<vec<float32, 4>[]>,
   steps: uint32,
 ) {
   if (i < positions.length && i < velocities.length) {
     let position = positions[i];
     let velocity = velocities[i];
     for (let step = 0; step < steps; step++) {
-      const neighborSum = float32x4(
+      const neighborSum = vec(
         position.y + position.w,
         position.z + position.x,
         position.w + position.y,
@@ -43,15 +43,15 @@ export function coupledOscillatorsFloat32[i](
   param(steps, "Integration steps performed before writing state."),
 )
 export function coupledOscillatorsFloat16[i](
-  positions: buffer<float16x4[]>,
-  velocities: buffer<float16x4[]>,
+  positions: buffer<vec<float16, 4>[]>,
+  velocities: buffer<vec<float16, 4>[]>,
   steps: uint32,
 ) {
   if (i < positions.length && i < velocities.length) {
     let position = positions[i];
     let velocity = velocities[i];
     for (let step = 0; step < steps; step++) {
-      const neighborSum = float16x4(
+      const neighborSum = vec(
         position.y + position.w,
         position.z + position.x,
         position.w + position.y,

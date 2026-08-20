@@ -192,7 +192,7 @@ func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols 
 	symbol, exists := symbols[identifierName(identifier)]
 	pixel := types.Vec(types.TF32, 4)
 	if !ok || !exists || symbol.resource == 0 || symbol.type_.Kind != types.RuntimeArray || !types.Equal(symbol.type_.Elem, pixel) {
-		return nil, diag(call.Args[0].GetSpan(), "view pixels must be a float32x4 buffer or transient")
+		return nil, diag(call.Args[0].GetSpan(), "view pixels must be a vec<float32, 4> buffer or transient")
 	}
 	width, err := c.lowerShape(program, call.Args[1], symbols)
 	if err != nil {

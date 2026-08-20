@@ -23,7 +23,7 @@ type MeshParams = {
   param(point, "Pixel center under test."),
   returns("Signed twice-area relative to the edge."),
 )
-function edge(a: float32x2, b: float32x2, point: float32x2): float32 {
+function edge(a: vec<float32, 2>, b: vec<float32, 2>, point: vec<float32, 2>): float32 {
   return (point.x - a.x) * (b.y - a.y) - (point.y - a.y) * (b.x - a.x);
 }
 
@@ -33,25 +33,25 @@ function edge(a: float32x2, b: float32x2, point: float32x2): float32 {
   param(world, "Interpolated world position."),
   returns("Linear base color."),
 )
-function materialColor(material: float32, world: float32x3): float32x3 {
+function materialColor(material: float32, world: vec<float32, 3>): vec<float32, 3> {
   const grain = 0.5 + 0.5 * sin(world.x * 7.1 + world.y * 4.3 + world.z * 5.7);
   if (material < 0.5) {
     const terrain = 0.5 + 0.5 * sin(world.x * 1.8) * cos(world.z * 1.4);
-    return float32x3(0.10 + terrain * 0.10, 0.20 + terrain * 0.20, 0.07 + grain * 0.05);
+    return vec(0.10 + terrain * 0.10, 0.20 + terrain * 0.20, 0.07 + grain * 0.05);
   }
   if (material < 1.5) {
-    return float32x3(0.32 + grain * 0.48, 0.12 + grain * 0.22, 0.035 + grain * 0.08);
+    return vec(0.32 + grain * 0.48, 0.12 + grain * 0.22, 0.035 + grain * 0.08);
   }
   if (material < 2.5) {
-    return float32x3(0.04 + grain * 0.10, 0.24 + grain * 0.40, 0.34 + (1.0 - grain) * 0.52);
+    return vec(0.04 + grain * 0.10, 0.24 + grain * 0.40, 0.34 + (1.0 - grain) * 0.52);
   }
   if (material < 3.5) {
-    return float32x3(0.34 + grain * 0.42, 0.035 + grain * 0.10, 0.16 + (1.0 - grain) * 0.32);
+    return vec(0.34 + grain * 0.42, 0.035 + grain * 0.10, 0.16 + (1.0 - grain) * 0.32);
   }
   if (material < 4.5) {
-    return float32x3(0.15 + grain * 0.18, 0.30 + grain * 0.46, 0.08 + grain * 0.14);
+    return vec(0.15 + grain * 0.18, 0.30 + grain * 0.46, 0.08 + grain * 0.14);
   }
-  return float32x3(0.28 + grain * 0.32, 0.22 + grain * 0.30, 0.38 + (1.0 - grain) * 0.34);
+  return vec(0.28 + grain * 0.32, 0.22 + grain * 0.30, 0.38 + (1.0 - grain) * 0.34);
 }
 
 @docs(
@@ -64,12 +64,12 @@ function materialColor(material: float32, world: float32x3): float32x3 {
   returns("RGB irradiance contribution."),
 )
 function pointLight(
-  world: float32x3,
-  normal: float32x3,
-  position: float32x3,
-  color: float32x3,
+  world: vec<float32, 3>,
+  normal: vec<float32, 3>,
+  position: vec<float32, 3>,
+  color: vec<float32, 3>,
   power: float32,
-): float32x3 {
+): vec<float32, 3> {
   const offset = position - world;
   const distanceSquared = dot(offset, offset) + 0.05;
   const direction = offset * rsqrt(distanceSquared);
@@ -86,15 +86,15 @@ function pointLight(
   param(params, "Viewport and camera time."),
 )
 function transform[i](
-  vertices: buffer<float32x4[]>,
-  screen: buffer<float32x4[]>,
+  vertices: buffer<vec<float32, 4>[]>,
+  screen: buffer<vec<float32, 4>[]>,
   params: MeshParams,
 ) {
   const vertex = vertices[i];
-  const camera = float32x3(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
+  const camera = vec(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
   const view = vertex.xyz - camera;
   const inverseDepth = 1.0 / view.z;
-  screen[i] = float32x4(
+  screen[i] = vec(
     (view.x * inverseDepth * 0.90 + 0.5) * float32(params.width),
     (0.53 - view.y * inverseDepth * 1.48) * float32(params.height),
     saturate((view.z - 5.0) / 42.0),
@@ -123,7 +123,7 @@ function clear[i](visibility: buffer<atomic<uint32>[]>) {
   param(params, "Viewport dimensions."),
 )
 function rasterize[triangle](
-  screen: buffer<float32x4[]>,
+  screen: buffer<vec<float32, 4>[]>,
   indices: buffer<uint32[]>,
   visibility: buffer<atomic<uint32>[]>,
   coverage: buffer<uint32[]>,
@@ -152,7 +152,7 @@ function rasterize[triangle](
       const y1 = clamp(int32(ceil(maximumY)), 0, int32(params.height) - 1);
       for (let y = y0; y <= y1; y++) {
         for (let x = x0; x <= x1; x++) {
-          const point = float32x2(float32(x) + 0.5, float32(y) + 0.5);
+          const point = vec(float32(x) + 0.5, float32(y) + 0.5);
           const wa = edge(b.xy, c.xy, point) / area;
           const wb = edge(c.xy, a.xy, point) / area;
           const wc = 1.0 - wa - wb;
@@ -183,19 +183,19 @@ function rasterize[triangle](
   param(params, "Viewport and lighting time."),
 )
 function shade[i](
-  vertices: buffer<float32x4[]>,
-  normals: buffer<float32x4[]>,
-  screen: buffer<float32x4[]>,
+  vertices: buffer<vec<float32, 4>[]>,
+  normals: buffer<vec<float32, 4>[]>,
+  screen: buffer<vec<float32, 4>[]>,
   indices: buffer<uint32[]>,
   visibility: buffer<atomic<uint32>[]>,
-  hdr: buffer<float32x4[]>,
+  hdr: buffer<vec<float32, 4>[]>,
   params: MeshParams,
 ) {
   const x = i % params.width;
   const y = i / params.width;
   const owner = atomicLoad(visibility[i]);
   const sky = float32(y) / float32(params.height);
-  let color = float32x3(0.07 + sky * 0.12, 0.13 + sky * 0.19, 0.25 + sky * 0.30);
+  let color = vec(0.07 + sky * 0.12, 0.13 + sky * 0.19, 0.25 + sky * 0.30);
   if (owner != 0xffff_ffff) {
     const triangle = owner & 0x000f_ffff;
     const first = triangle * 3;
@@ -211,7 +211,7 @@ function shade[i](
     const sa = screen[ia];
     const sb = screen[ib];
     const sc = screen[ic];
-    const point = float32x2(float32(x) + 0.5, float32(y) + 0.5);
+    const point = vec(float32(x) + 0.5, float32(y) + 0.5);
     const area = edge(sa.xy, sb.xy, sc.xy);
     const screenA = edge(sb.xy, sc.xy, point) / area;
     const screenB = edge(sc.xy, sa.xy, point) / area;
@@ -223,7 +223,7 @@ function shade[i](
     const wc = 1.0 - wa - wb;
     const world = va.xyz * wa + vb.xyz * wb + vc.xyz * wc;
     const rawNormal = normalize(na.xyz * wa + nb.xyz * wb + nc.xyz * wc);
-    const camera = float32x3(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
+    const camera = vec(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
     const view = normalize(camera - world);
     const facing = dot(rawNormal, view);
     const normal = facing >= 0.0 ? rawNormal : -rawNormal;
@@ -255,7 +255,7 @@ function shade[i](
         occlusion += 0.14;
       }
     }
-    const sun = normalize(float32x3(-0.48, 0.80, -0.35));
+    const sun = normalize(vec(-0.48, 0.80, -0.35));
     const diffuseRaw = dot(normal, sun);
     const diffuse = diffuseRaw > 0.0 ? diffuseRaw : 0.0;
     const specularRaw = dot(normal, normalize(sun + view));
@@ -264,31 +264,18 @@ function shade[i](
     const local = pointLight(
       world,
       normal,
-      float32x3(-6.0, 6.0, 8.0),
-      float32x3(1.0, 0.22, 0.08),
+      vec(-6.0, 6.0, 8.0),
+      vec(1.0, 0.22, 0.08),
       13.0,
-    )
-      + pointLight(
-      world,
-      normal,
-      float32x3(6.0, 4.0, 13.0),
-      float32x3(0.08, 0.35, 1.0),
-      15.0,
-    )
-      + pointLight(
-      world,
-      normal,
-      float32x3(0.0, 7.0, 22.0),
-      float32x3(0.34, 1.0, 0.44),
-      17.0,
-    );
+    ) + pointLight(world, normal, vec(6.0, 4.0, 13.0), vec(0.08, 0.35, 1.0), 15.0)
+      + pointLight(world, normal, vec(0.0, 7.0, 22.0), vec(0.34, 1.0, 0.44), 17.0);
     const base = materialColor(material, world);
     const lit = base * ((0.16 + diffuse * 1.08) * (1.0 - occlusion)) + local
-      + float32x3(1.0, 0.86, 0.68) * specular * (0.25 + (1.0 - roughness) * 0.70);
+      + vec(1.0, 0.86, 0.68) * specular * (0.25 + (1.0 - roughness) * 0.70);
     const fog = saturate((world.z - 16.0) / 28.0);
-    color = lit * (1.0 - fog * 0.58) + float32x3(0.13, 0.20, 0.31) * fog * 0.58;
+    color = lit * (1.0 - fog * 0.58) + vec(0.13, 0.20, 0.31) * fog * 0.58;
   }
-  hdr[i] = float32x4(color, 1.0);
+  hdr[i] = vec(color, 1.0);
 }
 
 @docs(
@@ -299,8 +286,8 @@ function shade[i](
   param(params, "Frame dimensions."),
 )
 function meshPost[i](
-  hdr: buffer<float32x4[]>,
-  frame: buffer<float32x4[]>,
+  hdr: buffer<vec<float32, 4>[]>,
+  frame: buffer<vec<float32, 4>[]>,
   params: MeshParams,
 ) {
   if (i < frame.length) {
@@ -312,12 +299,12 @@ function meshPost[i](
     const up = hdr[y > 0 ? i - params.width : i].xyz;
     const down = hdr[y + 1 < params.height ? i + params.width : i].xyz;
     const bloom = (left + right + up + down) * 0.055;
-    const bloomLuminance = dot(bloom, float32x3(0.21, 0.72, 0.07));
+    const bloomLuminance = dot(bloom, vec(0.21, 0.72, 0.07));
     let color = center + bloom * (bloomLuminance > 0.34 ? 0.50 : 0.07);
     color = color / (color + 1.0);
     const nx = float32(x) / float32(params.width) * 2.0 - 1.0;
     const ny = float32(y) / float32(params.height) * 2.0 - 1.0;
-    frame[i] = float32x4(color * saturate(1.08 - (nx * nx + ny * ny) * 0.20), 1.0);
+    frame[i] = vec(color * saturate(1.08 - (nx * nx + ny * ny) * 0.20), 1.0);
   }
 }
 
@@ -332,17 +319,17 @@ function meshPost[i](
   returns("The complete sRGB display view."),
 )
 export function meshWorld(
-  vertices: buffer<float32x4[]>,
-  normals: buffer<float32x4[]>,
+  vertices: buffer<vec<float32, 4>[]>,
+  normals: buffer<vec<float32, 4>[]>,
   indices: buffer<uint32[]>,
   visibility: buffer<atomic<uint32>[]>,
   coverage: buffer<uint32[]>,
   params: MeshParams,
 ): view<srgb8> {
   const count = params.width * params.height;
-  const screen = transient<float32x4>(vertices.length);
-  const hdr = transient<float32x4>(count);
-  const frame = transient<float32x4>(count);
+  const screen = transient<vec<float32, 4>>(vertices.length);
+  const hdr = transient<vec<float32, 4>>(count);
+  const frame = transient<vec<float32, 4>>(count);
   run transform(vertices, screen, params) over vertices.length;
   run clear(visibility) over visibility.length;
   run rasterize(screen, indices, visibility, coverage, params) over indices.length / 3;

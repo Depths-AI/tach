@@ -48,3 +48,23 @@ func TestVerifyScopeExit(t *testing.T) {
 		t.Fatal("accepted exit_scope outside scope")
 	}
 }
+
+func TestVerifyUsesIntrinsicSignatureRules(t *testing.T) {
+	function := &Function{Name: "value", Kind: Helper, Return: types.TI32, Body: &Block{Instrs: []Instr{
+		&Const{Result: 1, Type: types.TI32, Raw: "0"},
+		&Const{Result: 2, Type: types.TI32, Raw: "1"},
+		&Intrinsic{Result: 3, Type: types.TI32, Kind: IntrinsicClamp, Args: []ValueID{1, 1, 2}},
+	}, Term: &Return{Value: 3, HasValue: true}}}
+	module := &Module{Functions: []*Function{function}}
+	if err := Verify(module); err != nil {
+		t.Fatal(err)
+	}
+	for _, instruction := range function.Body.Instrs[:2] {
+		instruction.(*Const).Type = types.TF32
+	}
+	function.Return = types.TF32
+	function.Body.Instrs[2].(*Intrinsic).Type = types.TF32
+	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "does not accept float32") {
+		t.Fatalf("invalid intrinsic domain error = %v", err)
+	}
+}

@@ -21,11 +21,11 @@ type ViewParams = {
   param(pixels, "Row-major linear RGBA image storage."),
   param(params, "Image extent and color bias."),
 )
-function paint[i](pixels: buffer<float32x4[]>, params: ViewParams) {
+function paint[i](pixels: buffer<vec<float32, 4>[]>, params: ViewParams) {
   if (i < pixels.length) {
     const x = i % params.width;
     const y = i / params.width;
-    pixels[i] = float32x4(
+    pixels[i] = vec(
       float32(x) / float32(params.width) + params.bias,
       float32(y) / float32(params.height),
       0.25,
@@ -40,7 +40,7 @@ function paint[i](pixels: buffer<float32x4[]>, params: ViewParams) {
   returns("The complete display view after backend-owned sRGB projection."),
 )
 export function gradient(params: ViewParams): view<srgb8> {
-  const pixels = transient<float32x4>(params.width * params.height);
+  const pixels = transient<vec<float32, 4>>(params.width * params.height);
   run paint(pixels, params) over pixels.length;
   return view(pixels, params.width, params.height);
 }
@@ -51,7 +51,7 @@ export function gradient(params: ViewParams): view<srgb8> {
   param(params, "Image extent and color bias."),
   returns("The complete display view after standalone sRGB projection."),
 )
-export function gradientInto(pixels: buffer<float32x4[]>, params: ViewParams): view<srgb8> {
+export function gradientInto(pixels: buffer<vec<float32, 4>[]>, params: ViewParams): view<srgb8> {
   run paint(pixels, params) over pixels.length;
   return view(pixels, params.width, params.height);
 }
@@ -61,11 +61,11 @@ export function gradientInto(pixels: buffer<float32x4[]>, params: ViewParams): v
   coordinate(i, "Linear pixel index."),
   param(pixels, "Row-major linear RGBA image storage."),
 )
-function stamp[i](pixels: buffer<float32x4[]>) {
+function stamp[i](pixels: buffer<vec<float32, 4>[]>) {
   if (i < pixels.length) {
     const x = i % 2;
     const y = i / 2;
-    pixels[i] = float32x4(float32(x), float32(y), 0, 1);
+    pixels[i] = vec(float32(x), float32(y), 0, 1);
   }
 }
 
@@ -74,7 +74,7 @@ function stamp[i](pixels: buffer<float32x4[]>) {
   returns("The complete display view after backend-owned sRGB projection."),
 )
 export function swatch(): view<srgb8> {
-  const pixels = transient<float32x4>(4);
+  const pixels = transient<vec<float32, 4>>(4);
   run stamp(pixels) over pixels.length;
   return view(pixels, 2, 2);
 }
@@ -84,7 +84,7 @@ export function swatch(): view<srgb8> {
   param(pixels, "Caller-owned row-major linear RGBA image storage."),
   returns("The complete display view after standalone sRGB projection."),
 )
-export function swatchInto(pixels: buffer<float32x4[]>): view<srgb8> {
+export function swatchInto(pixels: buffer<vec<float32, 4>[]>): view<srgb8> {
   run stamp(pixels) over pixels.length;
   return view(pixels, 2, 2);
 }

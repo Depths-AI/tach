@@ -54,6 +54,18 @@ function browser(): string {
   throw new Error("Chrome is unavailable; set CHROME_BIN");
 }
 
+async function removeProfile(path: string): Promise<void> {
+  for (let attempt = 0;; attempt++) {
+    try {
+      await Deno.remove(path, { recursive: true });
+      return;
+    } catch (error) {
+      if (attempt === 59) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
 class Protocol {
   #id = 0;
   #pending = new Map<
@@ -174,7 +186,7 @@ try {
     }
     if (evaluation.result.value) {
       if (
-        evaluation.result.value.programs !== 16 ||
+        evaluation.result.value.programs !== 17 ||
         evaluation.result.value.presentedFrames !== 35 ||
         evaluation.result.value.pngBytes < 100
       ) {
@@ -197,5 +209,5 @@ try {
   chrome.kill();
   await chrome.status;
   abort.abort();
-  await Deno.remove(profile, { recursive: true });
+  await removeProfile(profile);
 }

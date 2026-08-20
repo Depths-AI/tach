@@ -78,11 +78,11 @@ export function invisible[i](params: uint32) { }
 
 func TestViewProgramsAreStructuredAndValidated(t *testing.T) {
 	valid := `
-function paint[i](pixels: buffer<float32x4[]>) {
-  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) {
+  if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`
@@ -103,11 +103,11 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 		want   string
 	}{
 		{`function image(): view<srgb8> { return view(missing, 1, 1); }`, "only valid on an exported program"},
-		{`export function image[i](pixels: buffer<float32x4[]>): view<srgb8> {}`, "indexed stage image cannot declare a return type"},
+		{`export function image[i](pixels: buffer<vec<float32, 4>[]>): view<srgb8> {}`, "indexed stage image cannot declare a return type"},
 		{`export function image(data: buffer<uint32[]>): uint32 { return 1; }`, "can only return view<srgb8>"},
 		{strings.Replace(valid, "return view(pixels, width, height);", "", 1), "must return its view"},
 		{strings.Replace(valid, "view(pixels, width, height)", "view(pixels, width)", 1), "view(pixels, width, height)"},
-		{`function paint[i](pixels: buffer<uint32[]>) { pixels[i] = 0; } export function image(): view<srgb8> { const pixels = transient<uint32>(1); run paint(pixels) over 1; return view(pixels, 1, 1); }`, "float32x4 buffer or transient"},
+		{`function paint[i](pixels: buffer<uint32[]>) { pixels[i] = 0; } export function image(): view<srgb8> { const pixels = transient<uint32>(1); run paint(pixels) over 1; return view(pixels, 1, 1); }`, "vec<float32, 4> buffer or transient"},
 		{strings.Replace(valid, "view(pixels, width, height)", "view(pixels, 1.0, height)", 1), "shape literal must be uint32"},
 		{strings.Replace(valid, "view<srgb8>", "view<rgba8>", 1), "can only return view<srgb8>"},
 	}
@@ -126,7 +126,7 @@ func TestDocumentationIsNormalizedAndValidated(t *testing.T) {
 	m, err := parser.Parse("docs.tach", `
 @docs(title("Particles"), summary("Simulation kernels."));
 @docs(summary("Particle data."), field(position, "World position."))
-type Particle = { position: float32x4 };
+type Particle = { position: vec<float32, 4> };
 @docs(summary("Advance one particle."), param(particle, "Current state."), returns("Updated state."))
 function advance(particle: Particle): Particle { return particle; }
 @docs(summary("Advance all particles."), coordinate(i, "Particle index."), param(particles, "Mutable state."))
@@ -178,13 +178,13 @@ export function invalid[i](out: buffer<uint32[]>, value: uint32) {
 
 func TestFloat16LanguageSurface(t *testing.T) {
 	valid := `
-function shape(value: float16x3): float16x3 {
+function shape(value: vec<float16, 3>): vec<float16, 3> {
   const direction = normalize(value);
   const magnitude = length(value) + distance(value, direction) + dot(value, direction);
   const crossed = cross(value, direction);
-  return crossed + direction * float16x3(magnitude);
+  return crossed + direction * magnitude;
 }
-export function halfMath[i](values: buffer<float16x4[]>, factor: float16) {
+export function halfMath[i](values: buffer<vec<float16, 4>[]>, factor: float16) {
   if (i < values.length) {
     const value = values[i];
     const geometry = shape(value.xyz);
@@ -193,7 +193,7 @@ export function halfMath[i](values: buffer<float16x4[]>, factor: float16) {
     const rooted = sqrt(abs(value.x)) + rsqrt(value.w);
     const rounded = floor(value.x) + ceil(value.y) + trunc(value.z);
     const converted = float16(float32(value.w));
-    values[i] = float16x4(geometry.x + pow(wave, factor), exponential, rooted + rounded, converted);
+    values[i] = vec(geometry.x + pow(wave, factor), exponential, rooted + rounded, converted);
   }
 }`
 	parsed, err := parser.Parse("float16.tach", valid)
@@ -205,7 +205,7 @@ export function halfMath[i](values: buffer<float16x4[]>, factor: float16) {
 		t.Fatal(err)
 	}
 	dump := ir.Dump(module.Kernel)
-	for _, want := range []string{"float16", "float16x4", "intrinsic normalize", ": float16 -> float32", ": float32 -> float16"} {
+	for _, want := range []string{"float16", "vec<float16, 4>", "intrinsic normalize", ": float16 -> float32", ": float32 -> float16"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("Float16 IR missing %q:\n%s", want, dump)
 		}
@@ -227,7 +227,7 @@ export function halfMath[i](values: buffer<float16x4[]>, factor: float16) {
 
 func TestLoopControlAndFmaLowerToCoreIR(t *testing.T) {
 	parsed, err := parser.Parse("control.tach", `
-export function control[i](out: buffer<float32[]>, half: buffer<float16[]>, limit: uint32) {
+export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[]>, limit: uint32) {
   let total: float32 = 0;
   for (let step = 0; step < limit; step++) {
     if (step == 2) { continue; }
@@ -236,7 +236,7 @@ export function control[i](out: buffer<float32[]>, half: buffer<float16[]>, limi
   }
   if (i < out.length && i < half.length) {
     out[i] = total;
-    half[i] = fma(half[i], float16(2), float16(1));
+    half[i] = fma(half[i], float16(2), vec(1, 1, 1, 1));
   }
 }`)
 	if err != nil {
@@ -256,10 +256,93 @@ export function control[i](out: buffer<float32[]>, half: buffer<float16[]>, limi
 	for _, test := range []struct{ source, want string }{
 		{`export function bad[i](out: buffer<uint32[]>) { break; }`, "break is only valid inside a loop"},
 		{`export function bad[i](out: buffer<uint32[]>) { continue; }`, "continue is only valid inside a loop"},
-		{`export function bad[i](out: buffer<uint32[]>) { out[i] = fma(1, 2, 3); }`, "matching floating-point"},
+		{`export function bad[i](out: buffer<uint32[]>) { out[i] = fma(1, 2, 3); }`, "cannot satisfy uint32 context"},
 		{`export function bad[i](out: buffer<float32[]>) { out[i] = fma(1.0, 2.0); }`, "expects 3 argument"},
 	} {
 		parsed, parseErr := parser.Parse("invalid-control.tach", test.source)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil || !strings.Contains(checkErr.Error(), test.want) {
+			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
+		}
+	}
+}
+
+func TestContextualNumericInference(t *testing.T) {
+	parsed, err := parser.Parse("inference.tach", `
+function inferredFloat(): float32 {
+  return fma(2, 3, 4) + sin(1) + pow(2, 3);
+}
+function inferredHalf(): float16 {
+  return fma(2, 3, 4);
+}
+function inferredSigned(): int32 {
+  return abs(1);
+}
+function inferredVector(scale: float32): vec<float32, 3> {
+  const axis = normalize(vec(1, 0, 0));
+  return fma(axis, scale, vec(0, 1, 0));
+}
+function inferredDot(): float16 {
+  return dot(vec(1, 2, 3), vec(4, 5, 6));
+}
+function inferredBinary(value: float16): float16 {
+  return -0.745 - value * value;
+}
+function inferredFill(): vec<float16, 3> {
+  return fma(1, 2, 3);
+}
+function inferredConditional(enabled: bool, value: float16): float16 {
+  return enabled ? 1 + 2 : -0.5 - value;
+}
+function inferredIntegerConditional(enabled: bool): int32 {
+  return enabled ? 1 : -2;
+}
+function inferredCompound(value: vec<float16, 3>): vec<float16, 3> {
+  let result = value;
+  result += sin(1);
+  result *= 1 + 2;
+  return result;
+}
+function inferredPlaceCompound[i](values: buffer<vec<float16, 3>[]>) {
+  values[i] += sin(1);
+}
+export function inferred[i](out: buffer<vec<float32, 4>[]>) {
+  if (i < out.length) {
+    const direction = inferredVector(2.0);
+    const fill = inferredFill();
+    out[i] = vec(direction, inferredFloat() + float32(inferredHalf()) + float32(inferredSigned()) + float32(inferredDot()) + float32(inferredBinary(fill.x)) + float32(inferredConditional(true, fill.y)) + float32(inferredIntegerConditional(false)));
+  }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := sema.CheckAndLower(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump := ir.Dump(module.Kernel)
+	for _, want := range []string{"intrinsic fma", "intrinsic sin", "intrinsic pow", "intrinsic abs", "intrinsic normalize", "intrinsic dot", "vec<float16, 3>", "vec<float32, 4>"} {
+		if !strings.Contains(dump, want) {
+			t.Fatalf("inferred IR missing %q:\n%s", want, dump)
+		}
+	}
+
+	for _, test := range []struct{ source, want string }{
+		{`export function bad[i](out: buffer<float32[]>) { out[i] = vec(1); }`, "want 2, 3, or 4"},
+		{`export function bad[i](out: buffer<vec<float32, 4>[]>) { out[i] = vec(1, 2, 3, 4, 5); }`, "want 2, 3, or 4"},
+		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = vec(float16(1), float32(2)); }`, "convert explicitly"},
+		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = fma(vec(1, 1), vec(2, 2, 2), vec(3, 3)); }`, "conflicting vector widths"},
+		{`export function bad[i](out: buffer<float32[]>) { out[i] = dot(1, 2); }`, "requires floating-point vectors"},
+		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = pow(2, vec(3, 4)); }`, "argument is float32, want vec<float32, 2>"},
+		{`export function bad[i](out: buffer<vec<uint32, 2>[]>) { out[i] = vec(true, 1); }`, "requires numeric values"},
+		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = true ? 1 : vec(2, 3); }`, "conditional branches have types"},
+		{`export function bad[i](out: buffer<vec<bool, 2>[]>) { out[i] = vec(1, 2); }`, "vec element type must be numeric"},
+		{`export function bad[i](out: buffer<vec<float32, 5>[]>) { out[i] = vec(1, 2, 3, 4); }`, "vec lane count must be 2, 3, or 4"},
+		{`function vec(value: uint32): uint32 { return value; } export function bad[i](out: buffer<uint32[]>) { out[i] = i; }`, "reserved"},
+	} {
+		parsed, parseErr := parser.Parse("invalid-inference.tach", test.source)
 		if parseErr != nil {
 			t.Fatal(parseErr)
 		}

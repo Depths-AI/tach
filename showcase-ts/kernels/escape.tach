@@ -22,7 +22,7 @@ type EscapeParams = {
   param(params, "Plane dimensions and iteration ceiling."),
 )
 export function complexEscapeFloat32[i](
-  output: buffer<float32x2[]>,
+  output: buffer<vec<float32, 2>[]>,
   params: EscapeParams,
 ) {
   if (i < output.length) {
@@ -47,7 +47,7 @@ export function complexEscapeFloat32[i](
       }
       energy = fma(real, real, energy + imaginary * imaginary);
     }
-    output[i] = float32x2(float32(iterations), energy);
+    output[i] = vec(float32(iterations), energy);
   }
 }
 
@@ -58,7 +58,7 @@ export function complexEscapeFloat32[i](
   param(params, "Plane dimensions and iteration ceiling."),
 )
 export function complexEscapeFloat16[i](
-  output: buffer<float16x2[]>,
+  output: buffer<vec<float16, 2>[]>,
   params: EscapeParams,
 ) {
   if (i < output.length) {
@@ -82,6 +82,6 @@ export function complexEscapeFloat16[i](
       }
       energy = fma(real, real, energy + imaginary * imaginary);
     }
-    output[i] = float16x2(float16(iterations), energy);
+    output[i] = vec(float16(iterations), energy);
   }
 }

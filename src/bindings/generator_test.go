@@ -76,7 +76,7 @@ func TestGenerateCompleteRuntimeMetadata(t *testing.T) {
 }
 
 func TestGenerateFloat16Contract(t *testing.T) {
-	_, metadata := generateSource(t, `export function half[i](values: buffer<float16x3[]>, factor: float16) { if (i < values.length) { values[i] *= float16x3(factor); } }`)
+	_, metadata := generateSource(t, `export function half[i](values: buffer<vec<float16, 3>[]>, factor: float16) { if (i < values.length) { values[i] *= factor; } }`)
 	if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != backend.ShaderF16 {
 		t.Fatalf("web features = %v", got)
 	}
@@ -158,11 +158,11 @@ export function transform(input: buffer<float32[]>, output: buffer<float32[]>) {
 
 func TestGenerateViewContractForBothBackends(t *testing.T) {
 	_, metadata := generateSource(t, `
-function paint[i](pixels: buffer<float32x4[]>) {
-  if (i < pixels.length) { pixels[i] = float32x4(0.1, 0.2, 0.3, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) {
+  if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)
@@ -219,9 +219,9 @@ func TestValidateMetadataRejectsCorruptRuntimeSeams(t *testing.T) {
 
 func TestValidateMetadataRejectsCorruptViewSeams(t *testing.T) {
 	_, metadata := generateSource(t, `
-function paint[i](pixels: buffer<float32x4[]>) { pixels[i] = float32x4(0.0, 0.0, 0.0, 1.0); }
+function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.0, 0.0, 0.0, 1.0); }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<float32x4>(width * height);
+  const pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)

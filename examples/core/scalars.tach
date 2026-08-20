@@ -46,11 +46,11 @@ type Float16Series = {
 )
 export function float16Math[i](
   input: buffer<Float16Series>,
-  output: buffer<float16x4[]>,
+  output: buffer<vec<float16, 4>[]>,
 ) {
   if (i < input.values.length && i < output.length) {
     const x = input.values[i] / float16(input.values.length) + input.offset;
-    const value = float16x3(x, 2.0, 3.0);
+    const value = vec(x, 2.0, 3.0);
     const unit = normalize(value);
     const geometry = dot(value, unit) + length(value) + distance(value, unit)
       + cross(value, unit).x;
@@ -58,7 +58,7 @@ export function float16Math[i](
     const shaped = sqrt(abs(wave)) + rsqrt(x + 1.0);
     const exponential = exp2(log2(x + 1.0)) + exp(log(x + 1.0));
     const rounded = floor(pow(x + 1.0, 2.0)) + ceil(geometry) + trunc(shaped);
-    output[i] = float16x4(unit, shaped + exponential + rounded);
+    output[i] = vec(unit, shaped + exponential + rounded);
   }
 }
 
