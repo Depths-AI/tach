@@ -426,7 +426,7 @@ func zeroValue(t *types.Type, span source.Span, fresh func() ir.ValueID, out []i
 
 func rewriteBlockValues(block *ir.Block, resolve func(ir.ValueID) ir.ValueID) {
 	for _, in := range block.Instrs {
-		rewriteOperands(in, resolve, func(id ir.PlaceID) ir.PlaceID { return id })
+		ir.RewriteOperands(in, resolve, func(id ir.PlaceID) ir.PlaceID { return id })
 		switch x := in.(type) {
 		case *ir.If:
 			rewriteBlockValues(x.Then, resolve)
@@ -436,7 +436,7 @@ func rewriteBlockValues(block *ir.Block, resolve func(ir.ValueID) ir.ValueID) {
 			rewriteBlockValues(x.Body, resolve)
 		}
 	}
-	rewriteTerm(block.Term, resolve)
+	ir.RewriteTerm(block.Term, resolve)
 }
 
 // DECISION: Promotion stops at synchronization, early exits, and any other
@@ -565,7 +565,7 @@ func canonicalizeBlock(f *ir.Function, b *ir.Block, replacements map[ir.ValueID]
 	}
 	out := b.Instrs[:0]
 	for _, in := range b.Instrs {
-		rewriteOperands(in, resolve, resolvePlace)
+		ir.RewriteOperands(in, resolve, resolvePlace)
 		switch x := in.(type) {
 		case *ir.If:
 			canonicalizeBlock(f, x.Then, replacements, placeReplacements, placeResources, maps.Clone(available), maps.Clone(availablePlaces))
@@ -597,7 +597,7 @@ func canonicalizeBlock(f *ir.Function, b *ir.Block, replacements map[ir.ValueID]
 		out = append(out, in)
 	}
 	b.Instrs = out
-	rewriteTerm(b.Term, resolve)
+	ir.RewriteTerm(b.Term, resolve)
 }
 
 func reusablePlace(in ir.Instr, resources map[ir.PlaceID]int) (placeKey, int) {
@@ -612,73 +612,6 @@ func reusablePlace(in ir.Instr, resources map[ir.PlaceID]int) (placeKey, int) {
 		return placeKey{kind: 4, base: x.Base, index: x.Index}, resources[x.Base]
 	default:
 		panic(fmt.Sprintf("non-place definition %T", in))
-	}
-}
-
-func rewriteOperands(in ir.Instr, resolve func(ir.ValueID) ir.ValueID, resolvePlace func(ir.PlaceID) ir.PlaceID) {
-	switch x := in.(type) {
-	case *ir.Unary:
-		x.X = resolve(x.X)
-	case *ir.Binary:
-		x.Left, x.Right = resolve(x.Left), resolve(x.Right)
-	case *ir.Intrinsic:
-		for i := range x.Args {
-			x.Args[i] = resolve(x.Args[i])
-		}
-	case *ir.Convert:
-		x.X = resolve(x.X)
-	case *ir.Composite:
-		for i := range x.Values {
-			x.Values[i] = resolve(x.Values[i])
-		}
-	case *ir.Extract:
-		x.Base = resolve(x.Base)
-	case *ir.VectorIndex:
-		x.Base, x.Index = resolve(x.Base), resolve(x.Index)
-	case *ir.Call:
-		for i := range x.Args {
-			x.Args[i] = resolve(x.Args[i])
-		}
-	case *ir.PlaceIndex:
-		x.Base = resolvePlace(x.Base)
-		x.Index = resolve(x.Index)
-	case *ir.PlaceField:
-		x.Base = resolvePlace(x.Base)
-	case *ir.Load:
-		x.Place = resolvePlace(x.Place)
-	case *ir.Store:
-		x.Place = resolvePlace(x.Place)
-		x.Value = resolve(x.Value)
-	case *ir.ArrayLength:
-		x.Place = resolvePlace(x.Place)
-	case *ir.Atomic:
-		x.Place = resolvePlace(x.Place)
-		x.Value = resolve(x.Value)
-	case *ir.If:
-		x.Cond = resolve(x.Cond)
-	case *ir.Loop:
-		for i := range x.Params {
-			x.Params[i].Init = resolve(x.Params[i].Init)
-		}
-	}
-}
-
-func rewriteTerm(term ir.Term, resolve func(ir.ValueID) ir.ValueID) {
-	var values []ir.ValueID
-	switch x := term.(type) {
-	case *ir.Yield:
-		values = x.Values
-	case *ir.Continue:
-		values = x.Values
-	case *ir.Break:
-		values = x.Values
-	case *ir.Return:
-		if x.HasValue {
-			x.Value = resolve(x.Value)
-		}
-	}
-	for i := range values {
-		values[i] = resolve(values[i])
 	}
 }
 

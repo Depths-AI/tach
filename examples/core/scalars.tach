@@ -3,6 +3,7 @@
   summary("A minimal typed GPU kernel that scales a runtime-sized array in place."),
 );
 
+const halfScale: float16 = 0.5;
 @docs(
   summary("Multiplies every in-range value by a scalar."),
   coordinate(i, "Value index."),
@@ -49,23 +50,23 @@ export function float16Math[i](
   output: buffer<vec<float16, 4>[]>,
 ) {
   if (i < input.values.length && i < output.length) {
-    const x = input.values[i] / float16(input.values.length) + input.offset;
-    const value = vec(x, 2.0, 3.0);
-    const unit = normalize(value);
-    const geometry = dot(value, unit) + length(value) + distance(value, unit)
+    let x = input.values[i] / float16(input.values.length) + input.offset;
+    let value = vec(x, 2.0, 3.0);
+    let unit = normalize(value);
+    let geometry = dot(value, unit) + length(value) + distance(value, unit)
       + cross(value, unit).x;
-    const wave = sin(x) + cos(x) + tan(float16(0.25));
-    const shaped = sqrt(abs(wave)) + rsqrt(x + 1.0);
-    const exponential = exp2(log2(x + 1.0)) + exp(log(x + 1.0));
-    const rounded = floor(pow(x + 1.0, 2.0)) + ceil(geometry) + trunc(shaped);
+    let wave = sin(x) + cos(x) + tan(float16(0.25));
+    let shaped = sqrt(abs(wave)) + rsqrt(x + 1.0);
+    let exponential = exp2(log2(x + 1.0)) + exp(log(x + 1.0));
+    let rounded = floor(pow(x + 1.0, 2.0)) + ceil(geometry) + trunc(shaped);
     output[i] = vec(unit, shaped + exponential + rounded);
   }
 }
 
 @docs(
-  summary("Runs the binary16 scale stage with a constant encoded in the program plan."),
+  summary("Specializes the binary16 scale stage with a compiler-evaluated factor."),
   param(data, "Binary16 values updated in place."),
 )
 export function halveFloat16(data: buffer<float16[]>) {
-  run scaleFloat16(data, 0.5) over data.length;
+  run scaleFloat16(data, halfScale) over data.length;
 }

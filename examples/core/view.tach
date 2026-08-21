@@ -23,8 +23,8 @@ type ViewParams = {
 )
 function paint[i](pixels: buffer<vec<float32, 4>[]>, params: ViewParams) {
   if (i < pixels.length) {
-    const x = i % params.width;
-    const y = i / params.width;
+    let x = i % params.width;
+    let y = i / params.width;
     pixels[i] = vec(
       float32(x) / float32(params.width) + params.bias,
       float32(y) / float32(params.height),
@@ -40,7 +40,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>, params: ViewParams) {
   returns("The complete display view after backend-owned sRGB projection."),
 )
 export function gradient(params: ViewParams): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(params.width * params.height);
+  let pixels = transient<vec<float32, 4>>(params.width * params.height);
   run paint(pixels, params) over pixels.length;
   return view(pixels, params.width, params.height);
 }
@@ -63,8 +63,8 @@ export function gradientInto(pixels: buffer<vec<float32, 4>[]>, params: ViewPara
 )
 function stamp[i](pixels: buffer<vec<float32, 4>[]>) {
   if (i < pixels.length) {
-    const x = i % 2;
-    const y = i / 2;
+    let x = i % 2;
+    let y = i / 2;
     pixels[i] = vec(float32(x), float32(y), 0, 1);
   }
 }
@@ -74,7 +74,7 @@ function stamp[i](pixels: buffer<vec<float32, 4>[]>) {
   returns("The complete display view after backend-owned sRGB projection."),
 )
 export function swatch(): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(4);
+  let pixels = transient<vec<float32, 4>>(4);
   run stamp(pixels) over pixels.length;
   return view(pixels, 2, 2);
 }

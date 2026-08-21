@@ -1,9 +1,10 @@
+const forgottenLimit = 64;
 function forgotten(value: float32): float32 {
   return value * 2;
 }
 
 export function live[i](out: buffer<float32[]>, unused: float32) {
-  const abandoned = 1;
+  let abandoned = 1;
   sin(1);
   if (i < out.length) {
     out[i] = 0;

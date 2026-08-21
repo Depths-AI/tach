@@ -127,14 +127,16 @@ func TestFloat16FeaturesMatchInterfacesExactly(t *testing.T) {
 	}
 }
 
-func TestFloat16PlanConstantKeepsExactBits(t *testing.T) {
+func TestFloat16CompileTimeArgumentNeverReachesRuntimeMetadata(t *testing.T) {
 	_, metadata := generateSource(t, `
+const factor: float16 = 0.5;
 function half[i](values: buffer<float16[]>, factor: float16) { if (i < values.length) { values[i] *= factor; } }
-export function halve(values: buffer<float16[]>) { run half(values, 0.5) over values.length; }`)
+export function halve(values: buffer<float16[]>) { run half(values, factor) over values.length; }`)
 	for name, target := range map[string]*TargetPlanMeta{"web": metadata.Targets.Web, "spirv": metadata.Targets.SPIRV} {
-		source := target.Programs[0].Steps[0].Parameters[0]
-		if source.Kind != "f16Bits" || source.Value != float64(0x3800) {
-			t.Fatalf("%s Float16 value source = %#v", name, source)
+		for _, source := range target.Programs[0].Steps[0].Parameters {
+			if source.Kind != "shape" && source.Kind != "repeat" {
+				t.Fatalf("%s exposed compile-time Float16 through runtime metadata: %#v", name, source)
+			}
 		}
 	}
 }
@@ -144,8 +146,8 @@ func TestGenerateOrchestrationPlansForBothBackends(t *testing.T) {
 function copy[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i]; }
 function twice[i](input: buffer<float32[]>, output: buffer<float32[]>) { output[i] = input[i] * 2.0; }
 export function transform(input: buffer<float32[]>, output: buffer<float32[]>) {
-  const count = min(input.length, output.length);
-  const temporary = transient<float32>(count);
+  let count = min(input.length, output.length);
+  let temporary = transient<float32>(count);
   run copy(input, temporary) over count;
   run twice(temporary, output) over count;
 }`)
@@ -162,7 +164,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>) {
   if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)
@@ -221,7 +223,7 @@ func TestValidateMetadataRejectsCorruptViewSeams(t *testing.T) {
 	_, metadata := generateSource(t, `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.0, 0.0, 0.0, 1.0); }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)

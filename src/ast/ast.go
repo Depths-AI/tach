@@ -39,6 +39,16 @@ type TypeDecl struct {
 func (*TypeDecl) declNode()              {}
 func (d *TypeDecl) GetSpan() source.Span { return d.Span }
 
+type ConstDecl struct {
+	Name  string
+	Type  TypeExpr
+	Value Expr
+	Span  source.Span
+}
+
+func (*ConstDecl) declNode()              {}
+func (d *ConstDecl) GetSpan() source.Span { return d.Span }
+
 type Field struct {
 	Name string
 	Type TypeExpr
@@ -92,7 +102,7 @@ func (t *RuntimeArrayType) GetSpan() source.Span { return t.Span }
 
 type FixedArrayType struct {
 	Elem  TypeExpr
-	Count string
+	Count Expr
 	Span  source.Span
 }
 
@@ -130,15 +140,24 @@ func (*BlockStmt) stmtNode()              {}
 func (s *BlockStmt) GetSpan() source.Span { return s.Span }
 
 type VarStmt struct {
-	Mutable bool
-	Name    string
-	Type    TypeExpr
-	Value   Expr
-	Span    source.Span
+	Name  string
+	Type  TypeExpr
+	Value Expr
+	Span  source.Span
 }
 
 func (*VarStmt) stmtNode()              {}
 func (s *VarStmt) GetSpan() source.Span { return s.Span }
+
+type ConstStmt struct {
+	Name  string
+	Type  TypeExpr
+	Value Expr
+	Span  source.Span
+}
+
+func (*ConstStmt) stmtNode()              {}
+func (s *ConstStmt) GetSpan() source.Span { return s.Span }
 
 type WorkgroupStmt struct {
 	Name string

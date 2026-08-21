@@ -165,11 +165,7 @@ type ValueKind uint8
 
 const (
 	ValueParameterRef ValueKind = iota + 1
-	ValueBool
-	ValueI32
-	ValueU32
-	ValueF16Bits
-	ValueF32Bits
+	ValueConstant
 	ValueShape
 	ValueRepeat
 )
@@ -179,7 +175,7 @@ type ValueArgument struct {
 	Kind      ValueKind
 	Parameter int
 	Path      []string
-	Bits      uint32
+	Constant  *types.Value
 	Shape     ShapeID
 }
 
@@ -304,6 +300,12 @@ func Clone(m *Module) *Module {
 			q.Dispatches[j].Domain = append([]ShapeID(nil), p.Dispatches[j].Domain...)
 			q.Dispatches[j].Buffers = append([]BufferArgument(nil), p.Dispatches[j].Buffers...)
 			q.Dispatches[j].Values = append([]ValueArgument(nil), p.Dispatches[j].Values...)
+			for k := range q.Dispatches[j].Values {
+				value := &q.Dispatches[j].Values[k]
+				if value.Constant != nil {
+					value.Constant = &types.Value{Type: value.Constant.Type, Bits: append([]uint32(nil), value.Constant.Bits...)}
+				}
+			}
 			for k := range q.Dispatches[j].Values {
 				q.Dispatches[j].Values[k].Path = append([]string(nil), p.Dispatches[j].Values[k].Path...)
 			}

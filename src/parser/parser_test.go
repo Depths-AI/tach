@@ -15,7 +15,7 @@ function helper(x: uint32): uint32 { return x; }
 function stage[i](out: buffer<uint32[]>) { out[i] = helper(i); }
 export function kernel[i](out: buffer<uint32[]>) { out[i] = i; }
 export function program(out: buffer<uint32[]>, count: uint32) {
-  const scratch = transient<uint32>(count);
+  let scratch = transient<uint32>(count);
   run stage(scratch) over count;
   run stage(out) over count;
 }`)
@@ -45,7 +45,7 @@ func TestVectorTypeUsesOneStructuralSpelling(t *testing.T) {
 	module, err := parser.Parse("vectors.tach", `
 function stage[i](out: buffer<vec<float32, 4>[]>) { out[i] = vec(1, 2, 3, 4); }
 export function vectors() {
-  const out = transient<vec<float32, 4>>(4);
+  let out = transient<vec<float32, 4>>(4);
   run stage(out) over 4;
 }`)
 	if err != nil {
@@ -55,6 +55,36 @@ export function vectors() {
 	vector := parameter.Args[0].(*ast.RuntimeArrayType).Elem.(*ast.VectorType)
 	if vector.Lanes != "4" || vector.Elem.(*ast.NamedType).Name != "float32" {
 		t.Fatalf("vector type = %#v", vector)
+	}
+}
+
+func TestCompileTimeConstantsHaveModuleAndLexicalForms(t *testing.T) {
+	module, err := parser.Parse("constants.tach", `
+const width: uint32 = 4 * 4;
+export function constants[i](out: buffer<uint32[]>) {
+  const area = width * width;
+  let scratch: shared<uint32[area]>;
+  out[i] = area;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration, ok := module.Decls[0].(*ast.ConstDecl)
+	if !ok || declaration.Name != "width" || declaration.Type == nil {
+		t.Fatalf("module constant = %#v", module.Decls[0])
+	}
+	function := module.Decls[1].(*ast.FunctionDecl)
+	constant, ok := function.Body.Stmts[0].(*ast.ConstStmt)
+	if !ok || constant.Name != "area" {
+		t.Fatalf("local constant = %#v", function.Body.Stmts[0])
+	}
+	shared := function.Body.Stmts[1].(*ast.WorkgroupStmt)
+	count, ok := shared.Type.(*ast.FixedArrayType).Count.(*ast.IdentExpr)
+	if !ok || count.Name != "area" {
+		t.Fatalf("fixed-array count = %#v", shared.Type)
+	}
+	if _, err := parser.Parse("invalid.tach", `@workgroup(1) const width = 4;`); err == nil || !strings.Contains(err.Error(), "attributes are invalid on constants") {
+		t.Fatalf("constant attribute error = %v", err)
 	}
 }
 

@@ -64,10 +64,16 @@ func (p *parser) moduleRecover() (*ast.Module, source.Diagnostics) {
 			switch {
 			case p.text("type"):
 				declaration, err = p.typeDecl(attrs)
+			case p.text("const"):
+				if len(attrs) > 0 {
+					err = p.err(p.cur(), "attributes are invalid on constants")
+				} else {
+					declaration, err = p.constDecl()
+				}
 			case p.text("function") || p.text("export"):
 				declaration, err = p.functionDecl(attrs)
 			default:
-				err = p.err(p.cur(), "expected import, type, function, or export function declaration")
+				err = p.err(p.cur(), "expected import, const, type, function, or export function declaration")
 			}
 			if err == nil {
 				m.Decls = append(m.Decls, declaration)
@@ -103,7 +109,7 @@ func (p *parser) syncTop(start int) {
 				depth--
 			}
 		}
-		if depth == 0 && (p.at(lexer.At) || p.text("import") || p.text("type") || p.text("function") || p.text("export")) {
+		if depth == 0 && (p.at(lexer.At) || p.text("import") || p.text("const") || p.text("type") || p.text("function") || p.text("export")) {
 			return
 		}
 		p.take()
@@ -277,6 +283,39 @@ func (p *parser) typeDecl(attrs []ast.Attribute) (*ast.TypeDecl, error) {
 	d.Span = join(start, r.Span)
 	return d, nil
 }
+
+func (p *parser) constDecl() (*ast.ConstDecl, error) {
+	start := p.take().Span
+	name, ty, value, end, err := p.binding()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ConstDecl{Name: name.Text, Type: ty, Value: value, Span: join(start, end)}, nil
+}
+
+func (p *parser) binding() (lexer.Token, ast.TypeExpr, ast.Expr, source.Span, error) {
+	name, err := p.expect(lexer.Ident)
+	if err != nil {
+		return lexer.Token{}, nil, nil, source.Span{}, err
+	}
+	var ty ast.TypeExpr
+	if p.at(lexer.Colon) {
+		p.take()
+		ty, err = p.typeExpr()
+		if err != nil {
+			return lexer.Token{}, nil, nil, source.Span{}, err
+		}
+	}
+	if _, err = p.expect(lexer.Assign); err != nil {
+		return lexer.Token{}, nil, nil, source.Span{}, err
+	}
+	value, err := p.expr(0)
+	if err != nil {
+		return lexer.Token{}, nil, nil, source.Span{}, err
+	}
+	semi, err := p.expect(lexer.Semicolon)
+	return name, ty, value, semi.Span, err
+}
 func (p *parser) params() ([]ast.Param, error) {
 	if _, err := p.expect(lexer.LParen); err != nil {
 		return nil, err
@@ -434,7 +473,7 @@ func (p *parser) typeExpr() (ast.TypeExpr, error) {
 			r := p.take()
 			t = &ast.RuntimeArrayType{Elem: t, Span: join(s, r.Span)}
 		} else {
-			n, err := p.expect(lexer.Number)
+			count, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
@@ -442,7 +481,7 @@ func (p *parser) typeExpr() (ast.TypeExpr, error) {
 			if err != nil {
 				return nil, err
 			}
-			t = &ast.FixedArrayType{Elem: t, Count: n.Text, Span: join(s, r.Span)}
+			t = &ast.FixedArrayType{Elem: t, Count: count, Span: join(s, r.Span)}
 		}
 	}
 	return t, nil
@@ -474,9 +513,15 @@ func (p *parser) stmt() (ast.Stmt, error) {
 	switch {
 	case p.text("run"):
 		return p.runStmt()
-	case p.text("const") || p.text("let"):
+	case p.text("const"):
 		start := p.take()
-		mut := start.Text == "let"
+		name, ty, value, end, err := p.binding()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ConstStmt{Name: name.Text, Type: ty, Value: value, Span: join(start.Span, end)}, nil
+	case p.text("let"):
+		start := p.take()
 		n, err := p.expect(lexer.Ident)
 		if err != nil {
 			return nil, err
@@ -491,7 +536,7 @@ func (p *parser) stmt() (ast.Stmt, error) {
 		}
 		if !p.at(lexer.Assign) {
 			shared, ok := ty.(*ast.GenericType)
-			if !mut || !ok || shared.Name != "shared" || len(shared.Args) != 1 {
+			if !ok || shared.Name != "shared" || len(shared.Args) != 1 {
 				return nil, p.err(p.cur(), "expected '=' or an uninitialized shared<T> declaration")
 			}
 			semi, err := p.expect(lexer.Semicolon)
@@ -511,7 +556,7 @@ func (p *parser) stmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &ast.VarStmt{Mutable: mut, Name: n.Text, Type: ty, Value: v, Span: join(start.Span, semi.Span)}, nil
+		return &ast.VarStmt{Name: n.Text, Type: ty, Value: v, Span: join(start.Span, semi.Span)}, nil
 	case p.text("if"):
 		start := p.take().Span
 		if _, err := p.expect(lexer.LParen); err != nil {
@@ -597,7 +642,7 @@ func (p *parser) stmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		init := &ast.VarStmt{Mutable: true, Name: n.Text, Type: ty, Value: iv, Span: join(initStart.Span, semi.Span)}
+		init := &ast.VarStmt{Name: n.Text, Type: ty, Value: iv, Span: join(initStart.Span, semi.Span)}
 
 		cond, err := p.expr(0)
 		if err != nil {

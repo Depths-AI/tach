@@ -1,3 +1,3 @@
 export function noEffect[i](out: buffer<float32[]>) {
-  const discarded = float32(i) * 2;
+  let discarded = float32(i) * 2;
 }

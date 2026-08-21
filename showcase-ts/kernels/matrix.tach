@@ -3,6 +3,8 @@
   summary("Compares binary32 and binary16 dense square multiplication with identical cooperative tiling."),
 );
 
+const matrixTileWidth: uint32 = 16;
+const matrixTileArea = matrixTileWidth * matrixTileWidth;
 @docs(
   summary("Multiplies one 16 by 16 output tile using shared input tiles."),
   coordinate(column, "Output column."),
@@ -12,29 +14,29 @@
   param(output, "Row-major matrix product."),
   param(size, "Shared width and height of the square matrices."),
 )
-@workgroup(16, 16)
+@workgroup(matrixTileWidth, matrixTileWidth)
 function multiplyFloat32[column, row](
   left: buffer<float32[]>,
   right: buffer<float32[]>,
   output: buffer<float32[]>,
   size: uint32,
 ) {
-  let leftTile: shared<float32[256]>;
-  let rightTile: shared<float32[256]>;
-  const localColumn = column % 16;
-  const localRow = row % 16;
-  const lane = localRow * 16 + localColumn;
+  let leftTile: shared<float32[matrixTileArea]>;
+  let rightTile: shared<float32[matrixTileArea]>;
+  let localColumn = column % matrixTileWidth;
+  let localRow = row % matrixTileWidth;
+  let lane = localRow * matrixTileWidth + localColumn;
   let sum = 0.0;
-  for (let tile = 0; tile < size; tile += 16) {
+  for (let tile = 0; tile < size; tile += matrixTileWidth) {
     // Both barriers are required before the tile is read and then overwritten.
     leftTile[lane] = row < size && tile + localColumn < size
       ? left[row * size + tile + localColumn] : 0.0;
     rightTile[lane] = column < size && tile + localRow < size
       ? right[(tile + localRow) * size + column] : 0.0;
     workgroupBarrier();
-    for (let offset = 0; offset < 16; offset++) {
-      sum += leftTile[localRow * 16 + uint32(offset)]
-        * rightTile[uint32(offset) * 16 + localColumn];
+    for (let offset = 0; offset < matrixTileWidth; offset++) {
+      sum += leftTile[localRow * matrixTileWidth + uint32(offset)]
+        * rightTile[uint32(offset) * matrixTileWidth + localColumn];
     }
     workgroupBarrier();
   }
@@ -68,28 +70,28 @@ export function denseMatrixProductFloat32(
   param(output, "Binary16 row-major matrix product."),
   param(size, "Shared width and height of the square matrices."),
 )
-@workgroup(16, 16)
+@workgroup(matrixTileWidth, matrixTileWidth)
 function multiplyFloat16[column, row](
   left: buffer<float16[]>,
   right: buffer<float16[]>,
   output: buffer<float16[]>,
   size: uint32,
 ) {
-  let leftTile: shared<float16[256]>;
-  let rightTile: shared<float16[256]>;
-  const localColumn = column % 16;
-  const localRow = row % 16;
-  const lane = localRow * 16 + localColumn;
+  let leftTile: shared<float16[matrixTileArea]>;
+  let rightTile: shared<float16[matrixTileArea]>;
+  let localColumn = column % matrixTileWidth;
+  let localRow = row % matrixTileWidth;
+  let lane = localRow * matrixTileWidth + localColumn;
   let sum = float16(0.0);
-  for (let tile = 0; tile < size; tile += 16) {
+  for (let tile = 0; tile < size; tile += matrixTileWidth) {
     leftTile[lane] = row < size && tile + localColumn < size
       ? left[row * size + tile + localColumn] : 0.0;
     rightTile[lane] = column < size && tile + localRow < size
       ? right[(tile + localRow) * size + column] : 0.0;
     workgroupBarrier();
-    for (let offset = 0; offset < 16; offset++) {
-      sum += leftTile[localRow * 16 + uint32(offset)]
-        * rightTile[uint32(offset) * 16 + localColumn];
+    for (let offset = 0; offset < matrixTileWidth; offset++) {
+      sum += leftTile[localRow * matrixTileWidth + uint32(offset)]
+        * rightTile[uint32(offset) * matrixTileWidth + localColumn];
     }
     workgroupBarrier();
   }

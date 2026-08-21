@@ -9,8 +9,8 @@
   param(out, "Results written for every in-range invocation."),
 )
 export function bitwise[i](out: buffer<uint32[]>) {
-  let u: uint32 = 0xff00;
-  let s: int32 = -64;
+  const u: uint32 = 0xff00;
+  const s: int32 = -64;
   // Tach masks 32-bit shift counts, so these exercise wrapped counts 8, 4, and 3.
   const left = u << 40;
   const logical = u >> 36;

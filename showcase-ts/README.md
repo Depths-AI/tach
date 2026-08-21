@@ -14,7 +14,9 @@ conversion, and "am I on WebGPU or Vulkan?" stay out of application code?
 
 Each workload lives in its own `.tach` file. `kernels/mesh` and
 `kernels/procedural` directly import `shared/color`, so the build also exercises
-whole-file project imports. One `tach build` merges all nine files into one
+whole-file project imports and an imported vector constant. The matrix pair
+derives workgroup geometry, shared tile lengths, loop bounds, and indexing from
+module constants. One `tach build` merges all nine files into one
 JavaScript facade, one declaration file, compressed WGSL, and SPIR-V 1.6.
 
 The shared TypeScript workload implementation imports all eleven generated recipes

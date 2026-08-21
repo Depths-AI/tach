@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -14,11 +15,14 @@ import (
 func warnings(project *project, module *flow.Module) source.Diagnostics {
 	owners := map[string]string{}
 	functions := map[string]*ast.FunctionDecl{}
+	constants := map[string]*ast.ConstDecl{}
 	for i := range project.Kernels {
 		for _, declaration := range project.Kernels[i].AST.Decls {
 			switch item := declaration.(type) {
 			case *ast.TypeDecl:
 				owners[item.Name] = project.Kernels[i].Identity
+			case *ast.ConstDecl:
+				owners[item.Name], constants[item.Name] = project.Kernels[i].Identity, item
 			case *ast.FunctionDecl:
 				owners[item.Name], functions[item.Name] = project.Kernels[i].Identity, item
 			}
@@ -26,17 +30,35 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 	}
 
 	refs := map[string]map[string]bool{}
+	var typeRoots []map[string]bool
 	var diagnostics source.Diagnostics
 	for i := range project.Kernels {
 		kernel := &project.Kernels[i]
 		used := map[string]bool{}
+		visibleConstants := map[string]*ast.ConstDecl{}
+		visibleOwners := map[string]bool{kernel.Identity: true}
+		for _, item := range kernel.AST.Imports {
+			visibleOwners[item.Target] = true
+		}
+		for name, constant := range constants {
+			if visibleOwners[owners[name]] {
+				visibleConstants[name] = constant
+			}
+		}
 		for _, declaration := range kernel.AST.Decls {
-			analysis := &analysis{refs: map[string]bool{}, reads: map[string]bool{}}
+			analysis := &analysis{refs: map[string]bool{}, reads: map[string]bool{}, globals: visibleConstants, locals: map[string]bool{}}
 			switch item := declaration.(type) {
 			case *ast.TypeDecl:
 				for _, field := range item.Fields {
 					analysis.typeExpression(field.Type)
 				}
+				typeRoots = append(typeRoots, analysis.refs)
+			case *ast.ConstDecl:
+				if item.Type != nil {
+					analysis.typeExpression(item.Type)
+				}
+				analysis.expression(item.Value)
+				refs[item.Name] = analysis.refs
 			case *ast.FunctionDecl:
 				analysis.function(item)
 				refs[item.Name] = analysis.refs
@@ -62,14 +84,22 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 		}
 		reachable[name] = true
 		for dependency := range refs[name] {
-			if functions[dependency] != nil {
-				visit(dependency)
-			}
+			visit(dependency)
+		}
+	}
+	for _, roots := range typeRoots {
+		for name := range roots {
+			visit(name)
 		}
 	}
 	for name, function := range functions {
 		if function.Exported {
 			visit(name)
+		}
+	}
+	for name, constant := range constants {
+		if !reachable[name] {
+			diagnostics = append(diagnostics, warning("unused-constant", constant.Span, fmt.Sprintf("compile-time constant %q is never used", name), "remove it or use it from a type, constant, or exported function"))
 		}
 	}
 	for name, function := range functions {
@@ -132,16 +162,27 @@ type binding struct {
 
 type analysis struct {
 	refs, reads map[string]bool
+	globals     map[string]*ast.ConstDecl
+	locals      map[string]bool
 	bindings    []binding
 	diagnostics source.Diagnostics
 }
 
 func (a *analysis) function(function *ast.FunctionDecl) {
+	for _, attribute := range function.Attrs {
+		if attribute.Name == "workgroup" {
+			for _, argument := range attribute.Args {
+				a.expression(argument)
+			}
+		}
+	}
 	for _, index := range function.Indices {
 		a.bindings = append(a.bindings, binding{"index", index.Name, index.Span})
+		a.locals[index.Name] = true
 	}
 	for _, parameter := range function.Params {
 		a.bindings = append(a.bindings, binding{"parameter", parameter.Name, parameter.Span})
+		a.locals[parameter.Name] = true
 		a.typeExpression(parameter.Type)
 	}
 	if function.Return != nil {
@@ -163,6 +204,7 @@ func (a *analysis) typeExpression(expression ast.TypeExpr) {
 		a.typeExpression(item.Elem)
 	case *ast.FixedArrayType:
 		a.typeExpression(item.Elem)
+		a.expression(item.Count)
 	case *ast.VectorType:
 		a.typeExpression(item.Elem)
 	case *ast.GenericType:
@@ -173,6 +215,8 @@ func (a *analysis) typeExpression(expression ast.TypeExpr) {
 }
 
 func (a *analysis) block(block *ast.BlockStmt) {
+	outer := maps.Clone(a.locals)
+	defer func() { a.locals = outer }()
 	for _, statement := range block.Stmts {
 		switch item := statement.(type) {
 		case *ast.VarStmt:
@@ -181,9 +225,18 @@ func (a *analysis) block(block *ast.BlockStmt) {
 				a.typeExpression(item.Type)
 			}
 			a.expression(item.Value)
+			a.locals[item.Name] = true
+		case *ast.ConstStmt:
+			a.bindings = append(a.bindings, binding{"constant", item.Name, item.Span})
+			if item.Type != nil {
+				a.typeExpression(item.Type)
+			}
+			a.expression(item.Value)
+			a.locals[item.Name] = true
 		case *ast.WorkgroupStmt:
 			a.bindings = append(a.bindings, binding{"shared variable", item.Name, item.Span})
 			a.typeExpression(item.Type)
+			a.locals[item.Name] = true
 		case *ast.AssignStmt:
 			a.expression(item.Target)
 			a.expression(item.Value)
@@ -210,12 +263,14 @@ func (a *analysis) block(block *ast.BlockStmt) {
 		case *ast.ForStmt:
 			a.bindings = append(a.bindings, binding{"local", item.Init.Name, item.Init.Span})
 			a.expression(item.Init.Value)
+			a.locals[item.Init.Name] = true
 			a.expression(item.Cond)
 			if value, ok := item.Cond.(*ast.BoolExpr); ok && !value.Value {
 				a.diagnostics = append(a.diagnostics, warning("constant-condition", value.Span, "for condition is always false", "remove the loop or use a non-constant condition"))
 			}
 			a.block(item.Body)
 			a.block(&ast.BlockStmt{Stmts: []ast.Stmt{item.Post}})
+			delete(a.locals, item.Init.Name)
 		case *ast.ReturnStmt:
 			if item.Value != nil {
 				a.expression(item.Value)
@@ -239,6 +294,9 @@ func (a *analysis) expression(expression ast.Expr) {
 	switch item := expression.(type) {
 	case *ast.IdentExpr:
 		a.reads[item.Name] = true
+		if !a.locals[item.Name] && a.globals[item.Name] != nil {
+			a.refs[item.Name] = true
+		}
 	case *ast.UnaryExpr:
 		a.expression(item.X)
 	case *ast.BinaryExpr:

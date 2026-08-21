@@ -30,7 +30,7 @@ func TestDeadExpressionTreeIsRemoved(t *testing.T) {
 	a, err := parser.Parse("dead.tach", `
 @workgroup(1)
 export function dead[i](out: buffer<float32[]>) {
-  const unused = sin(2.0) * cos(3.0);
+  let unused = sin(2.0) * cos(3.0);
   if (i < out.length) { out[i] = 1.0; }
 }`)
 	if err != nil {
@@ -57,8 +57,8 @@ func TestRepeatedPureValuesAreCanonicalized(t *testing.T) {
 	kernel := optimized(t, "common.tach", `
 @workgroup(64)
 export function common[i](out: buffer<uint32[]>) {
-  const a = i + 1;
-  const b = i + 1;
+  let a = i + 1;
+  let b = i + 1;
   if (i < out.length) { out[i] = a + b; }
 }`)
 	dump := ir.Dump(kernel)
@@ -75,12 +75,12 @@ func TestImmutableMemoryValuesAreCanonicalized(t *testing.T) {
 type Params = { scale: float32 };
 @workgroup(1)
 export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, params: Params) {
-  const scale = params.scale + params.scale;
-  const length = values.length + values.length;
-  const immutable = source[0] + source[0];
-  const before = values[0];
+  let scale = params.scale + params.scale;
+  let length = values.length + values.length;
+  let immutable = source[0] + source[0];
+  let before = values[0];
   values[0] = scale;
-  const after = values[0];
+  let after = values[0];
   values[1] = before + after + immutable + float32(length);
 }`)
 	dump := ir.Dump(kernel)
@@ -97,8 +97,8 @@ func TestUnusedPureMemoryAndCallResultsAreRemoved(t *testing.T) {
 function square(x: float32): float32 { return x * x; }
 @workgroup(1)
 export function dead[i](out: buffer<float32[]>) {
-  const count = out.length;
-  const value = out[0];
+  let count = out.length;
+  let value = out[0];
   square(value);
   out[0] = 1.0;
 }`)

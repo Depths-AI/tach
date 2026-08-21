@@ -322,9 +322,10 @@ The host evaluates shapes with `uint32` range checks. Resource lengths come
 from the materialized byte length, runtime-tail offset, and stride. A dispatch
 axis or transient length must be positive.
 
-Parameter-block value sources can reference public values/paths, literal bool,
-`int32`, `uint32`, exact `float16` bits, or exact `float32` bits, a shape
-expression, or the command repeat count.
+Parameter-block value sources can reference public values/paths, a checked
+runtime shape expression, or the command repeat count. Source `const` arguments
+are substituted into a specialized physical stage before target planning, so
+they never occupy parameter-block leaves or runtime metadata.
 
 ## 8. Transient allocation and synchronization
 
@@ -530,11 +531,9 @@ interface Shape {
 }
 
 interface ValueSource {
-  kind: "parameter" | "bool" | "i32" | "u32" | "f16Bits" | "f32Bits"
-    | "shape" | "repeat";
+  kind: "parameter" | "shape" | "repeat";
   parameter: number;
   path?: string[];
-  value?: boolean | number;
   expression?: Shape;
 }
 

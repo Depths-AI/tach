@@ -32,16 +32,16 @@ function step[i](
   params: WaveParams,
 ) {
   if (i < source.length && i < destination.length) {
-    const x = i % params.width;
-    const y = i / params.width;
+    let x = i % params.width;
+    let y = i / params.width;
     if (x == 0 || y == 0 || x + 1 == params.width || y + 1 == params.height) {
       // A fixed zero boundary absorbs the stencil edge without wrapped reads.
       destination[i] = vec(0.0, 0.0);
     }else {
-      const current = source[i];
-      const laplacian = source[i - 1].x + source[i + 1].x + source[i - params.width].x
+      let current = source[i];
+      let laplacian = source[i - 1].x + source[i + 1].x + source[i - params.width].x
         + source[i + params.width].x - current.x * 4.0;
-      const velocity = (current.y + laplacian * params.stiffness * params.dt) * params.damping;
+      let velocity = (current.y + laplacian * params.stiffness * params.dt) * params.damping;
       destination[i] = vec(current.x + velocity * params.dt, velocity);
     }
   }

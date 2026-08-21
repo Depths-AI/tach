@@ -1,0 +1,1 @@
+{"name":"negative-constant-errors","version":"0.2.0","javascript":{"package":"@tach-negative/constant-errors"},"docs":{"title":"Compile-time constant errors","summary":"Runtime dependencies, calls, mutation, and invalid arithmetic in compile-time constants."}}

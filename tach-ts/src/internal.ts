@@ -546,21 +546,6 @@ function valueOf(
         source.path,
         "value parameter",
       );
-    case "bool":
-    case "i32":
-    case "u32":
-      return source.value;
-    case "f32Bits":
-      return new Float32Array(
-        new Uint32Array([checkedU32(source.value, "f32 bits")]).buffer,
-      )[0];
-    case "f16Bits": {
-      const bits = checkedU32(source.value, "f16 bits");
-      if (bits > 0xffff) throw new RangeError("f16 bits exceed uint16");
-      const bytes = new ArrayBuffer(2);
-      new DataView(bytes).setUint16(0, bits, true);
-      return new DataView(bytes).getFloat16(0, true);
-    }
     case "shape":
       return shapeValue(
         required(source.expression, "shape expression"),

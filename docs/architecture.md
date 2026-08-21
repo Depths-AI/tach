@@ -140,6 +140,7 @@ returns all independently recoverable lexical diagnostics.
 
 - file and declaration attributes;
 - explicit whole-file imports;
+- module and lexical compile-time constants;
 - types and fields;
 - helpers, indexed stages, and exported functions;
 - ordinary statements and structured control;
@@ -159,14 +160,16 @@ before local interfaces or bodies, while each source file receives only its
 own and directly imported declarations. Its order matters:
 
 1. normalize and validate structured documentation;
-2. collect type names, resolve fields, and reject layout-invalid cycles/tails;
-3. collect function signatures and roles;
-4. lower helpers and indexed stages to Kernel IR;
-5. infer buffer mutability from effects;
-6. reject helper recursion and verify Kernel IR;
-7. lower each exported function, including any terminal view, to a Flow IR
+2. collect type and constant names;
+3. resolve fields and reject layout-invalid cycles/tails;
+4. collect function signatures and roles;
+5. evaluate each referenced constant with ordinary Tach expression typing;
+6. lower helpers and indexed stages to Kernel IR;
+7. infer buffer mutability from effects;
+8. reject helper recursion and verify Kernel IR;
+9. lower each exported function, including any terminal view, to a Flow IR
    public program; and
-8. verify the complete Flow IR module.
+10. verify the complete Flow IR module.
 
 Parsing, type-field resolution, signature checking, function lowering, and
 program lowering use bounded goroutines. Results occupy canonical input slots
@@ -176,10 +179,13 @@ are byte-for-byte regression-tested; the entire suite also runs under the Go
 race detector.
 
 Lowering happens during checking because concrete choices are coupled to
-meaning. A literal needs a resolved type before it becomes a constant; a
-buffer projection becomes a typed place; local rebinding becomes structured
-SSA results; a `run` buffer becomes a resource/version edge; and a program
-shape becomes a checked host-evaluable expression.
+meaning. A source constant needs resolved expression types before it can become
+a canonical scalar/vector value; a buffer projection becomes a typed place;
+local rebinding becomes structured SSA results; a `run` buffer becomes a
+resource/version edge; and a program shape becomes a checked host-evaluable
+expression. Constant evaluation uses this same resolver and then interprets the
+temporary typed Kernel IR, so it cannot drift into a second type or intrinsic
+semantics.
 
 Numeric inference has one expression-local authority here. It resolves all
 operands of an operator or intrinsic together using explicit types, expected
@@ -233,18 +239,20 @@ Program
 ```
 
 An exported indexed function synthesizes one Flow program with one launch-axis
-shape and one dispatch. An exported unindexed function lowers its source
-`const`, `transient`, and `run` declarations directly. A `view<srgb8>` program
-also records the final runtime `vec<float32, 4>` resource version and checked width
-and height shapes. It may have no external resource when it constructs the
-complete frame in a transient.
+shape and one dispatch. An exported unindexed function lowers compiler-known
+`const`, runtime shape/transient `let`, and `run` declarations. A
+`view<srgb8>` program also records the final runtime `vec<float32, 4>` resource
+version and checked width and height shapes. It may have no external resource
+when it constructs the complete frame in a transient.
 
 Resource versions state dataflow explicitly. A mutable dispatch consumes one
 version and produces another. The verifier knows whether an initial or
 transient version is defined and rejects a read before a complete definition.
-Shapes refer to public uint values, runtime lengths, launch axes, constants,
-or checked arithmetic. Views reuse the same shapes; they do not introduce a
-second extent language.
+Shapes refer to public uint values, runtime lengths, launch axes, literal
+constants, or checked arithmetic. Source constants are evaluated before Flow
+construction; a constant used as a shape becomes the corresponding literal
+node. Views reuse the same shapes and do not introduce a second extent
+language.
 
 This layer is why bindings can expose one command for a multi-stage operation
 without encoding a dispatch graph by hand in TypeScript.
@@ -409,7 +417,7 @@ No target independently recalculates ABI offsets.
 
 Binary16 follows this same path: the logical type remains `float16`, canonical
 host layout assigns 2-byte scalar storage and vector-derived alignment, and
-metadata carries `f16`/exact `f16Bits`. The TypeScript codec uses
+metadata carries `f16` layouts. The TypeScript codec uses
 `Float16Array` and little-endian `DataView` binary16 operations rather than
 widening the storage contract. The only provider alignment wrinkle is a scalar
 `float16[]` whose logical byte extent is not divisible by four, either directly

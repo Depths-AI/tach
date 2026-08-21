@@ -284,7 +284,7 @@ func TestVisibilityIsDirectAndImportsExposeAllDeclarationRoles(t *testing.T) {
 func TestPublicProgramsRequireExternalBuffersAndFunctionRolesAreDiagnosed(t *testing.T) {
 	for name, source := range map[string]string{
 		"indexed buffer": `export function value[i](factor: float32) {}`,
-		"program buffer": `function stage[i](out: buffer<float32[]>) {} export function value(count: uint32) { const scratch = transient<float32>(count); run stage(scratch) over count; }`,
+		"program buffer": `function stage[i](out: buffer<float32[]>) {} export function value(count: uint32) { let scratch = transient<float32>(count); run stage(scratch) over count; }`,
 		"stage call":     `function stage[i](out: buffer<float32[]>) {} export function value[i](out: buffer<float32[]>) { stage(out); }`,
 		"program call":   `function stage[i](out: buffer<float32[]>) {} export function program(out: buffer<float32[]>, count: uint32) { run stage(out) over count; } export function value[i](out: buffer<float32[]>) { program(out, out.length); }`,
 	} {
@@ -431,11 +431,13 @@ func TestNegativeExamplesAttestStructuredErrorsAndWarnings(t *testing.T) {
 		"manifest-error":       {true, []string{"manifest"}},
 		"name-and-type-errors": {true, []string{"semantic"}},
 		"control-flow-errors":  {true, []string{"semantic"}},
+		"constant-errors":      {true, []string{"semantic"}},
+		"constant-cycle":       {true, []string{"semantic"}},
 		"documentation-errors": {true, []string{"semantic"}},
 		"divergent-barrier":    {true, []string{"semantic"}},
 		"missing-import":       {true, []string{"import"}},
 		"name-collision":       {true, []string{"name"}},
-		"dead-code":            {false, []string{"discarded-value", "unreachable-function", "unused-binding"}},
+		"dead-code":            {false, []string{"discarded-value", "unreachable-function", "unused-binding", "unused-constant"}},
 		"launch-and-control":   {false, []string{"constant-condition", "zero-dispatch"}},
 		"memory-access":        {false, []string{"constant-write-index", "strided-access"}},
 		"no-effect-kernel":     {false, []string{"no-effect-kernel", "unused-binding"}},
@@ -549,6 +551,68 @@ func TestWarningsRespectImportsReachabilityAndControl(t *testing.T) {
 	}
 	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Kind != "no-effect-kernel" {
 		t.Fatalf("shared-memory diagnostics = %#v", result.Diagnostics)
+	}
+}
+
+func TestCompileTimeConstantsRespectImportsAndNeverReachHostArtifacts(t *testing.T) {
+	root := projectFixture(t, map[string]string{
+		"library/constants.tach": `const tileWidth: uint32 = 8;`,
+		"app/main.tach": `import "library/constants";
+@workgroup(tileWidth)
+export function tiled[i](out: buffer<uint32[]>) {
+  let scratch: shared<uint32[tileWidth * tileWidth]>;
+  let lane = i % tileWidth;
+  scratch[lane] = i;
+  workgroupBarrier();
+  if (i < out.length) { out[i] = scratch[lane]; }
+}`,
+	})
+	result, err := Check(root, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("constant import warnings = %#v", result.Diagnostics)
+	}
+	for name, artifact := range map[string][]byte{
+		"WGSL":        []byte(result.WGSL),
+		"metadata":    result.MetadataJSON,
+		"description": result.Description,
+	} {
+		if bytes.Contains(artifact, []byte("tileWidth")) {
+			t.Errorf("%s leaked Tach-only constant name: %s", name, artifact)
+		}
+	}
+
+	root = projectFixture(t, map[string]string{
+		"library/constants.tach": `const privateWidth = 8;`,
+		"app/main.tach":          `export function hidden[i](out: buffer<uint32[]>) { out[i] = privateWidth; }`,
+	})
+	if _, err := Check(root, 2); err == nil || !strings.Contains(err.Error(), `unknown identifier "privateWidth"`) {
+		t.Fatalf("missing-import constant error = %v", err)
+	}
+
+	root = projectFixture(t, map[string]string{
+		"app/main.tach": `const Value = 1; type Value = { item: uint32 };`,
+	})
+	if _, err := Check(root, 1); err == nil || !strings.Contains(err.Error(), `project declaration "Value" is already defined`) {
+		t.Fatalf("constant declaration collision = %v", err)
+	}
+
+	root = projectFixture(t, map[string]string{
+		"library/constants.tach": `const localWidth = 8;`,
+		"app/main.tach":          `export function local[i](out: buffer<uint32[]>) { const localWidth = 4; if (i < out.length) { out[i] = localWidth; } }`,
+	})
+	result, err = Check(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, diagnostic := range result.Diagnostics {
+		found = found || diagnostic.Kind == "unused-constant"
+	}
+	if !found {
+		t.Fatalf("unimported constant was incorrectly marked reachable: %#v", result.Diagnostics)
 	}
 }
 
@@ -669,7 +733,7 @@ func FuzzFormatterPreservesSyntaxAndStabilizes(f *testing.F) {
 		`// comment
 @docs(summary("Scales.")) @workgroup(64) export function scale[i](out: buffer<float32[]>, factor: float32,) { if (!false && i < out.length) { out[i] = factor < 0.0 ? -factor : factor; } }`,
 		`import "base/data"; function value(x: float32): float32 { return (~uint32(x) & 3) == 0 ? -x : x; }`,
-		`function fill[i](out: buffer<vec<float32, 4>[]>) { if (i < out.length) { out[i] = vec(1, 2, 3, 4); } } export function make() { const out = transient<vec<float32, 4>>(4); run fill(out) over 4; }`,
+		`function fill[i](out: buffer<vec<float32, 4>[]>) { if (i < out.length) { out[i] = vec(1, 2, 3, 4); } } export function make() { let out = transient<vec<float32, 4>>(4); run fill(out) over 4; }`,
 	} {
 		f.Add(seed)
 	}

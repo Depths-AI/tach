@@ -1,24 +1,19 @@
 # Tach application instructions: mini edition
 
-This is the default dense context emitted by `tach instructions` for AI agents
-using Tach through the published `@depths/tach` npm package. It gives a complete
-working model, while each `§N` reference identifies one canonical detail chunk
-containing exact tables, examples, edge cases, and procedures. Fetch only what
-the task needs with `tach instructions --details N [N ...]`; the numbered
-chunks are the authoritative expansion of this compact guide.
+This is the dense AI-agent context emitted by `tach instructions`. Each `§N`
+points to an authoritative detail chunk in the published `@depths/tach`
+package. Fetch only needed chunks with
+`tach instructions --details N [N ...]`.
 
 ## 1. Mental model
 
-Tach is a typed portable GPU-compute language, not TypeScript, WGSL, GLSL, CUDA,
-or a shader preprocessor. Tach owns parallel numerical work, dispatch structure,
-bindings, layout, display projection, and target validation. TypeScript owns
-application control, I/O, sessions, recipe selection, submission, and genuine
-readback. Generated functions construct opaque recipes; they do not execute.
-`submit` queues work, while browser `present` executes a `ComputeView` directly
-to a canvas and supplies frame backpressure. `read`, `idle`, scoped exit, and
-`present` are completion boundaries. The identical imports use WebGPU in
-browsers and Tach-owned Vulkan 1.3 in Deno, which requires Synchronization2,
-zero-initialized workgroup memory, and the Vulkan memory model. See §1:
+Tach is a typed portable GPU-compute language, not TypeScript or shader source.
+Tach owns parallel work, dispatch, layout, projection, and target validation;
+TypeScript owns application control, I/O, sessions, recipes, submission, and
+readback. Generated functions construct recipes, not execution. `submit` queues;
+browser `present` executes a `ComputeView` with frame backpressure. `read`,
+`idle`, scoped exit, and `present` complete work. Identical imports use WebGPU
+in browsers and Tach-owned Vulkan 1.3 in Deno. See §1:
 operational model and §2: complete quick start.
 
 Default to the smallest valid form:
@@ -52,8 +47,8 @@ and non-transitive; import every owner whose declaration this file names. See
 §6: imports, and
 §7: visibility.
 
-All top-level type and function names share one project-global namespace.
-Public names must also be portable TypeScript identifiers. Both file and
+All top-level constant, type, and function names share one project-global
+namespace. Public names must also be portable TypeScript identifiers. Both file and
 collapsed-module dependency graphs must be DAGs; opposite cross-module edges
 are invalid even without a literal file cycle. See §8: names
 and §9: DAGs.
@@ -64,7 +59,8 @@ File order is: optional file `@docs(...);`, contiguous imports, declarations.
 Every `@docs` needs `summary`. File docs may add `title`; type docs may add
 `field`; function docs may add `param`; indexed functions may add `coordinate`;
 value-returning helpers and view programs may add `returns`. Referenced
-identifiers are checked.
+identifiers are checked. Constants cannot carry `@docs` because they have no
+generated API surface.
 Use `//` only for local implementation reasoning; block comments do not exist.
 See §10: file anatomy,
 §11: structured docs, and
@@ -82,8 +78,8 @@ come from checked source docs; edit source, never generated output. See
 Helpers accept/return constructible values only; no buffers, shared memory,
 barriers, indexed calls, or recursion. Indexed stages have one to three
 immutable `uint32` coordinates, at least one buffer, no value result, and may
-call helpers. Explicit public programs contain only untyped `const` shape or
-transient declarations and `run stage(...) over domain;`, plus the required
+call helpers. Explicit public programs contain compile-time `const`, runtime
+shape/transient `let`, and `run stage(...) over domain;`, plus the required
 final `return view(pixels, width, height);` when declared `view<srgb8>`. They
 contain no ordinary control flow and cannot be called from Tach. Ordinary
 programs need an external buffer; a view may be scalar-only with a transient
@@ -94,19 +90,22 @@ frame. See
 
 Default workgroups are 1D `256x1x1`, 2D `16x16x1`, and 3D `8x8x4`. Use
 `@workgroup` only when exact geometry, shared memory, or barriers require it;
-maximum total lanes are 256. Dispatches round up, so source must guard every
-possible edge access. See §20: domains,
+maximum total lanes are 256. Workgroup axes may be positive compile-time
+`uint32` expressions. Dispatches round up, so source must guard every possible
+edge access. See §20: domains,
 §21: workgroups, and
 §22: edge guards.
 
 Indexed shorthand takes rank-matching host `size`; 1D may infer from the first
 runtime-sized public buffer, otherwise omission means one workgroup. Explicit
-programs derive domains in Tach and never accept host size. Program shapes are
-checked `uint32` expressions; zero, underflow, overflow, or division by zero is
-a runtime error. `run` buffer arguments directly name public buffers or
-transients. Transients are not zero-initialized and must be defined before
-read. Every `run` is a distinct ordered dispatch; assume no stage fusion. A
-terminal view conversion alone may fold into its proven final writer. See
+programs derive domains in Tach and never accept host size. Runtime program
+shapes are checked `uint32` expressions; zero, underflow, overflow, or division
+by zero is a runtime error. `run` buffer arguments directly name public buffers
+or transients. Compile-time `run` value arguments specialize the physical stage
+and disappear before runtime metadata. Transients are not zero-initialized and
+must be defined before read. Every `run` is a distinct ordered dispatch; assume
+no stage fusion. A terminal view conversion alone may fold into its proven
+final writer. See
 §23: size inference,
 §24: shapes, and
 §25: transients.
@@ -116,11 +115,11 @@ terminal view conversion alone may fold into its proven final writer. See
 Scalars are `bool`, `int32`, `uint32`, `float16`, `float32`, and helper-only
 `void`. Numeric vectors are solely `vec<T, N>`, with `N` 2–4. Only `vec(...)`
 constructs them, flattening exactly 2–4 scalar/vector lanes without conversion.
-Structs are
-named value types with exact fields; literal order is irrelevant, declaration
-order affects storage. Runtime `T[]` occurs only directly in a buffer or as a
-struct's final field and cannot move as one value. Fixed `T[N]` is shared-memory
-only. See §26: scalars,
+Structs are named value types with exact fields; literal order is irrelevant,
+declaration order affects storage. Runtime `T[]` occurs only directly in a
+buffer or as a struct's final field and cannot move as one value. Fixed `T[N]`
+is shared-memory only and requires a positive compile-time `uint32` length. See
+§26: scalars,
 §27: vectors,
 §28: structs, and
 §29: arrays.
@@ -132,17 +131,13 @@ sRGB conversion; WebGPU stores it as an `rgba8unorm` texel and Vulkan as that
 word. Source never packs display bytes or names provider objects. See §18: view
 programs and §26: type boundary.
 
-`buffer<T>` is addressable GPU storage; access is inferred. Distinct public
-buffer parameters must receive distinct handles. Express in-place work with one
-parameter. Host values must match generated `index.d.ts`: numeric scalars are
-numbers, vectors are tuples, structs are readonly objects, compatible arrays
-may be typed arrays, and three-lane vector arrays must be tuple arrays because
-of padding. `float16[]` uses `Float16Array` and remains binary16 across both
-backends. It has roughly three decimal digits of precision and a maximum finite
-magnitude of 65504, so use it only with an explicit error/range budget. Hosts
-enable supported optional Float16 functionality; each generated module records
-its exact WebGPU/Vulkan requirements, and unsupported commands fail preparation.
-Never add source padding or hand-pack buffers. See
+`buffer<T>` is addressable GPU storage with inferred access. Distinct public
+parameters need distinct handles; use one parameter for in-place work. Match
+generated `index.d.ts`: scalars are numbers, vectors tuples, structs readonly
+objects, and compatible arrays typed arrays; padded three-lane vectors require
+tuple arrays. `float16[]` is `Float16Array` and remains binary16, with roughly
+three decimal digits and maximum finite magnitude 65504. Generated requirements
+gate optional Float16 support. Never pad or hand-pack source values. See
 §30: buffers,
 §31: non-aliasing,
 §32: host shapes, and
@@ -154,9 +149,17 @@ whole literals default to `uint32`, negative whole literals to `int32`, and
 fractions to `float32`. Scalar constructors convert; binary16 is never inferred.
 `vec(...)` takes its element type from context or typed arguments, never
 converts values, and has no splat form.
-Prefer `const`; shadowing is forbidden. Nearest-loop `break`/`continue` is
-supported. FP16/FP32 `fma` permits scalar broadcast and expresses multiply-add,
-not instruction count. See §34: literals,
+
+`const` means compiler-evaluated scalar/vector algebra, never runtime
+immutability. Module constants follow direct imports and may reference visible
+module constants in any order; local constants see module constants and earlier
+lexical constants only. They may use ordinary typed operators, conversions,
+conditionals, pure math including `fma`, vector construction, indexing, and
+swizzles. They cannot depend on parameters, coordinates, buffers, runtime
+`let`, structs, transients, atomics, barriers, or user calls. Cycles, zero
+integer divisors, invalid signed division, and non-finite float results are
+compile errors. `let` is the sole mutable runtime local. Shadowing is forbidden.
+Nearest-loop `break`/`continue` is supported. See §34: literals,
 §35: conversion,
 §36: scope,
 §37: operators,
@@ -197,11 +200,10 @@ tach version
 tach help | --help | -h
 ```
 
-Project commands discover the nearest project. `build` replaces `build/` with
-the complete browser/Deno package; `--verbose` adds diagnostics. `check`
-validates both hosts without writes. `docs` refreshes Markdown without changing
-compiled artifacts. `fmt` is project-wide and transactional. `instructions`
-works anywhere. Normal order is `fmt -> check -> build`. See
+Project commands discover the nearest project. `build` replaces `build/`;
+`--verbose` adds diagnostics. `check` validates both hosts without writes,
+`docs` refreshes Markdown, and `fmt` is project-wide and transactional.
+`instructions` works anywhere. Use `fmt -> check -> build`. See
 §46: formatting,
 §47: CLI, and
 §48: validation.
@@ -227,10 +229,9 @@ and §67: distribution.
 ## 8. Unified managed runtime
 
 Choose `tach(work, options?)` for scoped ownership or `tach(options?)` for a
-persistent session. Scoped jobs wait and close automatically; return host data,
-never a session-owned buffer. Persistent sessions require `try/finally`, an
-optional `idle()` before graceful closure, and `close()`. Host selection is
-automatic and `gpu.adapter.backend` reports `webgpu` or `vulkan`. See
+persistent session. Scoped jobs wait and close; return host data, never owned
+buffers. Persistent sessions require `try/finally` and `close()`, optionally
+`idle()` first. `gpu.adapter.backend` reports `webgpu` or `vulkan`. See
 §53: sessions and
 §54: API.
 

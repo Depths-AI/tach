@@ -88,18 +88,9 @@ export interface ShapeExpression {
   readonly right?: ShapeExpression;
 }
 export interface ValueSource {
-  readonly kind:
-    | "parameter"
-    | "bool"
-    | "i32"
-    | "u32"
-    | "f16Bits"
-    | "f32Bits"
-    | "shape"
-    | "repeat";
+  readonly kind: "parameter" | "shape" | "repeat";
   readonly parameter?: number;
   readonly path?: readonly string[];
-  readonly value?: number | boolean;
   readonly expression?: ShapeExpression;
 }
 export interface ResourceSource {

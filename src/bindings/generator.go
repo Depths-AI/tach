@@ -147,7 +147,6 @@ type ValueSource struct {
 	Kind       string           `json:"kind"`
 	Parameter  int              `json:"parameter"`
 	Path       []string         `json:"path,omitempty"`
-	Value      any              `json:"value,omitempty"`
 	Expression *ShapeExpression `json:"expression,omitempty"`
 }
 
@@ -444,21 +443,13 @@ func valueSource(program *flow.Program, argument flow.ValueArgument, fieldPath [
 	switch argument.Kind {
 	case flow.ValueParameterRef:
 		return ValueSource{Kind: "parameter", Parameter: argument.Parameter, Path: append(append([]string(nil), argument.Path...), fieldPath...)}, nil
-	case flow.ValueBool:
-		return ValueSource{Kind: "bool", Value: argument.Bits != 0}, nil
-	case flow.ValueI32:
-		return ValueSource{Kind: "i32", Value: int32(argument.Bits)}, nil
-	case flow.ValueU32:
-		return ValueSource{Kind: "u32", Value: argument.Bits}, nil
-	case flow.ValueF16Bits:
-		return ValueSource{Kind: "f16Bits", Value: argument.Bits}, nil
-	case flow.ValueF32Bits:
-		return ValueSource{Kind: "f32Bits", Value: argument.Bits}, nil
 	case flow.ValueShape:
 		expression, err := shapeExpression(program, argument.Shape)
 		return ValueSource{Kind: "shape", Expression: &expression}, err
 	case flow.ValueRepeat:
 		return ValueSource{Kind: "repeat"}, nil
+	case flow.ValueConstant:
+		return ValueSource{}, fmt.Errorf("compile-time constant reached runtime metadata")
 	default:
 		return ValueSource{}, fmt.Errorf("invalid value source")
 	}

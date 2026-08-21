@@ -216,16 +216,25 @@ func validValue(p *Program, value ValueArgument, want *types.Type) bool {
 	switch value.Kind {
 	case ValueParameterRef:
 		return value.Parameter >= 0 && value.Parameter < len(p.Parameters) && p.Parameters[value.Parameter].Kind == ValueParameter && types.Equal(pathType(p.Parameters[value.Parameter].Type, value.Path), want)
-	case ValueBool:
-		return want.Kind == types.Bool && value.Bits <= 1
-	case ValueI32:
-		return want.Kind == types.I32
-	case ValueU32, ValueRepeat:
+	case ValueConstant:
+		if value.Constant == nil || !types.Equal(value.Constant.Type, want) {
+			return false
+		}
+		lanes, element := 1, want
+		if want.Kind == types.Vector {
+			lanes, element = want.Lanes, want.Elem
+		}
+		if len(value.Constant.Bits) != lanes {
+			return false
+		}
+		for _, bits := range value.Constant.Bits {
+			if element.Kind == types.Bool && bits > 1 || element.Kind == types.F16 && bits > 0xffff {
+				return false
+			}
+		}
+		return true
+	case ValueRepeat:
 		return want.Kind == types.U32
-	case ValueF16Bits:
-		return want.Kind == types.F16 && value.Bits <= 0xffff
-	case ValueF32Bits:
-		return want.Kind == types.F32
 	case ValueShape:
 		return want.Kind == types.U32 && p.Shape(value.Shape) != nil
 	default:

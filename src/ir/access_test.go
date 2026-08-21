@@ -31,11 +31,11 @@ func TestAccessSummaryRecognizesIdentityOffsetAndOpaque(t *testing.T) {
 	if !identity.CompleteWrite || len(identity.Accesses) != 1 || identity.Accesses[0].Indices[0].Coefficient != [3]int64{1, 0, 0} {
 		t.Fatalf("identity = %#v", identity)
 	}
-	offset := ir.AnalyzeAccess(stage(t, `const value = data[i + uint32(2)]; data[i] = value;`)).Buffers[0]
+	offset := ir.AnalyzeAccess(stage(t, `let value = data[i + uint32(2)]; data[i] = value;`)).Buffers[0]
 	if got := offset.Accesses[0].Indices[0].Constant; got != 2 {
 		t.Fatalf("offset = %d", got)
 	}
-	opaque := ir.AnalyzeAccess(stage(t, `const value = data[data[i]]; data[i] = value;`)).Buffers[0]
+	opaque := ir.AnalyzeAccess(stage(t, `let value = data[data[i]]; data[i] = value;`)).Buffers[0]
 	if opaque.Accesses[1].Indices[0].Exact {
 		t.Fatalf("opaque = %#v", opaque)
 	}
@@ -50,7 +50,7 @@ func TestAccessSummaryTracksEffectsAndGuardedCompleteWrite(t *testing.T) {
 	if !barrier.Effects.Barrier || !barrier.Effects.Workgroup {
 		t.Fatalf("barrier = %#v", barrier)
 	}
-	shared := ir.AnalyzeAccess(stage(t, `let scratch: shared<uint32[4]>; scratch[0] = 7; const value = scratch[0];`))
+	shared := ir.AnalyzeAccess(stage(t, `let scratch: shared<uint32[4]>; scratch[0] = 7; let value = scratch[0];`))
 	if !shared.Effects.Workgroup || shared.Effects.Memory || shared.Buffers[0].Read || shared.Buffers[0].Write || shared.Buffers[0].CompleteWrite || len(shared.Buffers[0].Accesses) != 0 {
 		t.Fatalf("shared memory polluted storage buffer summary = %#v", shared)
 	}

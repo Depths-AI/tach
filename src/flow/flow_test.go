@@ -29,7 +29,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>) {
   if (i < pixels.length) { pixels[i] = vec(0.0, 0.0, 0.0, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)
@@ -67,6 +67,33 @@ func TestVerifierRejectsVersionAndShapeMutations(t *testing.T) {
 		if err := flow.Verify(m); err == nil {
 			t.Fatal("accepted malformed Flow IR")
 		}
+	}
+}
+
+func TestConstantArgumentsCloneAndVerifyCanonically(t *testing.T) {
+	a, err := parser.Parse("constant.tach", `
+function fill[i](out: buffer<uint32[]>, value: uint32) {
+  if (i < out.length) { out[i] = value; }
+}
+export function filled(out: buffer<uint32[]>) {
+  run fill(out, 7) over out.length;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	constant := m.Programs[0].Dispatches[0].Values[0].Constant
+	clone := flow.Clone(m)
+	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits[0] = 8
+	if constant.Bits[0] != 7 {
+		t.Fatal("constant clone aliases the original bits")
+	}
+	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits = nil
+	if err := flow.Verify(clone); err == nil {
+		t.Fatal("accepted malformed constant argument")
 	}
 }
 

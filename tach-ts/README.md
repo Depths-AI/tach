@@ -334,7 +334,7 @@ export function brighten[x, y](
   amount: float32,
 ) {
   if (x < width && y < height) {
-    const i = y * width + x;
+    let i = y * width + x;
     if (i < pixels.length) {
       pixels[i] = pixels[i] + vec(amount, amount, amount, 0.0);
     }
@@ -467,7 +467,7 @@ export function transform(
   output: buffer<float32[]>,
   count: uint32,
 ) {
-  const scratch = transient<float32>(count);
+  let scratch = transient<float32>(count);
   run doubleValues(input, scratch) over count;
   run addOne(scratch, output) over count;
 }
@@ -493,8 +493,11 @@ underflow, overflow, division by zero, and invalid resource lengths are runtime
 errors instead of silently malformed launches.
 
 A shape may use `uint32` literals, public `uint32` parameters or nested fields,
-runtime-array `.length`, an earlier shape `const`, arithmetic, and `min`, `max`,
-or `ceilDiv`. A 2D or 3D stage uses `over [x, y]` or `over [x, y, z]`.
+runtime-array `.length`, an earlier runtime shape `let`, arithmetic, and `min`,
+`max`, or `ceilDiv`. A 2D or 3D stage uses `over [x, y]` or
+`over [x, y, z]`. A compile-time constant may also supply a stage value; Tach
+specializes that stage before either backend is emitted, so the value never
+appears in the generated TypeScript call or runtime parameter block.
 Stage buffer arguments directly name a public buffer or transient, keeping
 resource identity explicit.
 
@@ -518,17 +521,17 @@ type Frame = {
 
 function shade[i](pixels: buffer<vec<float32, 4>[]>, frame: Frame) {
   if (i < pixels.length) {
-    const x = i % frame.width;
-    const y = i / frame.width;
-    const u = float32(x) / float32(frame.width);
-    const v = float32(y) / float32(frame.height);
-    const pulse = 0.5 + 0.5 * sin(frame.time);
+    let x = i % frame.width;
+    let y = i / frame.width;
+    let u = float32(x) / float32(frame.width);
+    let v = float32(y) / float32(frame.height);
+    let pulse = 0.5 + 0.5 * sin(frame.time);
     pixels[i] = vec(u * pulse, v, 0.25, 1.0);
   }
 }
 
 export function render(frame: Frame): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(frame.width * frame.height);
+  let pixels = transient<vec<float32, 4>>(frame.width * frame.height);
   run shade(pixels, frame) over pixels.length;
   return view(pixels, frame.width, frame.height);
 }
@@ -659,7 +662,7 @@ A source file has one canonical order:
 
 1. optional file-level `@docs(...)`;
 2. one contiguous block of imports; and
-3. type and function declarations.
+3. constant, type, and function declarations.
 
 Type, function, parameter, field, and coordinate names use portable
 identifiers. Module and kernel identities are import strings, so their folder
@@ -674,9 +677,10 @@ Visibility is explicit and non-transitive:
 - importing a file does not also expose that file's imports; and
 - `export` does not affect Tach-side visibility.
 
-All top-level type and function names share one project-global namespace.
-Duplicate names are errors even when they live in unrelated modules. This keeps
-the singular generated TypeScript namespace obvious.
+All top-level constant, type, and function names share one project-global
+namespace. Duplicate names are errors even when they live in unrelated modules.
+Constants remain Tach-only; the global rule still makes every source reference
+unambiguous.
 
 Both file dependencies and collapsed module dependencies must be DAGs. Tach
 rejects file cycles and opposite cross-module edges. Independent subtrees can
@@ -744,7 +748,7 @@ export function accelerate[i](
   force: vec<float32, 4>,
 ) {
   if (i < particles.length) {
-    const particle = particles[i];
+    let particle = particles[i];
     particles[i] = {
       position: particle.position,
       velocity: particle.velocity + force / particle.mass,
@@ -771,7 +775,8 @@ Do not put manual padding fields in source or host objects.
 
 - `T[]` is a runtime-sized storage array. It appears directly in a buffer or as
   the final field of a buffered struct.
-- `T[N]` is a fixed array used for workgroup-shared memory.
+- `T[N]` is a fixed array used for workgroup-shared memory; `N` is a positive
+  compile-time `uint32` expression.
 - Runtime arrays do not move around as ordinary values.
 
 Scalar arrays use matching typed arrays naturally:
@@ -825,8 +830,51 @@ validated.
 
 ## 11. Variables, control flow, and math
 
-`const` declares an immutable local. `let` declares a mutable local. Shadowing
-is rejected so every name has one obvious meaning.
+Tach has one runtime local, `let`, and one compiler-evaluated declaration,
+`const`. They are execution categories, not two runtime immutability styles.
+`let` may be reassigned and may depend on parameters, coordinates, buffers, or
+earlier runtime work. Even when its initializer is a literal, it remains a
+runtime declaration. Function parameters and coordinates cannot be assigned.
+
+`const` may appear at module scope or inside a function. It produces a `bool`,
+numeric scalar, or numeric vector entirely during `tach check`/`tach build`:
+
+```tach
+const tileWidth: uint32 = 16;
+
+@workgroup(tileWidth)
+export function tiled[i](out: buffer<uint32[]>) {
+  const tileArea = tileWidth * tileWidth;
+  const direction = normalize(vec(3.0, 4.0, 0.0));
+  let partial: shared<uint32[tileArea]>;
+  let lane = i % tileArea;
+  partial[lane] = i;
+  workgroupBarrier();
+  if (i < out.length) {
+    out[i] = uint32(direction.x * float32(partial[lane]));
+  }
+}
+```
+
+Module constants may reference visible module constants in any declaration
+order and follow the same direct-import rule as types and functions. Local
+constants may reference module constants and earlier lexical constants, never a
+later local. Constant dependency cycles are errors.
+
+The constant algebra is ordinary typed Tach expression algebra: literals,
+constant references, unary/binary/conditional operators, scalar conversions,
+`vec(...)`, swizzles, vector indexing, and pure math/vector intrinsics including
+`fma`. It excludes parameters, coordinates, `let`, buffers, structs, runtime
+arrays, transient allocation, atomics, barriers, and user-function calls.
+Integer arithmetic has Tach's 32-bit wrapping and masked-shift semantics.
+Invalid integer division and any non-finite Float16/Float32 result are compile
+errors.
+
+The compiler substitutes each value at all uses. Constants can drive workgroup
+dimensions, shared-array lengths, loop bounds, ordinary math, and constant
+`run` arguments with one meaning. They have no generated JavaScript/TypeScript
+identity. Unused constants are warnings. Shadowing is rejected so every name
+has one obvious meaning.
 
 Indexed functions support:
 
@@ -963,6 +1011,10 @@ the additional valid clauses:
 | function | checked `param` entries |
 | indexed function | function clauses plus checked `coordinate` entries |
 | value helper or view program | function clauses plus `returns` |
+
+Constants cannot carry `@docs` because they do not become generated API
+members. Use a precise name and an adjacent `//` comment for implementation
+context; document the resulting public behavior on its type or function.
 
 The compiler carries descriptions into:
 
@@ -1374,7 +1426,7 @@ local "discarded" is never used
 
 --> kernels/image.tach:8:3
   |
-8 |   const discarded = 1;
+8 |   let discarded = 1;
   |   ^^^^^^^^^^^^^^^^^^^^
 
 - help: remove the binding or use its value
@@ -1393,9 +1445,10 @@ Current warnings are deliberately conservative:
 |---|---|
 | `unused-import` | no declaration from an imported file is referenced |
 | `unused-binding` | a parameter, index, local, or shared variable is never used |
+| `unused-constant` | a module constant is never referenced |
 | `unreachable-function` | a private function is outside every exported dependency graph |
 | `discarded-value` | a pure expression is evaluated and ignored |
-| `constant-condition` | an `if` or conditional expression is fixed, or a loop is statically false |
+| `constant-condition` | a literal `if`/conditional condition is fixed, or a loop condition is literal `false` |
 | `zero-dispatch` | a literal launch axis prevents a stage from running |
 | `no-effect-kernel` | a reachable kernel cannot affect externally visible memory |
 | `constant-write-index` | an unconditional non-atomic write address is invocation-independent |

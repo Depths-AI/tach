@@ -172,7 +172,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>) {
   if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`)
@@ -227,9 +227,9 @@ func TestLogicalIndicesAreOptimizedAfterWGSLBackendLowering(t *testing.T) {
 	a, err := parser.Parse("coordinates.tach", `
 @workgroup(16, 8)
 export function coordinates[x, y](out: buffer<uint32[]>) {
-  const localX = x % 16;
-  const localY = y % 8;
-  const local = localY * 16 + localX;
+  let localX = x % 16;
+  let localY = y % 8;
+  let local = localY * 16 + localX;
   out[local] = local + x + y;
 }`)
 	if err != nil {

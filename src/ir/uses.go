@@ -188,3 +188,97 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 	}
 	return values, places, block(f.Body)
 }
+
+// RewriteOperands rewrites one instruction's uses without touching definitions.
+func RewriteOperands(instruction Instr, value func(ValueID) ValueID, place func(PlaceID) PlaceID) {
+	switch item := instruction.(type) {
+	case *Unary:
+		item.X = value(item.X)
+	case *Binary:
+		item.Left, item.Right = value(item.Left), value(item.Right)
+	case *Intrinsic:
+		for index := range item.Args {
+			item.Args[index] = value(item.Args[index])
+		}
+	case *Convert:
+		item.X = value(item.X)
+	case *Composite:
+		for index := range item.Values {
+			item.Values[index] = value(item.Values[index])
+		}
+	case *Extract:
+		item.Base = value(item.Base)
+	case *VectorIndex:
+		item.Base, item.Index = value(item.Base), value(item.Index)
+	case *Call:
+		for index := range item.Args {
+			item.Args[index] = value(item.Args[index])
+		}
+	case *PlaceIndex:
+		item.Base, item.Index = place(item.Base), value(item.Index)
+	case *PlaceField:
+		item.Base = place(item.Base)
+	case *Load:
+		item.Place = place(item.Place)
+	case *Store:
+		item.Place, item.Value = place(item.Place), value(item.Value)
+	case *ArrayLength:
+		item.Place = place(item.Place)
+	case *Atomic:
+		item.Place, item.Value = place(item.Place), value(item.Value)
+	case *If:
+		item.Cond = value(item.Cond)
+	case *Loop:
+		for index := range item.Params {
+			item.Params[index].Init = value(item.Params[index].Init)
+		}
+	}
+}
+
+func RewriteTerm(term Term, value func(ValueID) ValueID) {
+	var values []ValueID
+	switch item := term.(type) {
+	case *Yield:
+		values = item.Values
+	case *Continue:
+		values = item.Values
+	case *Break:
+		values = item.Values
+	case *Return:
+		if item.HasValue {
+			item.Value = value(item.Value)
+		}
+	}
+	for index := range values {
+		values[index] = value(values[index])
+	}
+}
+
+// ReplaceValueUses rewrites every operand without touching its definition.
+func ReplaceValueUses(function *Function, replacements map[ValueID]ValueID) {
+	value := func(id ValueID) ValueID {
+		if replacement := replacements[id]; replacement != 0 {
+			return replacement
+		}
+		return id
+	}
+	place := func(id PlaceID) PlaceID { return id }
+	var block func(*Block)
+	block = func(body *Block) {
+		for _, instruction := range body.Instrs {
+			RewriteOperands(instruction, value, place)
+			switch item := instruction.(type) {
+			case *If:
+				block(item.Then)
+				block(item.Else)
+			case *Loop:
+				block(item.Cond)
+				block(item.Body)
+			case *Scope:
+				block(item.Body)
+			}
+		}
+		RewriteTerm(body.Term, value)
+	}
+	block(function.Body)
+}

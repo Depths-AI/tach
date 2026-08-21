@@ -1,0 +1,5 @@
+const first = second + 1;
+const second = first + 1;
+export function cycle[i](out: buffer<uint32[]>) {
+  out[i] = first;
+}

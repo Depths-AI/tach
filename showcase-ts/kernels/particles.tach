@@ -29,8 +29,8 @@ function attraction(
   strength: float32,
   softening: float32,
 ): vec<float32, 3> {
-  const offset = center - position;
-  const inverse = rsqrt(dot(offset, offset) + softening);
+  let offset = center - position;
+  let inverse = rsqrt(dot(offset, offset) + softening);
   return offset * (strength * inverse * inverse * inverse);
 }
 
@@ -47,12 +47,12 @@ export function particleDynamics[i](
   params: ParticleParams,
 ) {
   if (i < positions.length && i < velocities.length) {
-    const oldPosition = positions[i];
-    const oldVelocity = velocities[i];
-    const position = oldPosition.xyz;
-    const time = params.time + oldVelocity.w;
+    let oldPosition = positions[i];
+    let oldVelocity = velocities[i];
+    let position = oldPosition.xyz;
+    let time = params.time + oldVelocity.w;
     // Mixed moving and repulsive centers keep the field spatially irregular.
-    const acceleration = attraction(
+    let acceleration = attraction(
       position,
       vec(sin(time * 0.7) * 3.2, cos(time * 0.5) * 2.4, sin(time * 0.3) * 2.0),
       5.5,
@@ -70,10 +70,10 @@ export function particleDynamics[i](
       4.4,
       params.softening,
     ) + attraction(position, vec(0.0, 3.8, -3.5), -1.2, params.softening);
-    const velocity = (oldVelocity.xyz + acceleration * params.dt) * 0.9994;
-    const next = position + velocity * params.dt;
-    const absolute = abs(next);
-    const boundedPosition = vec(
+    let velocity = (oldVelocity.xyz + acceleration * params.dt) * 0.9994;
+    let next = position + velocity * params.dt;
+    let absolute = abs(next);
+    let boundedPosition = vec(
       absolute.x > 12.0
         ? (next.x > 0.0
         ? 12.0 : -12.0) : next.x,
@@ -82,7 +82,7 @@ export function particleDynamics[i](
         ? 12.0 : -12.0) : next.y,
       absolute.z > 12.0 ? (next.z > 0.0 ? 12.0 : -12.0) : next.z,
     );
-    const boundedVelocity = vec(
+    let boundedVelocity = vec(
       absolute.x > 12.0
         ? -velocity.x * 0.82 : velocity.x,
       absolute.y > 12.0

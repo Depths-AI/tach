@@ -19,14 +19,23 @@ import (
 )
 
 type Checker struct {
-	ast     *ast.Module
-	mod     *ir.Module
-	flow    *flow.Module
-	types   map[string]*types.Type
-	funcs   map[string]*funcSig
-	owners  map[string]string
-	imports map[string]map[string]bool
-	workers int
+	ast           *ast.Module
+	mod           *ir.Module
+	flow          *flow.Module
+	types         map[string]*types.Type
+	consts        map[string]*constantDef
+	funcs         map[string]*funcSig
+	owners        map[string]string
+	imports       map[string]map[string]bool
+	workers       int
+	constantStack []string
+}
+
+type constantDef struct {
+	decl  *ast.ConstDecl
+	value *types.Value
+	err   error
+	state uint8
 }
 
 type funcSig struct {
@@ -48,6 +57,7 @@ type symbol struct {
 	name      string
 	ty        *types.Type
 	value     ir.ValueID
+	constant  *types.Value
 	mutable   bool
 	buffer    int // -1 unless this is a stage buffer place
 	workgroup int // -1 unless this is a function workgroup place
@@ -69,12 +79,13 @@ type idAllocator struct {
 }
 
 type fnBuilder struct {
-	c     *Checker
-	fn    *ir.Function
-	ids   *idAllocator
-	block *ir.Block
-	top   bool
-	loop  *loopContext
+	c        *Checker
+	fn       *ir.Function
+	ids      *idAllocator
+	block    *ir.Block
+	top      bool
+	loop     *loopContext
+	comptime bool
 }
 
 type loopContext struct {
@@ -95,7 +106,7 @@ func (b *fnBuilder) emit(i ir.Instr) { b.block.Instrs = append(b.block.Instrs, i
 func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	// Structured regions share one allocator. SSA/place IDs are function-global
 	// identities even when definitions have region-scoped visibility.
-	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block, loop: b.loop}
+	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block, loop: b.loop, comptime: b.comptime}
 }
 
 func CheckAndLower(m *ast.Module) (*flow.Module, error) {
@@ -130,7 +141,7 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 		merged.Decls = append(merged.Decls, module.Decls...)
 	}
 	kernel := &ir.Module{}
-	c := &Checker{ast: merged, mod: kernel, flow: &flow.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*types.Type{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
+	c := &Checker{ast: merged, mod: kernel, flow: &flow.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*types.Type{}, consts: map[string]*constantDef{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
 	for _, module := range modules {
 		file := strings.TrimSuffix(module.File, ".tach")
 		visible := map[string]bool{file: true}
@@ -142,6 +153,8 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 			switch item := declaration.(type) {
 			case *ast.TypeDecl:
 				c.owners[item.Name] = file
+			case *ast.ConstDecl:
+				c.owners[item.Name] = file
 			case *ast.FunctionDecl:
 				c.owners[item.Name] = file
 			}
@@ -151,7 +164,7 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 		c.types[n] = types.ParseBuiltin(n)
 	}
 	var interfaceDiagnostics source.Diagnostics
-	for _, check := range []func() error{c.collectTypes, c.resolveTypeFields, c.checkRuntimeArrayPlacement, c.checkTypeCycles, c.collectFunctions} {
+	for _, check := range []func() error{c.collectTypes, c.collectConstants, c.resolveTypeFields, c.checkRuntimeArrayPlacement, c.checkTypeCycles, c.collectFunctions} {
 		if err := check(); err != nil {
 			interfaceDiagnostics = appendError(interfaceDiagnostics, err)
 		}
@@ -186,10 +199,12 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 }
 
 func appendError(diagnostics source.Diagnostics, err error) source.Diagnostics {
-	if list, ok := err.(source.Diagnostics); ok {
+	var list source.Diagnostics
+	if errors.As(err, &list) {
 		return append(diagnostics, list...)
 	}
-	if diagnostic, ok := err.(*source.Diagnostic); ok {
+	var diagnostic *source.Diagnostic
+	if errors.As(err, &diagnostic) {
 		diagnostic.Kind = "semantic"
 		return append(diagnostics, *diagnostic)
 	}
@@ -333,8 +348,19 @@ func (c *Checker) checkTypeCycles() error {
 
 func (c *Checker) declarationSpan(name string) source.Span {
 	for _, declaration := range c.ast.Decls {
-		if item, ok := declaration.(*ast.TypeDecl); ok && item.Name == name {
-			return item.Span
+		switch item := declaration.(type) {
+		case *ast.TypeDecl:
+			if item.Name == name {
+				return item.Span
+			}
+		case *ast.ConstDecl:
+			if item.Name == name {
+				return item.Span
+			}
+		case *ast.FunctionDecl:
+			if item.Name == name {
+				return item.Span
+			}
 		}
 	}
 	return source.Span{}
@@ -417,7 +443,7 @@ func (c *Checker) collectFunctions() error {
 			continue
 		}
 		sig := signatures[index]
-		if _, exists := c.funcs[sig.name]; exists {
+		if _, exists := c.funcs[sig.name]; exists || c.consts[sig.name] != nil || c.types[sig.name] != nil {
 			diagnostics = appendError(diagnostics, diag(sig.decl.Span, "function %q is already defined", sig.name))
 			continue
 		}
@@ -429,6 +455,10 @@ func (c *Checker) collectFunctions() error {
 	return nil
 }
 func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
+	return c.resolveTypeIn(te, nil)
+}
+
+func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*types.Type, error) {
 	switch t := te.(type) {
 	case *ast.NamedType:
 		x := c.types[t.Name]
@@ -440,7 +470,7 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 		}
 		return x, nil
 	case *ast.RuntimeArrayType:
-		e, err := c.resolveType(t.Elem)
+		e, err := c.resolveTypeIn(t.Elem, environment)
 		if err != nil {
 			return nil, err
 		}
@@ -449,21 +479,27 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 		}
 		return types.Runtime(e), nil
 	case *ast.FixedArrayType:
-		e, err := c.resolveType(t.Elem)
+		e, err := c.resolveTypeIn(t.Elem, environment)
 		if err != nil {
 			return nil, err
 		}
 		if !types.IsWorkgroupStorable(e) {
 			return nil, diag(t.Span, "invalid fixed array element type %s", e)
 		}
-		raw, _ := splitNumberLiteral(t.Count)
-		n, err := strconv.ParseUint(raw, 0, 32)
-		if err != nil || n == 0 {
+		scope := newEnv()
+		if environment != nil {
+			scope = *environment
+		}
+		value, err := c.evaluateConstant(t.Count, types.TU32, scope)
+		if err != nil {
+			return nil, err
+		}
+		if len(value.Bits) != 1 || value.Bits[0] == 0 {
 			return nil, diag(t.Span, "fixed array length must be a positive uint32 constant")
 		}
-		return types.Array(e, uint32(n)), nil
+		return types.Array(e, value.Bits[0]), nil
 	case *ast.VectorType:
-		e, err := c.resolveType(t.Elem)
+		e, err := c.resolveTypeIn(t.Elem, environment)
 		if err != nil {
 			return nil, err
 		}
@@ -486,7 +522,7 @@ func (c *Checker) resolveType(te ast.TypeExpr) (*types.Type, error) {
 			if len(t.Args) != 1 {
 				return nil, diag(t.Span, "atomic<T> takes exactly one type argument")
 			}
-			e, err := c.resolveType(t.Args[0])
+			e, err := c.resolveTypeIn(t.Args[0], environment)
 			if err != nil {
 				return nil, err
 			}
@@ -618,7 +654,7 @@ func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
 	if len(d.Indices) < 1 || len(d.Indices) > 3 {
 		return diag(d.Span, "kernel %s requires 1 to 3 logical indices", d.Name)
 	}
-	wg, err := workgroup(d.Attrs, len(d.Indices))
+	wg, err := c.workgroup(d.Attrs, len(d.Indices))
 	if err != nil {
 		return err
 	}
@@ -701,7 +737,7 @@ func (c *Checker) parameterType(te ast.TypeExpr, allowBuffer bool) (*types.Type,
 	return t, true, nil
 }
 
-func workgroup(attrs []ast.Attribute, dimensions int) (ir.WorkgroupConstraint, error) {
+func (c *Checker) workgroup(attrs []ast.Attribute, dimensions int) (ir.WorkgroupConstraint, error) {
 	out := ir.WorkgroupConstraint{}
 	found := false
 	for _, a := range attrs {
@@ -717,10 +753,11 @@ func workgroup(attrs []ast.Attribute, dimensions int) (ir.WorkgroupConstraint, e
 		}
 		out = ir.WorkgroupConstraint{Explicit: true, Size: [3]uint32{1, 1, 1}}
 		for i, e := range a.Args {
-			v, err := constU32(e)
+			value, err := c.evaluateConstant(e, types.TU32, newEnv())
 			if err != nil {
 				return out, err
 			}
+			v := value.Bits[0]
 			if v == 0 {
 				return out, diag(e.GetSpan(), "workgroup dimension must be positive")
 			}
@@ -762,22 +799,6 @@ func blockHasBarrier(block *ir.Block) bool {
 	}
 	return false
 }
-func constU32(e ast.Expr) (uint32, error) {
-	n, ok := e.(*ast.NumberExpr)
-	if !ok {
-		return 0, diag(e.GetSpan(), "expected integer literal")
-	}
-	s, basePrefixed := splitNumberLiteral(n.Raw)
-	if !basePrefixed && strings.ContainsAny(s, ".eE") {
-		return 0, diag(e.GetSpan(), "expected integer literal")
-	}
-	v, err := strconv.ParseUint(s, 0, 32)
-	if err != nil {
-		return 0, diag(e.GetSpan(), "integer literal out of uint32 range")
-	}
-	return uint32(v), nil
-}
-
 func splitNumberLiteral(raw string) (body string, basePrefixed bool) {
 	body = strings.ReplaceAll(raw, "_", "")
 	basePrefixed = strings.HasPrefix(body, "0x") || strings.HasPrefix(body, "0X") || strings.HasPrefix(body, "0b") || strings.HasPrefix(body, "0B")
@@ -807,7 +828,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
 		}
-		ty, err := c.resolveType(x.Type)
+		ty, err := c.resolveTypeIn(x.Type, &e)
 		if err != nil {
 			return err
 		}
@@ -818,6 +839,27 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		b.fn.WorkgroupVars = append(b.fn.WorkgroupVars, ir.WorkgroupVar{Name: x.Name, Type: ty, Span: x.Span})
 		e.syms[x.Name] = symbol{name: x.Name, ty: ty, buffer: -1, workgroup: idx}
 		return nil
+	case *ast.ConstStmt:
+		if _, ok := e.syms[x.Name]; ok {
+			return diag(x.Span, "%q is already defined in this scope", x.Name)
+		}
+		var expected *types.Type
+		var err error
+		if x.Type != nil {
+			expected, err = c.resolveTypeIn(x.Type, &e)
+			if err != nil {
+				return err
+			}
+			if !constantType(expected) {
+				return diag(x.Type.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
+			}
+		}
+		value, err := c.evaluateConstant(x.Value, expected, e)
+		if err != nil {
+			return err
+		}
+		e.syms[x.Name] = symbol{name: x.Name, ty: value.Type, constant: value, buffer: -1, workgroup: -1}
+		return nil
 	case *ast.VarStmt:
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
@@ -825,7 +867,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		var expected *types.Type
 		var err error
 		if x.Type != nil {
-			expected, err = c.resolveType(x.Type)
+			expected, err = c.resolveTypeIn(x.Type, &e)
 			if err != nil {
 				return err
 			}
@@ -837,10 +879,13 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		if err != nil {
 			return err
 		}
+		if expected != nil && !types.Equal(t, expected) {
+			return diag(x.Value.GetSpan(), "local value is %s, want %s", t, expected)
+		}
 		if t.Kind == types.Void {
 			return diag(x.Value.GetSpan(), "cannot bind a void expression")
 		}
-		e.syms[x.Name] = symbol{name: x.Name, ty: t, value: id, mutable: x.Mutable, buffer: -1, workgroup: -1}
+		e.syms[x.Name] = symbol{name: x.Name, ty: t, value: id, mutable: true, buffer: -1, workgroup: -1}
 		return nil
 	case *ast.AssignStmt:
 		return c.lowerAssign(b, e, x.Target, x.Op, x.Value, x.Span)
@@ -895,6 +940,9 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 		sym, exists := e.syms[id.Name]
 		if exists && sym.buffer < 0 && sym.workgroup < 0 {
 			if !sym.mutable {
+				if sym.constant != nil {
+					return diag(target.GetSpan(), "cannot assign to compile-time constant %s", id.Name)
+				}
 				return diag(target.GetSpan(), "cannot assign to immutable value %s", id.Name)
 			}
 			var nv ir.ValueID
@@ -914,6 +962,9 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 			sym.value = nv
 			e.syms[id.Name] = sym
 			return nil
+		}
+		if c.consts[id.Name] != nil && c.visible(id.Name, id.Span.File) {
+			return diag(target.GetSpan(), "cannot assign to compile-time constant %s", id.Name)
 		}
 	}
 	p, pt, err := c.lowerPlace(b, e, target)
@@ -1174,6 +1225,13 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		return id, types.TBool, nil
 	case *ast.IdentExpr:
 		if s, ok := e.syms[v.Name]; ok {
+			if s.constant != nil {
+				value, valueType := materializeConstant(b, s.constant, v.Span)
+				return value, valueType, nil
+			}
+			if b.comptime {
+				return 0, nil, &runtimeConstantDependency{diag(v.Span, "compile-time expression depends on runtime value %q; use let for the binding", v.Name)}
+			}
 			if s.buffer >= 0 {
 				if !types.IsConstructible(s.ty) {
 					return 0, nil, diag(v.Span, "runtime-sized resource %s must be accessed through its fixed fields or indexed tail", v.Name)
@@ -1195,6 +1253,14 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 				return id, s.ty, nil
 			}
 			return s.value, s.ty, nil
+		}
+		if definition := c.consts[v.Name]; definition != nil && c.visible(v.Name, v.Span.File) {
+			value, err := c.resolveConstant(v.Name, v.Span)
+			if err != nil {
+				return 0, nil, err
+			}
+			result, resultType := materializeConstant(b, value, v.Span)
+			return result, resultType, nil
 		}
 		return 0, nil, diag(v.Span, "unknown identifier %q", v.Name)
 	case *ast.MemberExpr:
@@ -1399,6 +1465,8 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		return r, arguments[0].type_, nil
 	case *ast.CallExpr:
 		return c.lowerCall(b, e, v, expected)
+	case *ast.TransientExpr:
+		return 0, nil, diag(v.Span, "transient allocation is only available as a public program let binding")
 	default:
 		return 0, nil, fmt.Errorf("unknown expression %T", x)
 	}
@@ -2060,6 +2128,13 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 	}
 	if kind, ok := intrinsicBuiltin(id.Name); ok {
 		return c.lowerIntrinsic(b, e, x, kind, expected)
+	}
+	if b.comptime {
+		var err error = diag(x.Span, "call to %q is not available in compile-time expressions", id.Name)
+		if id.Name == "ceilDiv" {
+			err = &runtimeConstantDependency{err}
+		}
+		return 0, nil, err
 	}
 	if id.Name == "workgroupBarrier" || id.Name == "bufferBarrier" {
 		if len(x.Args) != 0 {

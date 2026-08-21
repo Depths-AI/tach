@@ -26,18 +26,18 @@ export function complexEscapeFloat32[i](
   params: EscapeParams,
 ) {
   if (i < output.length) {
-    const column = i % params.width;
-    const row = i / params.width;
+    let column = i % params.width;
+    let row = i / params.width;
     let real = float32(column) / float32(params.width) * 3.2 - 1.6;
     let imaginary = float32(row) / float32(params.height) * 2.0 - 1.0;
     let iterations = 0;
     let energy = 0.0;
     for (let step = 0; step < params.maxIterations; step++) {
-      const radiusSquared = fma(real, real, imaginary * imaginary);
+      let radiusSquared = fma(real, real, imaginary * imaginary);
       if (radiusSquared > 16.0) {
         break;
       }
-      const nextReal = fma(real, real, -0.745 - imaginary * imaginary);
+      let nextReal = fma(real, real, -0.745 - imaginary * imaginary);
       imaginary = fma(real + real, imaginary, 0.113);
       real = nextReal;
       iterations++;
@@ -62,18 +62,18 @@ export function complexEscapeFloat16[i](
   params: EscapeParams,
 ) {
   if (i < output.length) {
-    const column = i % params.width;
-    const row = i / params.width;
+    let column = i % params.width;
+    let row = i / params.width;
     let real = float16(column) / float16(params.width) * 3.2 - 1.6;
     let imaginary = float16(row) / float16(params.height) * 2.0 - 1.0;
     let iterations = 0;
     let energy = float16(0.0);
     for (let step = 0; step < params.maxIterations; step++) {
-      const radiusSquared = fma(real, real, imaginary * imaginary);
+      let radiusSquared = fma(real, real, imaginary * imaginary);
       if (radiusSquared > 16.0) {
         break;
       }
-      const nextReal = fma(real, real, -0.745 - imaginary * imaginary);
+      let nextReal = fma(real, real, -0.745 - imaginary * imaginary);
       imaginary = fma(real + real, imaginary, 0.113);
       real = nextReal;
       iterations++;

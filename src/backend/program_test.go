@@ -126,10 +126,39 @@ func TestSPIRVPlanKeepsCrossInvocationRepeatAndBarrier(t *testing.T) {
 	executable := lower(t, `
 function first[i](data: buffer<uint32[]>) { data[i] += uint32(1); }
 function second[i](data: buffer<uint32[]>) { data[i] += data[i + uint32(1)]; }
-export function graph(data: buffer<uint32[]>) { const count = data.length; run first(data) over count; run second(data) over count; }`, backend.SPIRVProfile)
+export function graph(data: buffer<uint32[]>) { let count = data.length; run first(data) over count; run second(data) over count; }`, backend.SPIRVProfile)
 	plan := executable.Programs[0]
 	if plan.Repeat != backend.RepeatProgram || len(plan.Steps) != 3 || plan.Steps[1].Kind != backend.BarrierStepKind || len(plan.RepeatBarrier) == 0 {
 		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+func TestDispatchConstantsSpecializeBeforeBackendLowering(t *testing.T) {
+	executable := lower(t, `
+const factor: float16 = 0.5;
+const adjustment: vec<float16, 2> = vec(0.25, 0.75);
+function half[i](values: buffer<float16[]>, scale: float16, bias: vec<float16, 2>) {
+  if (i < values.length) { values[i] *= scale + bias.x - bias.x; }
+}
+export function halve(values: buffer<float16[]>) {
+  const localFactor = factor;
+  const localAdjustment = adjustment;
+  run half(values, localFactor, localAdjustment) over values.length;
+}`, backend.WebProfile)
+	kernel := executable.PhysicalKernels[0]
+	for _, parameter := range kernel.Function.Params {
+		if types.Contains(parameter.Type, types.F16) {
+			t.Fatalf("compile-time value remained a runtime parameter: %#v", kernel.Function.Params)
+		}
+	}
+	found := false
+	for _, instruction := range kernel.Function.Body.Instrs {
+		if constant, ok := instruction.(*ir.Const); ok && constant.Type.Kind == types.F16 && constant.Raw == "0.5" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("specialized Float16 value missing from kernel:\n%s", ir.Dump(executable.KernelModule))
 	}
 }
 
@@ -139,7 +168,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>) {
   if (i < pixels.length) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 }
 export function image(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`
@@ -190,7 +219,7 @@ func TestConstantExtentViewStillFuses(t *testing.T) {
 	executable := lower(t, `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 export function image(): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(4);
+  let pixels = transient<vec<float32, 4>>(4);
   run paint(pixels) over pixels.length;
   return view(pixels, 2, 2);
 }`, backend.SPIRVProfile)

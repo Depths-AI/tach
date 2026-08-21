@@ -9,11 +9,13 @@ Each child directory is a complete Tach project with exactly one `.tach` file. T
 | `manifest-error` | error | `manifest` |
 | `name-and-type-errors` | error | `semantic` |
 | `control-flow-errors` | error | `semantic` |
+| `constant-errors` | error | `semantic` |
+| `constant-cycle` | error | `semantic` |
 | `documentation-errors` | error | `semantic` |
 | `divergent-barrier` | error | `semantic` |
 | `missing-import` | error | `import` |
 | `name-collision` | error | `name` |
-| `dead-code` | warning | `discarded-value`, `unreachable-function`, `unused-binding` |
+| `dead-code` | warning | `discarded-value`, `unreachable-function`, `unused-binding`, `unused-constant` |
 | `launch-and-control` | warning | `constant-condition`, `zero-dispatch` |
 | `memory-access` | warning | `constant-write-index`, `strided-access` |
 | `no-effect-kernel` | warning | `no-effect-kernel`, `unused-binding` |

@@ -136,7 +136,7 @@ scales the same buffer by 2, then 3, then 4, and only then reads. The
 array `[1, 2, 3, 4]` becomes `[24, 48, 72, 96]`.
 
 This file is first because every other example reuses its shape: a
-coordinate, a buffer, a small constant from TypeScript, and a bounds
+coordinate, a buffer, a small value from TypeScript, and a bounds
 check. If `scale` makes sense, you can read the rest.
 
 ## The Float16 trio - smaller values, real tradeoffs
@@ -147,9 +147,10 @@ two bytes, and arithmetic remains binary16 through WGSL and SPIR-V.
 `float16Math` then exercises scalar, vector, transcendental, and geometric
 operations without silently widening them. Its `Float16Series` input also
 proves that a prefixed runtime tail keeps its exact `.length` when physical GPU
-alignment needs extra bytes. `halveFloat16` carries an exact binary16 constant
-through a public orchestration plan, covering the same type at the multi-stage
-boundary.
+alignment needs extra bytes. `halveFloat16` passes the module constant
+`halfScale` through a public orchestration program. The compiler specializes
+the private stage with its exact binary16 value, so no factor is exposed to
+TypeScript or packed at runtime.
 
 Tach checks the optional WebGPU and Vulkan Float16 requirements automatically,
 including direct and prefixed-tail byte extents that require private physical
@@ -175,6 +176,12 @@ The TypeScript test recomputes the same expression with `>>> 0` and
 expects an exact match, no epsilon. This file is here so you see that
 "integer" in Tach means a real 32-bit word, not a `number` that happens
 to be whole.
+
+The operands `u`, `s`, and their derived shifts are local `const` declarations.
+Unlike a JavaScript `const`, they are not runtime locals that merely reject
+assignment: Tach evaluates them in the compiler and substitutes the resulting
+32-bit values. A constant cannot depend on `i`, a buffer, a parameter, or a
+runtime `let`.
 
 ## `transform` - loops and branches are normal
 
@@ -272,6 +279,12 @@ The test compares against a CPU version with a small tolerance. `sin` on
 a GPU does not have to match `Math.sin` bit for bit. It has to be the
 same function closely enough that you can trust the kernel is doing math,
 not skipping it.
+
+Its `verticalAxis` is a module-level vector constant. Constants can be bools,
+numeric scalars, or numeric vectors, and may use typed operators,
+conditionals, conversions, `vec(...)`, swizzles/indexing, and pure math. They
+follow the same direct-import visibility rule as types and functions, but never
+become generated TypeScript exports.
 
 ## `view.tach` - making a picture without reading pixels
 
@@ -389,6 +402,11 @@ They also wait together (`workgroupBarrier`) so nobody uses the
 whiteboard before it is set up. Everyone has to reach that wait. You
 cannot put it inside `if (i == 0)` for only some workers; the others
 would wait forever.
+
+The source derives both `@workgroup(accumulationWidth)` and
+`shared<atomic<uint32>[accumulationSlots]>` from module constants. Workgroup
+geometry and fixed-array length therefore use the same positive compile-time
+`uint32` expression rules as ordinary constant math.
 
 This file is last among the language examples because you should not
 reach for atomics until a unique slot, or a later second stage, is not

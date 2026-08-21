@@ -341,6 +341,8 @@ func (p *project) validate(diagnostics *source.Diagnostics) {
 				name = item.Name
 				exported = true
 				validate = abi.ValidateExportTypeName
+			case *ast.ConstDecl:
+				name = item.Name
 			case *ast.FunctionDecl:
 				name = item.Name
 				exported = item.Exported

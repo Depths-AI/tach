@@ -3,6 +3,8 @@ package types
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 )
 
 type Kind uint8
@@ -34,6 +36,13 @@ type Type struct {
 type Field struct {
 	Name string
 	Type *Type
+}
+
+// Value is a fully evaluated compile-time scalar or vector. Bits contains one
+// canonical lane for scalars and one entry per vector lane.
+type Value struct {
+	Type *Type
+	Bits []uint32
 }
 
 var (
@@ -284,4 +293,51 @@ func Float16bits(value float64) (uint16, bool) {
 		exponent, significand = exponent+1, 1024
 	}
 	return sign | uint16(exponent+15)<<10 | (significand - 1024), true
+}
+
+func Float16frombits(bits uint16) float64 {
+	sign := 1.0
+	if bits&0x8000 != 0 {
+		sign = -1
+	}
+	exponent, fraction := int(bits>>10&0x1f), bits&0x03ff
+	switch exponent {
+	case 0:
+		return sign * math.Ldexp(float64(fraction), -24)
+	case 0x1f:
+		if fraction == 0 {
+			return math.Inf(int(sign))
+		}
+		return math.NaN()
+	default:
+		return sign * math.Ldexp(float64(1024+fraction), exponent-25)
+	}
+}
+
+func ScalarRaw(t *Type, bits uint32) string {
+	switch t.Kind {
+	case Bool:
+		if bits != 0 {
+			return "true"
+		}
+		return "false"
+	case I32:
+		return strconv.FormatInt(int64(int32(bits)), 10)
+	case U32:
+		return strconv.FormatUint(uint64(bits), 10)
+	case F16:
+		return floatRaw(Float16frombits(uint16(bits)))
+	case F32:
+		return floatRaw(float64(math.Float32frombits(bits)))
+	default:
+		panic(fmt.Sprintf("scalar raw value for %s", t))
+	}
+}
+
+func floatRaw(value float64) string {
+	raw := strconv.FormatFloat(value, 'g', -1, 32)
+	if !strings.ContainsAny(raw, ".eE") {
+		raw += ".0"
+	}
+	return raw
 }

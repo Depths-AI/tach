@@ -1,0 +1,24 @@
+function double(value: uint32): uint32 {
+  return value * 2;
+}
+
+export function runtimeDependency[i](out: buffer<uint32[]>, input: uint32) {
+  const value = input * 2;
+  out[i] = value;
+}
+
+export function functionCall[i](out: buffer<uint32[]>) {
+  const value = double(2);
+  out[i] = value;
+}
+
+export function mutation[i](out: buffer<uint32[]>) {
+  const value = 1;
+  value = 2;
+  out[i] = value;
+}
+
+export function invalidArithmetic[i](out: buffer<float32[]>) {
+  const value = sqrt(-1.0);
+  out[i] = value;
+}

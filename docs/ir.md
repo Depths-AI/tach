@@ -27,8 +27,8 @@ public program -> Flow dispatch -> logical stage -> physical target kernel
 ```
 
 Source-file identity is deliberately absent from symbol names after checking.
-Project-global uniqueness makes an unqualified type or function name a true
-project identity. Imports control which declarations may be resolved while
+Project-global uniqueness makes an unqualified constant, type, or function name
+a true project identity. Imports control which declarations may be resolved while
 lowering a source file; they do not create aliases, qualified symbols, linker
 records, or per-file IR modules. Canonical merge order is module identity,
 kernel identity, then source declaration order.
@@ -192,8 +192,10 @@ Values[]           formal -> checked value source
 ```
 
 Buffer arguments are stored in formal order and cannot repeat a resource.
-Value sources are a public parameter/path, literal bool/integer/float bits,
-shape, or backend-added repeat count.
+Value sources are a public parameter/path, canonical compiler-evaluated
+constant, runtime shape, or backend-added repeat count. Target planning
+specializes each constant into its physical Kernel IR stage, removes the now
+unused formal, and rejects any constant that survives into runtime metadata.
 
 Flow IR names a logical stage, not a physical kernel index. Target planning
 creates the latter.
@@ -238,7 +240,7 @@ output buffer.
 - buffer/resource type equality and per-dispatch non-aliasing;
 - current-version consumption and correct mutable output versions;
 - definition before every read; and
-- valid public/literal/shape sources for stage value formals; and
+- valid public/constant/shape sources for stage value formals; and
 - a supported view format, runtime `vec<float32, 4>` source, exact defined final
   source version, and valid width/height shapes when a view is present.
 

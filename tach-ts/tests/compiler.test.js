@@ -104,7 +104,7 @@ Deno.test("the public CLI is authoritative and the private compiler resolves", a
 Deno.test("compiler diagnostics have identical human and JSON surfaces", async () => {
   const warningRoot = await fixture(
     `export function idle[i](out: buffer<float32[]>, unused: float32) {
-  const discarded = float32(i) * 2;
+  let discarded = float32(i) * 2;
 }`,
   );
   const errorRoot = await fixture(

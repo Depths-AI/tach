@@ -365,7 +365,7 @@ type Pair = { x: uint32, y: uint32 };
 export function structMemory[i](out: buffer<uint32>) {
   let pair: shared<Pair>;
   pair = { x: 7, y: 9 };
-  const copy: Pair = pair;
+  let copy: Pair = pair;
   out = copy.x + copy.y;
 }`)
 	root := workgroupRootType(t, bin)

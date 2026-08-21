@@ -2,9 +2,6 @@ package sema
 
 import (
 	"fmt"
-	"math"
-	"strconv"
-	"strings"
 
 	"tach/src/ast"
 	"tach/src/flow"
@@ -17,6 +14,7 @@ type programSymbol struct {
 	resource  flow.ResourceID
 	shape     flow.ShapeID
 	type_     *types.Type
+	constant  *types.Value
 	parameter int
 }
 
@@ -90,10 +88,26 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 	}
 	for index, statement := range declaration.Body.Stmts {
 		switch x := statement.(type) {
-		case *ast.VarStmt:
-			if x.Mutable || x.Type != nil {
-				return nil, diag(x.Span, "program bodies permit only untyped const declarations and run statements")
+		case *ast.ConstStmt:
+			if _, exists := symbols[x.Name]; exists {
+				return nil, diag(x.Span, "%q is already defined", x.Name)
 			}
+			var expected *types.Type
+			if x.Type != nil {
+				expected, err = c.resolveType(x.Type)
+				if err != nil {
+					return nil, err
+				}
+				if !constantType(expected) {
+					return nil, diag(x.Type.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
+				}
+			}
+			value, err := c.evaluateConstant(x.Value, expected, programEnvironment(symbols))
+			if err != nil {
+				return nil, err
+			}
+			symbols[x.Name] = programSymbol{type_: value.Type, constant: value, parameter: -1}
+		case *ast.VarStmt:
 			if _, exists := symbols[x.Name]; exists {
 				return nil, diag(x.Span, "%q is already defined", x.Name)
 			}
@@ -105,19 +119,38 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 				if !types.IsTransientElement(elem) {
 					return nil, diag(transient.Span, "transient element %s must have a fixed host-shareable non-atomic footprint", elem)
 				}
+				transientType := types.Runtime(elem)
+				if x.Type != nil {
+					declared, err := c.resolveType(x.Type)
+					if err != nil {
+						return nil, err
+					}
+					if !types.Equal(declared, transientType) {
+						return nil, diag(x.Type.GetSpan(), "program transient is declared as %s, but its initializer produces %s", declared, transientType)
+					}
+				}
 				length, err := c.lowerShape(program, transient.Count, symbols)
 				if err != nil {
 					return nil, err
 				}
-				resource := program.AddResource(flow.Resource{Name: x.Name, Kind: flow.Transient, Type: types.Runtime(elem), Length: length, Parameter: -1, Span: x.Span})
+				resource := program.AddResource(flow.Resource{Name: x.Name, Kind: flow.Transient, Type: transientType, Length: length, Parameter: -1, Span: x.Span})
 				initial := program.AddVersion(flow.Version{Resource: resource, Defined: false})
 				program.Resource(resource).Initial = initial
-				symbols[x.Name] = programSymbol{resource: resource, type_: types.Runtime(elem), parameter: -1}
+				symbols[x.Name] = programSymbol{resource: resource, type_: transientType, parameter: -1}
 				current[resource] = initial
 			} else {
 				shape, err := c.lowerShape(program, x.Value, symbols)
 				if err != nil {
 					return nil, err
+				}
+				if x.Type != nil {
+					declared, err := c.resolveType(x.Type)
+					if err != nil {
+						return nil, err
+					}
+					if !types.Equal(declared, types.TU32) {
+						return nil, diag(x.Type.GetSpan(), "program shape binding must be uint32, got %s", declared)
+					}
 				}
 				symbols[x.Name] = programSymbol{shape: shape, type_: types.TU32, parameter: -1}
 			}
@@ -169,7 +202,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 			view.Format = c.funcs[declaration.Name].view
 			program.View = view
 		default:
-			return nil, diag(statement.GetSpan(), "public program bodies permit only const declarations, run statements, and a final view return")
+			return nil, diag(statement.GetSpan(), "public program bodies permit only const and let declarations, run statements, and a final view return")
 		}
 	}
 	if len(program.Dispatches) == 0 {
@@ -180,6 +213,14 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 	}
 	finishResources(program, current)
 	return program, nil
+}
+
+func programEnvironment(symbols map[string]programSymbol) env {
+	environment := newEnv()
+	for name, item := range symbols {
+		environment.syms[name] = symbol{name: name, ty: item.type_, constant: item.constant, buffer: -1, workgroup: -1}
+	}
+	return environment
 }
 
 func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) (*flow.View, error) {
@@ -312,61 +353,27 @@ func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, 
 	if symbol, path, got, ok := programPath(expression, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(got, want) {
 		return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter, Path: path}, nil
 	}
+	if value, constant, err := c.tryConstant(expression, want, programEnvironment(symbols)); err != nil {
+		return flow.ValueArgument{}, err
+	} else if constant {
+		return flow.ValueArgument{Kind: flow.ValueConstant, Constant: value}, nil
+	}
 	if want.Kind == types.U32 {
 		shape, err := c.lowerShape(program, expression, symbols)
 		if err == nil {
 			return flow.ValueArgument{Kind: flow.ValueShape, Shape: shape}, nil
 		}
 	}
-	switch x := expression.(type) {
-	case *ast.BoolExpr:
-		if want.Kind == types.Bool {
-			bits := uint32(0)
-			if x.Value {
-				bits = 1
-			}
-			return flow.ValueArgument{Kind: flow.ValueBool, Bits: bits}, nil
-		}
-	case *ast.NumberExpr:
-		raw, _ := splitNumberLiteral(x.Raw)
-		switch want.Kind {
-		case types.I32:
-			value, err := strconv.ParseInt(raw, 0, 32)
-			if err == nil {
-				return flow.ValueArgument{Kind: flow.ValueI32, Bits: uint32(int32(value))}, nil
-			}
-		case types.U32:
-			value, err := strconv.ParseUint(raw, 0, 32)
-			if err == nil {
-				return flow.ValueArgument{Kind: flow.ValueU32, Bits: uint32(value)}, nil
-			}
-		case types.F16:
-			value, err := strconv.ParseFloat(raw, 64)
-			if bits, ok := types.Float16bits(value); err == nil && ok {
-				return flow.ValueArgument{Kind: flow.ValueF16Bits, Bits: uint32(bits)}, nil
-			}
-		case types.F32:
-			value, err := strconv.ParseFloat(raw, 32)
-			if err == nil {
-				return flow.ValueArgument{Kind: flow.ValueF32Bits, Bits: math.Float32bits(float32(value))}, nil
-			}
-		}
-	}
 	return flow.ValueArgument{}, diag(expression.GetSpan(), "program argument is not a supported %s value source", want)
 }
 
 func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol) (flow.ShapeID, error) {
+	if value, constant, err := c.tryConstant(expression, types.TU32, programEnvironment(symbols)); err != nil {
+		return 0, err
+	} else if constant {
+		return program.AddShape(flow.Shape{Op: flow.ShapeConstant, Value: value.Bits[0], Span: expression.GetSpan()}), nil
+	}
 	switch x := expression.(type) {
-	case *ast.NumberExpr:
-		raw, prefixed := splitNumberLiteral(x.Raw)
-		if !prefixed && strings.ContainsAny(raw, ".eE") {
-			return 0, diag(x.Span, "shape literal must be uint32")
-		}
-		value, err := strconv.ParseUint(raw, 0, 32)
-		if err != nil {
-			return 0, diag(x.Span, "shape literal is outside uint32")
-		}
-		return program.AddShape(flow.Shape{Op: flow.ShapeConstant, Value: uint32(value), Span: x.Span}), nil
 	case *ast.IdentExpr:
 		symbol, ok := symbols[x.Name]
 		if !ok {

@@ -282,8 +282,8 @@ can use `[x, y]`; the host then supplies a matching logical size:
 
 ```tach
 export function image[x, y](pixels: buffer<vec<float32, 4>[]>) {
-  const width = 1920;
-  const pixel = y * width + x;
+  let width = 1920;
+  let pixel = y * width + x;
   if (pixel < pixels.length) {
     pixels[pixel] = vec(
       float32(x) / 1920.0,
@@ -308,6 +308,29 @@ generated modules record and enforce its optional GPU requirements. Projects
 without `float16` keep the ordinary feature floor.
 Struct types are always emitted into the TypeScript API.
 
+Tach makes compile-time and runtime values visually distinct. `const` is
+compiler-evaluated scalar/vector algebra with no JavaScript/TypeScript identity;
+`let` is the sole mutable runtime local. Module constants follow direct imports,
+and local constants may depend only on visible constants:
+
+```tach
+const tileWidth: uint32 = 16;
+
+@workgroup(tileWidth)
+function tiled[i](output: buffer<float32[]>) {
+  const tileArea = tileWidth * tileWidth;
+  let lane = i % tileArea;
+  if (i < output.length) {
+    output[i] = float32(lane);
+  }
+}
+```
+
+The compiler substitutes constants into workgroup dimensions, shared-array
+lengths, loop bounds, math, and multi-stage calls before WGSL or SPIR-V is
+lowered. A value that depends on a parameter, coordinate, buffer, or runtime
+shape is a `let`, never a `const`.
+
 Tach infers expression-local numeric types from annotations, assignments,
 parameters, returns, struct fields, sibling operands, and intrinsic domains.
 `vec(...)` is the only vector value constructor and builds two to four lanes
@@ -330,7 +353,7 @@ Files import other project files by extensionless module/kernel identity:
 import "data/particles";
 ```
 
-Declarations from the current file and from files it directly imports are
+Constants, types, and functions from the current file and files it directly imports are
 visible. Imports are not transitive: unlike `export *` in TypeScript,
 importing a file does not also expose that file's imports. Names are unique
 across the project, and the compiler rejects cyclic file or module
@@ -369,7 +392,7 @@ export function transform(
   factor: float32,
   bias: float32,
 ) {
-  const scratch = transient<float32>(count);
+  let scratch = transient<float32>(count);
   run multiply(input, scratch, factor) over count;
   run addBias(scratch, output, bias) over count;
 }
@@ -393,8 +416,8 @@ can be driven entirely by scalar parameters:
 ```tach
 function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32) {
   if (i < pixels.length) {
-    const x = i % width;
-    const y = i / width;
+    let x = i % width;
+    let y = i / width;
     pixels[i] = vec(
       float32(x) / float32(width),
       float32(y) / float32(height),
@@ -405,7 +428,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint
 }
 
 export function gradient(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels, width, height) over pixels.length;
   return view(pixels, width, height);
 }

@@ -19,13 +19,13 @@ export function coupledOscillatorsFloat32[i](
     let position = positions[i];
     let velocity = velocities[i];
     for (let step = 0; step < steps; step++) {
-      const neighborSum = vec(
+      let neighborSum = vec(
         position.y + position.w,
         position.z + position.x,
         position.w + position.y,
         position.x + position.z,
       );
-      const acceleration = (neighborSum - position * 2.0) * 0.14 - position * 0.72 - position
+      let acceleration = (neighborSum - position * 2.0) * 0.14 - position * 0.72 - position
         * position * position * 0.08;
       velocity += acceleration * 0.015625;
       position += velocity * 0.015625;
@@ -51,13 +51,13 @@ export function coupledOscillatorsFloat16[i](
     let position = positions[i];
     let velocity = velocities[i];
     for (let step = 0; step < steps; step++) {
-      const neighborSum = vec(
+      let neighborSum = vec(
         position.y + position.w,
         position.z + position.x,
         position.w + position.y,
         position.x + position.z,
       );
-      const acceleration = (neighborSum - position * 2.0) * 0.14 - position * 0.72 - position
+      let acceleration = (neighborSum - position * 2.0) * 0.14 - position * 0.72 - position
         * position * position * 0.08;
       velocity += acceleration * 0.015625;
       position += velocity * 0.015625;

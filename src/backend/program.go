@@ -236,6 +236,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 				}
 				values = append(values, flow.ValueArgument{Formal: len(values), Kind: flow.ValueRepeat})
 			}
+			specializeConstants(function, values)
 			values = pruneUnusedParameters(function, values)
 			logicalLengths := appendLogicalLengths(function, &values, program, &dispatch)
 			var viewWidth, viewHeight ir.ValueID
@@ -359,6 +360,38 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 		return nil, err
 	}
 	return executable, nil
+}
+
+func specializeConstants(function *ir.Function, values []flow.ValueArgument) {
+	next := maxValue(function)
+	replacements := map[ir.ValueID]ir.ValueID{}
+	var definitions []ir.Instr
+	for index, parameter := range function.Params {
+		if index >= len(values) || values[index].Kind != flow.ValueConstant || values[index].Constant == nil {
+			continue
+		}
+		value := values[index].Constant
+		if value.Type.Kind != types.Vector {
+			next++
+			definitions = append(definitions, &ir.Const{Result: next, Type: value.Type, Raw: types.ScalarRaw(value.Type, value.Bits[0]), Span: function.Span})
+			replacements[parameter.ID] = next
+			continue
+		}
+		lanes := make([]ir.ValueID, value.Type.Lanes)
+		for lane := range lanes {
+			next++
+			lanes[lane] = next
+			definitions = append(definitions, &ir.Const{Result: next, Type: value.Type.Elem, Raw: types.ScalarRaw(value.Type.Elem, value.Bits[lane]), Span: function.Span})
+		}
+		next++
+		definitions = append(definitions, &ir.Composite{Result: next, Type: value.Type, Values: lanes, Span: function.Span})
+		replacements[parameter.ID] = next
+	}
+	if len(definitions) == 0 {
+		return
+	}
+	ir.ReplaceValueUses(function, replacements)
+	function.Body.Instrs = append(definitions, function.Body.Instrs...)
 }
 
 func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, program *flow.Program, dispatch *flow.Dispatch) map[int]ir.ValueID {
