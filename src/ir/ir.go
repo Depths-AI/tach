@@ -248,6 +248,9 @@ const (
 	IntrinsicDistance
 	IntrinsicCross
 	IntrinsicNormalize
+	IntrinsicAll
+	IntrinsicAny
+	IntrinsicSelect
 )
 
 type NumericDomain uint8
@@ -749,6 +752,12 @@ func (k IntrinsicKind) String() string {
 		return "cross"
 	case IntrinsicNormalize:
 		return "normalize"
+	case IntrinsicAll:
+		return "all"
+	case IntrinsicAny:
+		return "any"
+	case IntrinsicSelect:
+		return "select"
 	default:
 		return fmt.Sprintf("intrinsic(%d)", k)
 	}

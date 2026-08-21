@@ -1,0 +1,28 @@
+@docs(
+  title("Boolean vectors and masks"),
+  summary("Compares vector lanes, combines their boolean masks, reduces them, and selects numeric lanes without scalar branches."),
+);
+
+const alternating: vec<bool, 4> = vec(false, true, false, true);
+@docs(
+  summary("Applies lane-wise bounds and selection while exposing scalar all/any reductions."),
+  param(value, "Four values to classify and select."),
+  returns("Selected values with the final lane recording whether every input was in bounds."),
+)
+function applyMask(value: vec<float32, 4>): vec<float32, 4> {
+  let inside = value >= 0.0 & value <= 2.0;
+  let chosen = inside ^ alternating | value == 0.0;
+  let selected = select(chosen, value, -1.0);
+  return vec(selected.xyz, all(inside) & any(chosen) ? selected.w : -2.0);
+}
+
+@docs(
+  summary("Writes one observable mask-algebra result per invocation."),
+  coordinate(i, "Output vector index and first-lane input seed."),
+  param(out, "Four-lane results for every in-range invocation."),
+)
+export function masks[i](out: buffer<vec<float32, 4>[]>) {
+  if (i < out.length) {
+    out[i] = applyMask(vec(float32(i) - 1.0, 0.0, 1.0, 2.0));
+  }
+}

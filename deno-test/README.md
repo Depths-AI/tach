@@ -1,7 +1,7 @@
 # Tach Deno/Vulkan correctness harness
 
 This private workspace asks the same product question as the browser
-harness, on the other host: do the seventeen public programs in `examples/`
+harness, on the other host: do the eighteen public programs in `examples/`
 work from the published `@depths/tach` API in Deno through Tach's Vulkan
 1.3 runtime? Application TypeScript is the same. It never chooses a
 shader file, a descriptor, or a Vulkan pipeline.
@@ -14,7 +14,7 @@ generated package into ignored `generated/`. Both `kernel.wgsl.gz` and
 executes SPIR-V. Before hardware execution, the test independently validates
 the binary with Khronos `spirv-val --target-env vulkan1.3`.
 
-`examples.ts` then imports all seventeen public programs from one generated
+`examples.ts` then imports all eighteen public programs from one generated
 `index.js`. Host detection selects the packaged Tach-owned native library and
 Vulkan plan. The TypeScript calls, generated declarations, structured values,
 buffer handles, recipe objects, and ordering rules are identical to the WebGPU
@@ -27,6 +27,8 @@ shared counters, 32-bit bit ops, loops with nearest-loop `break` and `continue`,
 scalar FP32 and vector FP16 `fma`, binary16 storage and arithmetic, exact
 `.length` for direct and struct-tail padding cases, a type imported from another
 file, contextual literals and vectors, scalar/vector intrinsic broadcast,
+boolean-vector comparison and lane logic, eager selection, `all`/`any`
+reduction with exact numeric output,
 several recipes on one buffer, and `prepare` before `submit`.
 
 The view programs compute pictures without copying a frame to the CPU:
@@ -77,7 +79,7 @@ npm test --workspace=@tach/deno-test
 ```
 
 The test grants Deno only FFI and read access beyond npm resolution. It prints
-the selected physical adapter, seventeen-program count, and 72 projected frames.
+the selected physical adapter, eighteen-program count, and 72 projected frames.
 Assertion failures and process status are authoritative; no test report is
 generated.
 

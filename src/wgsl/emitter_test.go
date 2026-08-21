@@ -196,6 +196,41 @@ export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, state: buffer
 	}
 }
 
+func TestBooleanVectorsAndMasksWGSL(t *testing.T) {
+	a, err := parser.Parse("masks.tach", `
+function choose(value: vec<float32, 4>): vec<float32, 4> {
+  let inside = value >= -1.0 & value <= 1.0;
+  let changed = inside ^ vec(false, true, false, true);
+  let selected = select(changed | value == 0.0, abs(value), -value);
+  return all(inside) || any(!changed) ? selected : vec(0.0, 0.0, 0.0, 0.0);
+}
+export function masks[i](out: buffer<vec<float32, 4>[]>) {
+  if (i < out.length) { out[i] = choose(vec(float32(i), -0.5, 0.0, 2.0)); }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"vec4<bool>", " & ", " | ", " != ", "all(", "any(", "select("} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("mask WGSL missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, " ^ ") {
+		t.Fatalf("boolean XOR was not normalized to WGSL inequality:\n%s", out)
+	}
+	if err := wgsl.Validate(out); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestViewProjectsStraightIntoStorageTexture(t *testing.T) {
 	a, err := parser.Parse("view.tach", `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) {

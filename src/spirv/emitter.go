@@ -1360,6 +1360,22 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		}
 		args[i] = v
 	}
+	if x.Kind == ir.IntrinsicAll || x.Kind == ir.IntrinsicAny {
+		op := OpAll
+		if x.Kind == ir.IntrinsicAny {
+			op = OpAny
+		}
+		id := s.b.id()
+		emit(&s.b.functions, op, tid, id, args[0])
+		s.def(x.Result, id, x.Type)
+		return nil
+	}
+	if x.Kind == ir.IntrinsicSelect {
+		id := s.b.id()
+		emit(&s.b.functions, OpSelect, tid, id, args[0], args[1], args[2])
+		s.def(x.Result, id, x.Type)
+		return nil
+	}
 	if x.Kind == ir.IntrinsicDot {
 		id := s.b.id()
 		emit(&s.b.functions, OpDot, tid, id, args[0], args[1])
@@ -1841,11 +1857,23 @@ func (s *fnEmitter) emitBinary(x *ir.Binary) error {
 	case "||":
 		op = OpLogicalOr
 	case "&":
-		op = OpBitwiseAnd
+		if kind == types.Bool {
+			op = OpLogicalAnd
+		} else {
+			op = OpBitwiseAnd
+		}
 	case "|":
-		op = OpBitwiseOr
+		if kind == types.Bool {
+			op = OpLogicalOr
+		} else {
+			op = OpBitwiseOr
+		}
 	case "^":
-		op = OpBitwiseXor
+		if kind == types.Bool {
+			op = OpLogicalNotEqual
+		} else {
+			op = OpBitwiseXor
+		}
 	case "<<":
 		op = OpShiftLeftLogical
 	case ">>":

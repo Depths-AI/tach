@@ -508,13 +508,53 @@ export function inferred[i](out: buffer<vec<float32, 4>[]>) {
 		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = fma(vec(1, 1), vec(2, 2, 2), vec(3, 3)); }`, "conflicting vector widths"},
 		{`export function bad[i](out: buffer<float32[]>) { out[i] = dot(1, 2); }`, "requires floating-point vectors"},
 		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = pow(2, vec(3, 4)); }`, "argument is float32, want vec<float32, 2>"},
-		{`export function bad[i](out: buffer<vec<uint32, 2>[]>) { out[i] = vec(true, 1); }`, "requires numeric values"},
+		{`export function bad[i](out: buffer<vec<uint32, 2>[]>) { out[i] = vec(true, 1); }`, "components use uint32 and bool"},
 		{`export function bad[i](out: buffer<vec<float32, 2>[]>) { out[i] = true ? 1 : vec(2, 3); }`, "conditional branches have types"},
-		{`export function bad[i](out: buffer<vec<bool, 2>[]>) { out[i] = vec(1, 2); }`, "vec element type must be numeric"},
+		{`export function bad[i](out: buffer<vec<bool, 2>[]>) { out[i] = vec(1, 2); }`, "not host-shareable"},
 		{`export function bad[i](out: buffer<vec<float32, 5>[]>) { out[i] = vec(1, 2, 3, 4); }`, "vec lane count must be 2, 3, or 4"},
 		{`function vec(value: uint32): uint32 { return value; } export function bad[i](out: buffer<uint32[]>) { out[i] = i; }`, "reserved"},
 	} {
 		parsed, parseErr := parser.Parse("invalid-inference.tach", test.source)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil || !strings.Contains(checkErr.Error(), test.want) {
+			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
+		}
+	}
+}
+
+func TestBooleanVectorsAndMasksLowerToCoreIR(t *testing.T) {
+	module := lower(t, "masks.tach", `
+const policy: vec<bool, 4> = vec(true, false, true, true);
+const defaults: vec<float32, 4> = select(policy, vec(1, 2, 3, 4), 0);
+const valid: bool = all((defaults > 0.0) | !policy);
+function choose(value: vec<float32, 4>): vec<float32, 4> {
+  let inside = value >= -1.0 & value <= 1.0;
+  let changed = inside ^ vec(false, true, false, true);
+  let selected = select(changed | value == 0.0, abs(value), -value);
+  return (any(changed) || all(inside)) && valid ? selected : defaults;
+}
+export function masks[i](out: buffer<vec<float32, 4>[]>) {
+  if (i < out.length) { out[i] = choose(vec(float32(i) - 2.0, -0.5, 0.0, 2.0)); }
+}`)
+	dump := ir.Dump(module.Kernel)
+	for _, want := range []string{"vec<bool, 4>", "intrinsic all", "intrinsic any", "intrinsic select", " = & ", " = | ", " = ^ "} {
+		if !strings.Contains(dump, want) {
+			t.Fatalf("mask IR missing %q:\n%s", want, dump)
+		}
+	}
+
+	for _, test := range []struct{ source, want string }{
+		{`export function bad[i](out: buffer<vec<bool, 2>[]>) {}`, "not host-shareable"},
+		{`export function bad[i](out: buffer<uint32[]>) { let x = all(true); out[i] = x ? 1 : 0; }`, "requires vec<bool, N>"},
+		{`export function bad[i](out: buffer<uint32[]>) { let x = select(true, vec(1, 2), vec(3, 4)); out[i] = x.x; }`, "mask must be vec<bool, N>"},
+		{`export function bad[i](out: buffer<uint32[]>) { let x = select(vec(true, false), vec(1, 2, 3), vec(4, 5, 6)); out[i] = x.x; }`, "conflicting vector widths"},
+		{`export function bad[i](out: buffer<uint32[]>) { let x = select(vec(true, false), true, 0); out[i] = x.x ? 1 : 0; }`, "boolean arm"},
+		{`export function bad[i](out: buffer<uint32[]>) { if (vec(1, 2) < 3) { out[i] = 1; } }`, "want bool"},
+		{`export function bad[i](out: buffer<uint32[]>) { let x = vec(true, false) < vec(false, true); out[i] = x.x ? 1 : 0; }`, "requires numeric values"},
+	} {
+		parsed, parseErr := parser.Parse("invalid-mask.tach", test.source)
 		if parseErr != nil {
 			t.Fatal(parseErr)
 		}

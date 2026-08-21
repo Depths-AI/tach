@@ -9,7 +9,8 @@ The extension recognizes `.tach` files and highlights declarations, control
 flow, types, structured documentation, built-in functions, literals, comments,
 members, and operators. It also configures Tach's `//` comments, paired
 delimiters, and two-space indentation. Control keywords such as `break` and
-`continue`, and builtins such as inferred `vec` and `fma`, follow the same
+`continue`, and builtins such as inferred `vec`, boolean-mask `select`, and
+`fma`, follow the same
 grammar-owned highlighting as the rest of the language.
 
 This deliberately small extension performs no compilation or background

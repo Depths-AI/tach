@@ -77,6 +77,29 @@ func TestVerifyUsesIntrinsicSignatureRules(t *testing.T) {
 	}
 }
 
+func TestVerifyMaskIntrinsicShapes(t *testing.T) {
+	mask, value := types.Vec(types.TBool, 2), types.Vec(types.TF32, 2)
+	selection := &Intrinsic{Result: 8, Type: value, Kind: IntrinsicSelect, Args: []ValueID{3, 6, 6}}
+	function := &Function{Name: "mask", Kind: Helper, Return: value, Body: &Block{Instrs: []Instr{
+		&Const{Result: 1, Type: types.TBool, Raw: "true"},
+		&Const{Result: 2, Type: types.TBool, Raw: "false"},
+		&Composite{Result: 3, Type: mask, Values: []ValueID{1, 2}},
+		&Const{Result: 4, Type: types.TF32, Raw: "1.0"},
+		&Const{Result: 5, Type: types.TF32, Raw: "2.0"},
+		&Composite{Result: 6, Type: value, Values: []ValueID{4, 5}},
+		&Intrinsic{Result: 7, Type: types.TBool, Kind: IntrinsicAll, Args: []ValueID{3}},
+		selection,
+	}, Term: &Return{Value: 8, HasValue: true}}}
+	module := &Module{Functions: []*Function{function}}
+	if err := Verify(module); err != nil {
+		t.Fatal(err)
+	}
+	selection.Args[0] = 6
+	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "boolean-vector mask") {
+		t.Fatalf("invalid select mask error = %v", err)
+	}
+}
+
 func TestVerifyAtomicCompareExchangeShape(t *testing.T) {
 	atomicArray := types.Runtime(types.AtomicOf(types.TU32))
 	operation := &Atomic{Result: 4, Type: types.TU32, Op: AtomicCompareExchange, Place: 2, Expected: 2, Value: 3}

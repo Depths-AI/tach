@@ -196,6 +196,13 @@ then lowered to ordinary typed composites.
 Plain and compound assignment enter this same resolver; assignment syntax does
 not carry a second operand-typing algorithm.
 
+Boolean vectors reuse the structural vector type rather than introducing a
+second mask type hierarchy. Semantic lowering gives vector comparisons a
+same-width boolean result, makes eager boolean lane operators ordinary typed
+unary/binary IR, and keeps `all`, `any`, and eager `select` as portable
+intrinsics. Scalar `&&`, `||`, and `?:` still lower through structured `If`, so
+lazy control flow and eager lane choice cannot be confused by either backend.
+
 ## 4. Two target-independent IRs
 
 ### Kernel IR: per-invocation semantics
@@ -217,8 +224,11 @@ variable names do not appear.
 Inference is absent from this IR: each value already has one concrete type.
 `vec(...)` and scalar broadcast require no new operation because semantic
 lowering expresses both with the existing `Composite` instruction.
-Intrinsic signatures live with their Kernel IR kinds and are consumed by both
-semantic lowering and IR verification, so admissible types have one authority.
+Numeric intrinsic signatures live with their Kernel IR kinds and are consumed
+by both semantic lowering and IR verification. Mask reductions and selection
+have their distinct structural verifier rules because their operands are not
+one homogeneous numeric overload. Both paths still converge on the same typed
+`Intrinsic` IR and backend-independent meaning.
 
 `Continue` and `Break` terminators carry the loop values for their exact CFG
 edge, so early transfer remains valid SSA rather than source-level control that

@@ -302,7 +302,7 @@ await gpu.submit(image(pixels, { size: [1920, 1080] }));
 Tach rounds logical sizes to complete workgroups, so kernels guard edge
 invocations before indexing. Parameters are either `buffer<T>` GPU storage or
 immutable values packed by the compiler. The core value types are `bool`,
-`int32`, `uint32`, `float16`, `float32`, and `vec<T, N>` numeric vectors where
+`int32`, `uint32`, `float16`, `float32`, and `vec<T, N>` vectors where
 `N` is 2, 3, or 4. Binary16 stays binary16 in buffers, arithmetic, WGSL, and SPIR-V;
 generated modules record and enforce its optional GPU requirements. Projects
 without `float16` keep the ordinary feature floor.
@@ -338,6 +338,30 @@ from scalar/vector components without repeating a known element type. For exampl
 `normalize(vec(1, 0, 0))` is `vec<float32, 3>`, while a `vec<float16, 3>` result context
 makes the same components binary16. Typed values are never silently converted;
 ambiguous or conflicting contexts are errors.
+
+Vector comparisons produce `vec<bool, N>` masks. Combine their lanes eagerly
+with `!`, `&`, `|`, or `^`, reduce them to control flow with `all(mask)` and
+`any(mask)`, or choose numeric/boolean lanes with
+`select(mask, whenTrue, whenFalse)`. Masks are computation values, not
+host-visible storage types:
+
+```tach
+function clipInside(
+  point: vec<float32, 3>,
+  lower: vec<float32, 3>,
+  upper: vec<float32, 3>,
+): vec<float32, 3> {
+  let inside = point >= lower & point <= upper;
+  let clipped = select(inside, point, 0.0);
+  if (all(inside)) {
+    return clipped;
+  }
+  return vec(0.0, 0.0, 0.0);
+}
+```
+
+`select` evaluates both arms; scalar `?:`, `&&`, and `||` remain the lazy forms
+when evaluation itself must be guarded.
 
 Inside a helper or indexed stage, ordinary structured `if`, `while`, and `for`
 control is available. `break` exits the nearest loop; `continue` advances it

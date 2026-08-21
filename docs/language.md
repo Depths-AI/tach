@@ -551,18 +551,20 @@ stages, buffers, structs, locals, or expressions other than the final
 `return view(...)`. `srgb8` is the sole format and is likewise not an ordinary
 source type.
 
-`vec<T, N>` is the sole vector type syntax. `T` is one numeric scalar and `N`
-is exactly `2`, `3`, or `4`:
+`vec<T, N>` is the sole vector type syntax. `T` is one scalar and `N` is
+exactly `2`, `3`, or `4`:
 
 ```text
 vec<float16, 2>  vec<float16, 3>  vec<float16, 4>
 vec<float32, 2>  vec<float32, 3>  vec<float32, 4>
 vec<int32, 2>    vec<int32, 3>    vec<int32, 4>
 vec<uint32, 2>   vec<uint32, 3>   vec<uint32, 4>
+vec<bool, 2>     vec<bool, 3>     vec<bool, 4>
 ```
 
-`vec(...)` is the sole vector value constructor. It flattens numeric scalar
-and vector arguments and must receive exactly two, three, or four total lanes:
+`vec(...)` is the sole vector value constructor. It flattens scalar and vector
+arguments of one element type and must receive exactly two, three, or four
+total lanes:
 
 ```tach
 function vectorValue(): vec<float32, 4> {
@@ -587,6 +589,12 @@ typed value and has no one-argument splat form. Repeat a scalar explicitly or
 rely on documented scalar/vector operator and intrinsic broadcast. To change
 a vector's element type, convert its scalar lanes explicitly and rebuild it
 with `vec(...)`.
+
+Boolean vectors are masks: computational values produced by vector comparison
+or `vec(true, false, ...)`. They may be constants, locals, helper parameters,
+and helper results, including fields of value-only structs. They deliberately
+have no host, buffer-backed, or shared-memory representation. Keep persistent
+flags as a documented integer encoding and derive a mask after loading them.
 
 Swizzles use `x`, `y`, `z`, and `w`. One lane yields a scalar; several lanes
 yield a vector. `value[index]` dynamically selects one lane.
@@ -701,8 +709,8 @@ another active local name. Branch-local names do not escape their branch. A
 not promise memory; the compiler represents locals as values carried through
 structured control.
 
-`const` evaluates completely in the compiler and may produce only `bool`, a
-numeric scalar, or a numeric vector:
+`const` evaluates completely in the compiler and may produce only a scalar or
+vector, including a boolean mask:
 
 ```tach
 const tileWidth: uint32 = 16; // module scope; visible through direct imports
@@ -735,7 +743,8 @@ The constant algebra deliberately reuses Tach's ordinary expression typing:
 - the lazy `condition ? then : else` expression;
 - numeric scalar conversions;
 - `vec(...)`, vector indexing, and swizzles; and
-- pure value intrinsics: numeric math, `fma`, and vector geometry.
+- pure value intrinsics: numeric math, `fma`, vector geometry, `all`, `any`,
+  and `select`.
 
 Struct literals, runtime arrays, buffers, parameters, coordinates, `let`
 bindings, transient allocation, barriers, atomics, and user-function calls are
@@ -764,14 +773,14 @@ Tach has no function values or methods.
 
 | Family | Operators and operands |
 |---|---|
-| unary | `!` bool; `-` signed numeric; `~` integer scalar/vector |
+| unary | `!` bool or boolean vector; `-` signed numeric; `~` integer scalar/vector |
 | add/subtract | `+ -` matching numeric values; scalar/vector broadcast |
 | multiply | `*` matching numeric values or scalar/vector broadcast |
 | divide | `/` matching numeric values; scalar/vector broadcast |
 | remainder | `%` matching numeric scalars |
-| comparison | `== != < <= > >=` matching numeric scalars, yielding bool |
+| comparison | `== != < <= > >=` matching numeric scalars/vectors; vectors yield `vec<bool, N>`; equality also accepts booleans |
 | logic | `&& ||` bool with short-circuiting |
-| bitwise | `& \| ^` matching integers; scalar/vector broadcast |
+| eager lane logic / bitwise | `& \| ^` matching booleans or integers; scalar/vector broadcast |
 | shifts | `<< >>` integer scalar/vector with unsigned scalar or lane-wise counts |
 
 Unsigned negation is invalid. Every shift masks its count to the low five bits;
@@ -806,7 +815,8 @@ addressable when its base is.
 ## 10. Control flow
 
 `if`, `while`, and `for` headers require parentheses. Conditions are `bool`.
-Both branches of a conditional expression have one concrete type.
+Both branches of a conditional expression have one concrete type. A condition
+is always scalar `bool`; reduce a mask with `all` or `any` first.
 
 ```tach
 function accumulated(count: uint32): uint32 {
@@ -849,6 +859,20 @@ A helper returns its declared type. A void helper or indexed stage may use
 ## 11. Math intrinsics
 
 Intrinsic names are reserved free functions.
+
+Boolean-mask intrinsics are:
+
+| Function | Input | Result |
+|---|---|---|
+| `all(mask)` | `vec<bool, N>` | `bool`; true only when every lane is true |
+| `any(mask)` | `vec<bool, N>` | `bool`; true when at least one lane is true |
+| `select(mask, whenTrue, whenFalse)` | `vec<bool, N>` plus matching numeric or boolean values | an `N`-lane vector chosen independently per lane |
+
+`select` broadcasts scalar arms to the mask width. Unlike `condition ? a : b`,
+it is eager: both arms are evaluated before selection. Use it for safe
+component-wise computation, not to guard an invalid buffer access, division,
+or other operation that must not execute. `&&` and `||` remain lazy scalar
+logic; `&`, `|`, and `^` are eager and component-wise on masks.
 
 These preserve their `float16` or `float32` scalar/vector type:
 
@@ -987,7 +1011,8 @@ runtime values.
 
 The value domains are:
 
-- constructible: scalars, vectors, and fixed-footprint structs;
+- constructible: scalars, vectors (including boolean masks), and
+  fixed-footprint structs;
 - host-shareable: numeric scalars/vectors, atomics, compatible structs, and
   runtime arrays/tails; and
 - workgroup-storable: numeric scalars/vectors, atomics, fixed arrays, and

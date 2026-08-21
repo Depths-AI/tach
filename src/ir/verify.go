@@ -326,8 +326,8 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if !types.Equal(t, x.Type) {
 				return e, fmt.Errorf("unary %s type mismatch %s -> %s", x.Op, t, x.Type)
 			}
-			if x.Op == "!" && !types.Equal(t, types.TBool) {
-				return e, fmt.Errorf("! requires bool")
+			if x.Op == "!" && !types.IsBoolean(t) {
+				return e, fmt.Errorf("! requires bool or boolean vector")
 			}
 			if x.Op == "-" && !types.IsSignedNumeric(t) {
 				return e, fmt.Errorf("unary - requires signed/float numeric")
@@ -838,6 +838,18 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 }
 
 func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
+	if x.Kind == IntrinsicAll || x.Kind == IntrinsicAny {
+		if len(args) != 1 || args[0] == nil || args[0].Kind != types.Vector || args[0].Elem.Kind != types.Bool || !types.Equal(x.Type, types.TBool) {
+			return fmt.Errorf("intrinsic %s requires vec<bool, N> and returns bool", x.Kind)
+		}
+		return nil
+	}
+	if x.Kind == IntrinsicSelect {
+		if len(args) != 3 || args[0] == nil || args[0].Kind != types.Vector || args[0].Elem.Kind != types.Bool || !types.Equal(args[1], args[2]) || !types.Equal(x.Type, args[1]) || x.Type.Kind != types.Vector || x.Type.Lanes != args[0].Lanes {
+			return fmt.Errorf("intrinsic select requires a boolean-vector mask and matching vector arms")
+		}
+		return nil
+	}
 	rule := x.Kind.Rule()
 	if rule.Arity == 0 {
 		return fmt.Errorf("unknown intrinsic %d", x.Kind)
@@ -895,7 +907,8 @@ func verifyBinary(x *Binary, l, r *types.Type) error {
 		}
 		return fmt.Errorf("%s invalid for %s and %s", x.Op, l, r)
 	case "==", "!=", "<", "<=", ">", ">=":
-		if !types.Equal(l, r) || !types.IsNumericScalar(l) || !types.Equal(x.Type, types.TBool) {
+		valid := types.IsNumeric(l) || (x.Op == "==" || x.Op == "!=") && types.IsBoolean(l)
+		if !types.Equal(l, r) || !valid || !types.Equal(x.Type, types.BoolShape(l)) {
 			return fmt.Errorf("comparison invalid for %s and %s", l, r)
 		}
 	case "&&", "||":
@@ -903,8 +916,8 @@ func verifyBinary(x *Binary, l, r *types.Type) error {
 			return fmt.Errorf("logical op requires bool operands")
 		}
 	case "&", "|", "^":
-		if !types.Equal(l, r) || !types.Equal(x.Type, l) || !types.IsIntegerLike(l) {
-			return fmt.Errorf("%s requires matching integer scalar/vector operands; got %s and %s -> %s", x.Op, l, r, x.Type)
+		if !types.Equal(l, r) || !types.Equal(x.Type, l) || !types.IsIntegerLike(l) && !types.IsBoolean(l) {
+			return fmt.Errorf("%s requires matching integer or boolean operands; got %s and %s -> %s", x.Op, l, r, x.Type)
 		}
 	case "<<", ">>":
 		want := types.ShiftCountType(l)

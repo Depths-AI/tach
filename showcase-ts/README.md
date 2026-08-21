@@ -58,7 +58,10 @@ The escape pair also exercises contextual vector construction and
 order-independent FP16 expression inference in a data-dependent recurrence;
 both lower through the same ordinary typed IR operations as explicit forms.
 
-The procedural renderer runs traversal, lighting, and post-processing. The mesh
+The procedural renderer runs traversal, lighting, and post-processing. Its box
+distance uses a three-lane comparison mask and eager `select` to keep only the
+positive outside-distance components, exercising mask lowering in meaningful
+hot-path work rather than a synthetic benchmark. The mesh
 renderer runs vertex projection, visibility clear, per-triangle bounding-box
 rasterization with atomic depth ownership, perspective-correct normal/material
 reconstruction, lighting, and post-processing. The mesh is a heterogeneous world

@@ -351,6 +351,11 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 	if operator == "==" || operator == "!=" || operator == "<" || operator == "<=" || operator == ">" || operator == ">=" {
 		var less, equal bool
 		switch t.Kind {
+		case types.Bool:
+			if operator != "==" && operator != "!=" {
+				return 0, fmt.Errorf("ordered comparison requires numeric values")
+			}
+			equal = left == right
 		case types.I32:
 			less, equal = int32(left) < int32(right), left == right
 		case types.U32:
@@ -367,6 +372,18 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 			return 1, nil
 		}
 		return 0, nil
+	}
+	if t.Kind == types.Bool {
+		switch operator {
+		case "&":
+			return left & right, nil
+		case "|":
+			return left | right, nil
+		case "^":
+			return left ^ right, nil
+		default:
+			return 0, fmt.Errorf("operator %s is invalid for bool", operator)
+		}
 	}
 	if t.Kind == types.F16 || t.Kind == types.F32 {
 		l, r := floatValue(t, left), floatValue(t, right)
@@ -484,6 +501,28 @@ func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments 
 			return nil, fmt.Errorf("constant intrinsic argument is unavailable")
 		}
 	}
+	if kind == ir.IntrinsicAll || kind == ir.IntrinsicAny {
+		truth := kind == ir.IntrinsicAll
+		for _, bit := range arguments[0].Bits {
+			if kind == ir.IntrinsicAll {
+				truth = truth && bit != 0
+			} else {
+				truth = truth || bit != 0
+			}
+		}
+		return &types.Value{Type: types.TBool, Bits: []uint32{boolBit(truth)}}, nil
+	}
+	if kind == ir.IntrinsicSelect {
+		out := &types.Value{Type: resultType, Bits: make([]uint32, resultType.Lanes)}
+		for lane, bit := range arguments[0].Bits {
+			arm := arguments[2]
+			if bit != 0 {
+				arm = arguments[1]
+			}
+			out.Bits[lane] = arm.Bits[lane]
+		}
+		return out, nil
+	}
 	resultLanes := 1
 	resultElement := resultType
 	if resultType.Kind == types.Vector {
@@ -538,6 +577,13 @@ func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments 
 		out.Bits[lane] = bits
 	}
 	return out, nil
+}
+
+func boolBit(value bool) uint32 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func evaluateGeometricScalar(kind ir.IntrinsicKind, t *types.Type, arguments []*types.Value) (*types.Value, error) {

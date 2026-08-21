@@ -5,7 +5,7 @@ through a library. These files are how Tach asks you to *describe* GPU work
 yourself: small functions that look like TypeScript, compiled once, then
 called from ordinary application code.
 
-This folder is not an app and not a speed test. It is a set of seventeen short
+This folder is not an app and not a speed test. It is a set of eighteen short
 programs that together cover the language you will actually write. Each
 program exists because it teaches one idea that is easy to miss if you only
 ever saw `array.map`. Read them in order the first time. After that, jump
@@ -83,6 +83,7 @@ examples/
     loop-control.tach loop transfer, inferred vectors, and contextual math
     for.tach         for-loops and vectors
     math.tach        sin, length, and friends
+    masks.tach       boolean vectors, lane masks, reductions, and selection
     view.tach        turn pixels into something a canvas can show
   simulation/        slightly larger pieces
     types.tach       shared Particle type
@@ -106,6 +107,7 @@ under it. There is no source list and no webpack config for kernels.
 | `contextualMath` | `core/loop-control.tach` | Infer numeric literals, vectors, and scalar broadcast from one shared expression context. |
 | `reduceLanes` | `core/for.tach` | Sum each group of four integers. |
 | `math` | `core/math.tach` | Run the standard math functions at each index. |
+| `masks` | `core/masks.tach` | Compare vector lanes, combine/reduce masks, and select values. |
 | `gradient` | `core/view.tach` | Paint a gradient and return a displayable image. |
 | `gradientInto` | `core/view.tach` | Paint that gradient into a buffer you still own. |
 | `swatch` | `core/view.tach` | Paint four known colors as a tiny image. |
@@ -280,11 +282,35 @@ a GPU does not have to match `Math.sin` bit for bit. It has to be the
 same function closely enough that you can trust the kernel is doing math,
 not skipping it.
 
-Its `verticalAxis` is a module-level vector constant. Constants can be bools,
-numeric scalars, or numeric vectors, and may use typed operators,
+Its `verticalAxis` is a module-level vector constant. Constants can be scalar
+or vector values, including boolean masks, and may use typed operators,
 conditionals, conversions, `vec(...)`, swizzles/indexing, and pure math. They
 follow the same direct-import visibility rule as types and functions, but never
 become generated TypeScript exports.
+
+## `masks` - decisions for individual vector lanes
+
+A scalar `bool` answers one question. A `vec<bool, N>` answers the same
+question independently for every vector lane. `core/masks.tach` compares one
+four-lane value against scalar bounds, producing a mask without spelling four
+separate comparisons:
+
+```tach
+let inside = value >= 0.0 & value <= 2.0;
+let chosen = inside ^ alternating | value == 0.0;
+let selected = select(chosen, value, -1.0);
+```
+
+The comparison broadcasts each scalar bound and returns `vec<bool, 4>`. `&`,
+`|`, `^`, and `!` are eager lane-wise mask operations. `select` then chooses
+one numeric result per lane and broadcasts its scalar `-1.0` arm. Both arms are
+computed before selection; use scalar `?:` when one arm must not execute.
+
+`all(mask)` and `any(mask)` reduce a mask to the scalar `bool` required by an
+`if`, `while`, `&&`, `||`, or `?:`. The harness checks exact numeric output, so
+the example proves more than source acceptance: mask construction, comparison,
+selection, both reductions, generated bindings, and both GPU backends agree.
+Boolean vectors stay inside computation and cannot be buffer elements.
 
 ## `view.tach` - making a picture without reading pixels
 
@@ -425,7 +451,7 @@ imports `tach` from `@depths/tach`. The same TypeScript runs in a
 browser (WebGPU) and in Deno (Vulkan). You do not choose a backend.
 
 The repository's browser and Deno tests compile this project and call
-every public function. They are how we know the seventeen programs still
+every public function. They are how we know the eighteen programs still
 mean the same thing on both hosts. A separate project, `showcase-ts`,
 measures large workloads. It is not this folder.
 

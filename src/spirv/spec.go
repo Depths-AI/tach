@@ -71,6 +71,8 @@ const (
 	OpFRem                 Op = 140
 	OpVectorTimesScalar    Op = 142
 	OpDot                  Op = 148
+	OpAny                  Op = 154
+	OpAll                  Op = 155
 	OpLogicalEqual         Op = 164
 	OpLogicalNotEqual      Op = 165
 	OpLogicalOr            Op = 166
@@ -240,7 +242,7 @@ var opNames = map[Op]string{
 	OpSNegate: "OpSNegate", OpFNegate: "OpFNegate", OpIAdd: "OpIAdd", OpFAdd: "OpFAdd",
 	OpISub: "OpISub", OpFSub: "OpFSub", OpIMul: "OpIMul", OpFMul: "OpFMul", OpUDiv: "OpUDiv",
 	OpSDiv: "OpSDiv", OpFDiv: "OpFDiv", OpUMod: "OpUMod", OpSRem: "OpSRem", OpFRem: "OpFRem",
-	OpVectorTimesScalar: "OpVectorTimesScalar", OpDot: "OpDot", OpLogicalEqual: "OpLogicalEqual",
+	OpVectorTimesScalar: "OpVectorTimesScalar", OpDot: "OpDot", OpAny: "OpAny", OpAll: "OpAll", OpLogicalEqual: "OpLogicalEqual",
 	OpLogicalNotEqual: "OpLogicalNotEqual", OpLogicalOr: "OpLogicalOr", OpLogicalAnd: "OpLogicalAnd",
 	OpLogicalNot: "OpLogicalNot", OpSelect: "OpSelect", OpIEqual: "OpIEqual", OpINotEqual: "OpINotEqual",
 	OpUGreaterThan: "OpUGreaterThan", OpSGreaterThan: "OpSGreaterThan", OpUGreaterThanEqual: "OpUGreaterThanEqual",

@@ -46,7 +46,7 @@ type Value struct {
 }
 
 func IsConstantType(t *Type) bool {
-	return IsScalar(t) || t != nil && t.Kind == Vector && IsNumericScalar(t.Elem)
+	return IsScalar(t) || t != nil && t.Kind == Vector && IsScalar(t.Elem)
 }
 
 func (v *Value) Valid() bool {
@@ -138,6 +138,15 @@ func IsNumericScalar(t *Type) bool {
 }
 func IsNumeric(t *Type) bool {
 	return IsNumericScalar(t) || (t != nil && t.Kind == Vector && IsNumericScalar(t.Elem))
+}
+func IsBoolean(t *Type) bool {
+	return t != nil && (t.Kind == Bool || t.Kind == Vector && t.Elem != nil && t.Elem.Kind == Bool)
+}
+func BoolShape(t *Type) *Type {
+	if t != nil && t.Kind == Vector {
+		return Vec(TBool, t.Lanes)
+	}
+	return TBool
 }
 func IsInteger(t *Type) bool { return t != nil && (t.Kind == I32 || t.Kind == U32) }
 func IsIntegerLike(t *Type) bool {

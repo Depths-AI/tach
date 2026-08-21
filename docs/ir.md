@@ -289,7 +289,7 @@ regions. Value-producing instructions are:
 | `Composite` | vector or struct construction |
 | `Extract`, `VectorIndex` | constant or dynamic value projection |
 | `Call` | direct pure helper call |
-| `Intrinsic` | portable math operation |
+| `Intrinsic` | portable numeric, geometric, mask-reduction, or selection operation |
 | `Load` | read through a place |
 | `ArrayLength` | runtime-array length through a place |
 | `Atomic` | atomic result except store |
@@ -300,6 +300,15 @@ to `Composite`; inferred scalar broadcast lowers to a `Composite` splat before
 the consuming operator or intrinsic. Neither requires another IR operation.
 Source `vec<T, N>` types are already structural vector types here. There is no
 scalar-plus-lane type spelling or typed vector constructor.
+
+Vector comparison is an ordinary `Binary` whose result is structural
+`vec<bool, N>`. Eager `&`, `|`, `^`, and unary `!` preserve that mask type.
+`all`/`any` and eager lane-wise `select` remain typed `Intrinsic` operations:
+the former reduce a mask to scalar bool, while the latter consumes a mask and
+two equal-width vectors. This keeps mask meaning target-neutral. WGSL receives
+its logical builtins (with Tach's mask-first `select` arguments reordered),
+and SPIR-V receives `OpAny`, `OpAll`, and `OpSelect`; boolean XOR becomes the
+portable logical-not-equal operation on each backend.
 
 ### Places
 
@@ -381,7 +390,7 @@ the selected region executes.
 
 ## 7. Types, effects, and access summaries
 
-Kernel IR uses only logical Tach types: scalars, numeric vectors, named
+Kernel IR uses only logical Tach types: scalars, numeric and boolean vectors, named
 structs, atomics, fixed/runtime arrays, and void. Host padding, WGSL wrappers,
 SPIR-V pointer/storage types, and descriptor decorations are later physical
 representations.
@@ -559,6 +568,9 @@ stores the word in a storage buffer.
 | `If` result | private mutable local | merge block and `OpPhi` |
 | `Loop` carrier | generated mutable local | header `OpPhi` |
 | intrinsic | WGSL builtin | core or GLSL.std.450 instruction |
+| boolean comparison / lane logic | boolean-vector operator | matching logical comparison/operator |
+| `all` / `any` | logical builtin | `OpAll` / `OpAny` |
+| eager `select` | `select(false, true, mask)` | `OpSelect(mask, true, false)` |
 | `fma` | `fma` builtin | GLSL.std.450 `Fma` |
 | `float16` | `f16` after `enable f16;` | 16-bit `OpTypeFloat` plus exact capabilities |
 | f16/f32 conversion | constructor conversion | `OpFConvert` |

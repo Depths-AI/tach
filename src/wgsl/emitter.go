@@ -457,7 +457,11 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		e.line("let %s: %s = %s%s;", v(x.Result), e.typeName(x.Type), x.Op, v(x.X))
 		s.def(x.Result, x.Type)
 	case *ir.Binary:
-		e.line("let %s: %s = %s %s %s;", v(x.Result), e.typeName(x.Type), v(x.Left), x.Op, v(x.Right))
+		op := x.Op
+		if op == "^" && types.IsBoolean(x.Type) {
+			op = "!="
+		}
+		e.line("let %s: %s = %s %s %s;", v(x.Result), e.typeName(x.Type), v(x.Left), op, v(x.Right))
 		s.def(x.Result, x.Type)
 	case *ir.Intrinsic:
 		args := make([]string, len(x.Args))
@@ -467,6 +471,9 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		name := x.Kind.String()
 		if x.Kind == ir.IntrinsicRSqrt {
 			name = "inverseSqrt"
+		}
+		if x.Kind == ir.IntrinsicSelect {
+			args = []string{args[2], args[1], args[0]}
 		}
 		e.line("let %s: %s = %s(%s);", v(x.Result), e.typeName(x.Type), name, strings.Join(args, ", "))
 		s.def(x.Result, x.Type)

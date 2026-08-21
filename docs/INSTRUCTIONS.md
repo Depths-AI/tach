@@ -1075,12 +1075,15 @@ retains the ordinary feature floor.
 
 `bool` can be passed as a plain parameter and used in local values. It has no
 direct storage-buffer representation, so do not place it in buffer-backed
-structs or arrays. If persistent boolean-like storage is needed, use a
-documented `uint32` convention such as `0` and `1`.
+structs or arrays. `vec<bool, N>` is a value-only lane mask: use it in
+constants, locals, helper parameters/results, and value-only structs, but not
+as a public parameter, buffer-backed value, or shared value. If persistent
+boolean-like storage is needed, use a documented `uint32` convention such as
+`0` and `1`, load it, and compare to derive a mask.
 
-## 27. Numeric vectors
+## 27. Vectors and boolean masks
 
-`vec<T, N>` is Tach's sole vector type syntax. `T` must be numeric and `N`
+`vec<T, N>` is Tach's sole vector type syntax. `T` is a scalar and `N`
 must be `2`, `3`, or `4`:
 
 ```text
@@ -1088,15 +1091,17 @@ vec<float16, 2>  vec<float16, 3>  vec<float16, 4>
 vec<float32, 2>  vec<float32, 3>  vec<float32, 4>
 vec<int32, 2>    vec<int32, 3>    vec<int32, 4>
 vec<uint32, 2>   vec<uint32, 3>   vec<uint32, 4>
+vec<bool, 2>     vec<bool, 3>     vec<bool, 4>
 ```
 
-`vec(...)` is the sole vector value constructor. It flattens numeric scalar
-and vector arguments to exactly two, three, or four total lanes:
+`vec(...)` is the sole vector value constructor. It flattens scalar and vector
+arguments of one element type to exactly two, three, or four total lanes:
 
 ```tach
 let a = vec(1, 2, 3, 4);
 let b = vec(vec(1, 2), 3, 4);
 let allHalf = vec(0.5, 0.5, 0.5, 0.5);
+let alternating = vec(true, false, true, false);
 ```
 
 Context determines its element type and the arguments determine its width:
@@ -1129,9 +1134,11 @@ One selected lane yields a scalar; multiple lanes yield a matching vector.
 `value[index]` dynamically selects a lane. A vector lane is addressable when
 its base is an addressable mutable local, buffer place, or shared place.
 
-Most arithmetic supports equal-type vectors and documented scalar/vector
-broadcast. Do not assume matrix types, vector comparisons, boolean vectors, or
-arbitrary swizzle alphabets exist.
+Most arithmetic supports equal-type numeric vectors and documented
+scalar/vector broadcast. Numeric vector comparisons produce same-width boolean
+masks. Combine masks with `!`, `&`, `|`, or `^`; reduce them with `all`/`any`;
+choose lanes with `select`. Do not assume matrix types or arbitrary swizzle
+alphabets exist.
 
 ## 28. Struct types and literals
 
@@ -1455,8 +1462,8 @@ the source declaration makes no compile-time promise. Function parameters and
 coordinates cannot be assigned. A `for` initializer is always a loop-scoped
 `let`.
 
-`const` is evaluated completely by the compiler and may produce only `bool`, a
-numeric scalar, or a numeric vector:
+`const` is evaluated completely by the compiler and may produce only a scalar
+or vector, including a boolean mask:
 
 ```tach
 const tileWidth: uint32 = 16;
@@ -1489,7 +1496,7 @@ Constant expressions use ordinary Tach typing and exactly this algebra:
 - the lazy conditional expression;
 - numeric scalar conversions;
 - `vec(...)`, vector indexing, and swizzles; and
-- pure numeric, `fma`, and vector-geometry intrinsics.
+- pure numeric, `fma`, vector-geometry, and mask intrinsics.
 
 They cannot use structs, runtime arrays, buffers, parameters, coordinates,
 `let` bindings, transient allocation, barriers, atomics, or user-function
@@ -1534,14 +1541,14 @@ Supported operator families are deliberately narrow:
 
 | Family | Supported operands |
 |---|---|
-| unary `!` | `bool` |
+| unary `!` | `bool` or `vec<bool, N>` |
 | unary `-` | signed numeric scalar/vector |
 | unary `~` | integer scalar/vector |
 | `+ - * /` | matching numeric values; documented scalar/vector broadcast |
 | `%` | matching numeric scalars |
-| `== != < <= > >=` | matching numeric scalars, result `bool` |
+| `== != < <= > >=` | matching numeric scalars/vectors; vector result is `vec<bool, N>`; equality also accepts booleans |
 | `&& ||` | `bool`, with short-circuit evaluation |
-| `& \| ^` | matching integer values; scalar/vector broadcast |
+| `& \| ^` | matching integer or boolean values; scalar/vector broadcast |
 | `<< >>` | integer scalar/vector with unsigned scalar or lane-wise counts |
 
 Unsigned negation is invalid. A shift masks its count to the low five bits.
@@ -1550,7 +1557,7 @@ Signed right shift is arithmetic; unsigned right shift is logical.
 Do not assume JavaScript coercion. Both operands must satisfy Tach's exact
 typing and broadcast rules. There is no string concatenation, nullish
 coalescing, optional chaining, exponentiation operator, identity comparison,
-vector comparison, or overloaded user operator.
+or overloaded user operator.
 
 The conditional expression is lazy and requires equal branch result types:
 
@@ -1674,6 +1681,26 @@ A helper returns its declared value; a void helper or indexed stage may use
 orchestration programs do not support ordinary control flow at all.
 
 ## 41. Math intrinsics
+
+Mask intrinsics complete vector comparison:
+
+```tach
+let inside = point >= lower & point <= upper;
+let clipped = select(inside, point, 0.0);
+if (all(inside) || any(clipped != point)) {
+  // Conditions remain scalar bool.
+}
+```
+
+- `all(mask)` returns true only when every `vec<bool, N>` lane is true.
+- `any(mask)` returns true when at least one lane is true.
+- `select(mask, whenTrue, whenFalse)` returns an `N`-lane numeric or boolean
+  vector and broadcasts scalar arms. Its arguments are mask-first in Tach.
+
+Mask logic and `select` are eager. Both operands/arms execute before the result
+is formed. They cannot guard an invalid load, division, or other operation that
+must not happen. Scalar `&&`, `||`, and `condition ? true : false` are the lazy
+forms; reduce a mask before using it as their condition.
 
 These free functions preserve their `float16` or `float32` scalar/vector type:
 

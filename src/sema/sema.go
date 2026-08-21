@@ -485,8 +485,8 @@ func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*types.Type,
 		if err != nil {
 			return nil, err
 		}
-		if !types.IsNumericScalar(e) {
-			return nil, diag(t.Span, "vec element type must be numeric, got %s", e)
+		if !types.IsScalar(e) {
+			return nil, diag(t.Span, "vec element type must be scalar, got %s", e)
 		}
 		lanes, err := strconv.Atoi(t.Lanes)
 		if err != nil || lanes < 2 || lanes > 4 {
@@ -1331,12 +1331,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		b.emit(&ir.Composite{Result: id, Type: expected, Values: vals, Span: v.Span})
 		return id, expected, nil
 	case *ast.UnaryExpr:
-		var want *types.Type
-		if v.Op == "!" {
-			want = types.TBool
-		} else {
-			want = expected
-		}
+		want := expected
 		if v.Op == "-" && want == nil {
 			if n, ok := v.X.(*ast.NumberExpr); ok {
 				want = types.TI32
@@ -1350,8 +1345,8 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *types.Typ
 		if err != nil {
 			return 0, nil, err
 		}
-		if v.Op == "!" && !types.Equal(t, types.TBool) {
-			return 0, nil, diag(v.Span, "! requires bool")
+		if v.Op == "!" && !types.IsBoolean(t) {
+			return 0, nil, diag(v.Span, "! requires bool or vec<bool, N>")
 		}
 		if v.Op == "-" && !types.IsSignedNumeric(t) {
 			return 0, nil, diag(v.Span, "unary - requires a signed numeric scalar or vector")
@@ -1560,11 +1555,25 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 		}
 		return c.lowerShift(b, e, x.Op, l, lt, x.Right, x.Span)
 	}
-
 	expressions := []ast.Expr{x.Left, x.Right}
-	arguments, err := c.lowerNumericArguments(b, e, x.Op, expressions)
-	if err != nil {
-		return 0, nil, err
+	arguments := make([]detachedExpr, 2)
+	if x.Op == "==" || x.Op == "!=" || x.Op == "&" || x.Op == "|" || x.Op == "^" {
+		for i, expression := range expressions {
+			argument, err := c.lowerDetached(b, e, expression, nil)
+			if err != nil {
+				return 0, nil, err
+			}
+			arguments[i] = argument
+		}
+		if types.IsBoolean(arguments[0].type_) || types.IsBoolean(arguments[1].type_) {
+			return c.emitBooleanBinary(b, arguments[0], arguments[1], x.Op, x.Span)
+		}
+	} else {
+		var err error
+		arguments, err = c.lowerNumericArguments(b, e, x.Op, expressions)
+		if err != nil {
+			return 0, nil, err
+		}
 	}
 
 	return c.emitResolvedBinary(b, e, x.Op, arguments, expected, x.Span)
@@ -1588,7 +1597,7 @@ func (c *Checker) emitResolvedBinary(b *fnBuilder, e env, op string, arguments [
 		if argumentLanes > 0 {
 			want = vector
 		}
-		values[i], valueTypes[i], err = c.commitNumericArgument(b, e, argument, want)
+		values[i], valueTypes[i], err = c.commitArgument(b, e, argument, want)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -1598,10 +1607,42 @@ func (c *Checker) emitResolvedBinary(b *fnBuilder, e env, op string, arguments [
 
 func vectorScalarOperator(op string) bool {
 	switch op {
-	case "+", "-", "*", "/", "%", "&", "|", "^":
+	case "+", "-", "*", "/", "%", "&", "|", "^", "==", "!=", "<", "<=", ">", ">=":
 		return true
 	}
 	return false
+}
+
+func (c *Checker) emitBooleanBinary(b *fnBuilder, left, right detachedExpr, op string, span source.Span) (ir.ValueID, *types.Type, error) {
+	if op != "==" && op != "!=" && op != "&" && op != "|" && op != "^" {
+		return 0, nil, diag(span, "%s is not defined for boolean values", op)
+	}
+	lt, rt := left.type_, right.type_
+	if !types.IsBoolean(lt) || !types.IsBoolean(rt) {
+		return 0, nil, diag(span, "%s requires both operands to be bool or vec<bool, N>; got %s and %s", op, lt, rt)
+	}
+	lanes := 0
+	if lt.Kind == types.Vector {
+		lanes = lt.Lanes
+	}
+	if rt.Kind == types.Vector {
+		if lanes != 0 && lanes != rt.Lanes {
+			return 0, nil, diag(span, "%s operands use conflicting vector widths %d and %d", op, lanes, rt.Lanes)
+		}
+		lanes = rt.Lanes
+	}
+	b.block.Instrs = append(b.block.Instrs, left.block.Instrs...)
+	b.block.Instrs = append(b.block.Instrs, right.block.Instrs...)
+	if lanes > 0 {
+		vector := types.Vec(types.TBool, lanes)
+		if lt.Kind == types.Bool {
+			left.value, lt = c.splat(b, left.value, vector, span), vector
+		}
+		if rt.Kind == types.Bool {
+			right.value, rt = c.splat(b, right.value, vector, span), vector
+		}
+	}
+	return c.emitBinary(b, op, left.value, lt, right.value, rt, span)
 }
 
 func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID, leftType *types.Type, right ast.Expr, span source.Span) (ir.ValueID, *types.Type, error) {
@@ -1682,10 +1723,10 @@ func (c *Checker) emitBinary(b *fnBuilder, op string, l ir.ValueID, lt *types.Ty
 	var out *types.Type
 	switch op {
 	case "==", "!=", "<", "<=", ">", ">=":
-		if !types.Equal(lt, rt) || !types.IsNumericScalar(lt) {
-			return 0, nil, diag(span, "comparison %s requires matching scalar numeric operands; got %s and %s", op, lt, rt)
+		if !types.Equal(lt, rt) || !types.IsNumeric(lt) && !((op == "==" || op == "!=") && types.IsBoolean(lt)) {
+			return 0, nil, diag(span, "comparison %s requires matching numeric operands; got %s and %s", op, lt, rt)
 		}
-		out = types.TBool
+		out = types.BoolShape(lt)
 	case "+", "-":
 		if !types.Equal(lt, rt) || !types.IsNumeric(lt) {
 			return 0, nil, diag(span, "%s requires matching numeric operands; got %s and %s", op, lt, rt)
@@ -1715,8 +1756,8 @@ func (c *Checker) emitBinary(b *fnBuilder, op string, l ir.ValueID, lt *types.Ty
 		}
 		out = lt
 	case "&", "|", "^":
-		if !types.Equal(lt, rt) || !types.IsIntegerLike(lt) {
-			return 0, nil, diag(span, "%s requires matching int32/uint32 scalar or integer-vector operands; got %s and %s", op, lt, rt)
+		if !types.Equal(lt, rt) || !types.IsIntegerLike(lt) && !types.IsBoolean(lt) {
+			return 0, nil, diag(span, "%s requires matching integer or boolean operands; got %s and %s", op, lt, rt)
 		}
 		out = lt
 	case "<<", ">>":
@@ -1779,6 +1820,12 @@ func intrinsicBuiltin(name string) (ir.IntrinsicKind, bool) {
 		return ir.IntrinsicCross, true
 	case "normalize":
 		return ir.IntrinsicNormalize, true
+	case "all":
+		return ir.IntrinsicAll, true
+	case "any":
+		return ir.IntrinsicAny, true
+	case "select":
+		return ir.IntrinsicSelect, true
 	default:
 		return 0, false
 	}
@@ -1860,6 +1907,16 @@ func numericElement(t *types.Type) (*types.Type, int) {
 	return nil, 0
 }
 
+func scalarElement(t *types.Type) (*types.Type, int) {
+	if types.IsScalar(t) {
+		return t, 0
+	}
+	if t != nil && t.Kind == types.Vector && types.IsScalar(t.Elem) {
+		return t.Elem, t.Lanes
+	}
+	return nil, 0
+}
+
 func defaultNumericElement(domain ir.NumericDomain, arguments []detachedExpr) *types.Type {
 	if domain == ir.NumericFloat {
 		return types.TF32
@@ -1925,7 +1982,7 @@ func resolveNumericOperands(operation string, domain ir.NumericDomain, arguments
 	return element, lanes, nil
 }
 
-func (c *Checker) commitNumericArgument(b *fnBuilder, e env, argument detachedExpr, want *types.Type) (ir.ValueID, *types.Type, error) {
+func (c *Checker) commitArgument(b *fnBuilder, e env, argument detachedExpr, want *types.Type) (ir.ValueID, *types.Type, error) {
 	if argument.contextual {
 		var err error
 		argument, err = c.lowerDetached(b, e, argument.source, want)
@@ -1980,7 +2037,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 		if argumentLanes > 0 {
 			want = vector
 		}
-		value, type_, err := c.commitNumericArgument(b, e, argument, want)
+		value, type_, err := c.commitArgument(b, e, argument, want)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -2010,17 +2067,108 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 	return result, out, nil
 }
 
+func (c *Checker) lowerMaskIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.IntrinsicKind, expected *types.Type) (ir.ValueID, *types.Type, error) {
+	if kind == ir.IntrinsicAll || kind == ir.IntrinsicAny {
+		if len(x.Args) != 1 {
+			return 0, nil, diag(x.Span, "%s expects one argument, got %d", kind, len(x.Args))
+		}
+		mask, maskType, err := c.lowerExpr(b, e, x.Args[0], nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		if maskType.Kind != types.Vector || maskType.Elem.Kind != types.Bool {
+			return 0, nil, diag(x.Args[0].GetSpan(), "%s requires vec<bool, N>, got %s", kind, maskType)
+		}
+		if expected != nil && !types.Equal(expected, types.TBool) {
+			return 0, nil, diag(x.Span, "%s returns bool, context requires %s", kind, expected)
+		}
+		result := b.value()
+		b.emit(&ir.Intrinsic{Result: result, Type: types.TBool, Kind: kind, Args: []ir.ValueID{mask}, Span: x.Span})
+		return result, types.TBool, nil
+	}
+	if len(x.Args) != 3 {
+		return 0, nil, diag(x.Span, "select expects mask, whenTrue, and whenFalse arguments; got %d", len(x.Args))
+	}
+	mask, maskType, err := c.lowerExpr(b, e, x.Args[0], nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if maskType.Kind != types.Vector || maskType.Elem.Kind != types.Bool {
+		return 0, nil, diag(x.Args[0].GetSpan(), "select mask must be vec<bool, N>, got %s", maskType)
+	}
+	arms := make([]detachedExpr, 2)
+	for i := range arms {
+		arms[i], err = c.lowerDetached(b, e, x.Args[i+1], nil)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+	var out *types.Type
+	if types.IsBoolean(arms[0].type_) || types.IsBoolean(arms[1].type_) {
+		for i, arm := range arms {
+			if !types.IsBoolean(arm.type_) || arm.type_.Kind == types.Vector && arm.type_.Lanes != maskType.Lanes {
+				return 0, nil, diag(x.Args[i+1].GetSpan(), "select boolean arm is %s, want bool or %s", arm.type_, maskType)
+			}
+		}
+		out = maskType
+	} else {
+		var element *types.Type
+		if expected != nil {
+			if expected.Kind != types.Vector || expected.Lanes != maskType.Lanes || !types.IsNumericScalar(expected.Elem) {
+				return 0, nil, diag(x.Span, "select produces a %d-lane vector, context requires %s", maskType.Lanes, expected)
+			}
+			element = expected.Elem
+		}
+		element, _, err = resolveNumericOperands("select", ir.NumericAny, arms, element, maskType.Lanes)
+		if err != nil {
+			return 0, nil, diag(x.Span, "%v", err)
+		}
+		out = types.Vec(element, maskType.Lanes)
+	}
+	if expected != nil && !types.Equal(expected, out) {
+		return 0, nil, diag(x.Span, "select returns %s, context requires %s", out, expected)
+	}
+	args := []ir.ValueID{mask, 0, 0}
+	for i, arm := range arms {
+		want := out
+		if arm.type_.Kind != types.Vector {
+			want = out.Elem
+		}
+		value, armType, err := c.commitArgument(b, e, arm, want)
+		if err != nil {
+			return 0, nil, err
+		}
+		if types.Equal(armType, out.Elem) {
+			value, armType = c.splat(b, value, out, x.Args[i+1].GetSpan()), out
+		}
+		if !types.Equal(armType, out) {
+			return 0, nil, diag(x.Args[i+1].GetSpan(), "select arm is %s, want %s or %s", armType, out.Elem, out)
+		}
+		args[i+1] = value
+	}
+	result := b.value()
+	b.emit(&ir.Intrinsic{Result: result, Type: out, Kind: kind, Args: args, Span: x.Span})
+	return result, out, nil
+}
+
 func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *ast.CallExpr, expected *types.Type) (ir.ValueID, *types.Type, error) {
 	if len(x.Args) == 0 {
 		return 0, nil, diag(x.Span, "vec requires components")
 	}
-	arguments, err := c.lowerNumericArguments(b, e, "vec", x.Args)
-	if err != nil {
-		return 0, nil, err
+	arguments := make([]detachedExpr, len(x.Args))
+	for i, expression := range x.Args {
+		argument, err := c.lowerDetached(b, e, expression, nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		if element, _ := scalarElement(argument.type_); element == nil {
+			return 0, nil, diag(expression.GetSpan(), "vec requires scalar or vector components, got %s", argument.type_)
+		}
+		arguments[i] = argument
 	}
 	lanes := 0
 	for _, argument := range arguments {
-		if _, width := numericElement(argument.type_); width == 0 {
+		if _, width := scalarElement(argument.type_); width == 0 {
 			lanes++
 		} else {
 			lanes += width
@@ -2032,13 +2180,13 @@ func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *ast.CallExpr, exp
 
 	var element *types.Type
 	if expected != nil {
-		if expected.Kind != types.Vector || expected.Lanes != lanes || !types.IsNumericScalar(expected.Elem) {
-			return 0, nil, diag(x.Span, "vec produces a %d-lane numeric vector, context requires %s", lanes, expected)
+		if expected.Kind != types.Vector || expected.Lanes != lanes || !types.IsScalar(expected.Elem) {
+			return 0, nil, diag(x.Span, "vec produces a %d-lane vector, context requires %s", lanes, expected)
 		}
 		element = expected.Elem
 	}
 	for i, argument := range arguments {
-		argumentElement, _ := numericElement(argument.type_)
+		argumentElement, _ := scalarElement(argument.type_)
 		if argument.contextual {
 			continue
 		}
@@ -2053,12 +2201,12 @@ func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *ast.CallExpr, exp
 	vector := types.Vec(element, lanes)
 	values := make([]ir.ValueID, 0, lanes)
 	for i, argument := range arguments {
-		_, width := numericElement(argument.type_)
+		_, width := scalarElement(argument.type_)
 		want := element
 		if width > 0 {
 			want = types.Vec(element, width)
 		}
-		base, type_, err := c.commitNumericArgument(b, e, argument, want)
+		base, type_, err := c.commitArgument(b, e, argument, want)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -2092,6 +2240,9 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 		return c.lowerVectorInference(b, e, x, expected)
 	}
 	if kind, ok := intrinsicBuiltin(id.Name); ok {
+		if kind == ir.IntrinsicAll || kind == ir.IntrinsicAny || kind == ir.IntrinsicSelect {
+			return c.lowerMaskIntrinsic(b, e, x, kind, expected)
+		}
 		return c.lowerIntrinsic(b, e, x, kind, expected)
 	}
 	if b.comptime {

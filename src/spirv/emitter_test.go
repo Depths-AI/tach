@@ -212,6 +212,35 @@ export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, half: buffer<
 	}
 }
 
+func TestBooleanVectorsAndMasksSPIRV(t *testing.T) {
+	bin := emitSource(t, "masks.tach", `
+function choose(value: vec<float32, 4>): vec<float32, 4> {
+  let inside = value >= -1.0 & value <= 1.0;
+  let changed = inside ^ vec(false, true, false, true);
+  let selected = select(changed | value == 0.0, abs(value), -value);
+  return all(inside) || any(!changed) ? selected : vec(0.0, 0.0, 0.0, 0.0);
+}
+export function masks[i](out: buffer<vec<float32, 4>[]>) {
+  if (i < out.length) { out[i] = choose(vec(float32(i), -0.5, 0.0, 2.0)); }
+}`)
+	if err := spirv.Validate(bin); err != nil {
+		t.Fatal(err)
+	}
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[spirv.Op]int{}
+	for _, instruction := range m.Instructions {
+		counts[instruction.Op]++
+	}
+	for _, op := range []spirv.Op{spirv.OpTypeBool, spirv.OpAny, spirv.OpAll, spirv.OpSelect, spirv.OpLogicalNot, spirv.OpLogicalAnd, spirv.OpLogicalOr, spirv.OpLogicalNotEqual, spirv.OpFOrdGreaterThanEqual, spirv.OpFOrdLessThanEqual} {
+		if counts[op] == 0 {
+			t.Fatalf("mask SPIR-V missing opcode %d", op)
+		}
+	}
+}
+
 func TestViewProjectionIsValidSPIRV16(t *testing.T) {
 	bin := emitSource(t, "view.tach", `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) {

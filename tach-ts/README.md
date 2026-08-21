@@ -699,13 +699,14 @@ package.
 | `float16` | IEEE 754 binary16 | `number` |
 | `float32` | 32-bit floating point | `number` |
 | `void` | absence of a helper result | no host value |
+| `vec<bool, N>` | Boolean lane mask, `N` = 2, 3, or 4 | computation-only; no host value |
 | `vec<int32, N>` | signed vector, `N` = 2, 3, or 4 | readonly numeric tuple |
 | `vec<uint32, N>` | unsigned vector, `N` = 2, 3, or 4 | readonly numeric tuple |
 | `vec<float16, N>` | binary16 vector, `N` = 2, 3, or 4 | readonly numeric tuple |
 | `vec<float32, N>` | floating vector, `N` = 2, 3, or 4 | readonly numeric tuple |
 
 `vec<T, N>` is the only vector type spelling. `vec(...)` is the only vector
-value constructor and flattens exactly two, three, or four lanes:
+value constructor and flattens exactly two, three, or four same-element lanes:
 
 ```text
 vec(1.0, 1.0, 1.0, 1.0)
@@ -794,8 +795,10 @@ Scalar arrays use matching typed arrays naturally:
 
 Three-lane storage has a padded stride. Tach therefore requires tuple arrays
 instead of pretending a tightly packed typed array has the same layout.
-Boolean values are available to helpers and parameter blocks, but are not
-ordinary storage-buffer elements.
+Scalar Boolean values are available to helpers and parameter blocks, but are
+not ordinary storage-buffer elements. Boolean vectors are computation-only
+masks: they may flow through helpers and locals, but never through parameters,
+buffers, shared storage, or generated TypeScript values.
 
 An odd-length direct `float16[]` remains logically exact even though WebGPU
 requires four-byte physical buffer and copy alignment. Tach handles that
@@ -837,7 +840,8 @@ earlier runtime work. Even when its initializer is a literal, it remains a
 runtime declaration. Function parameters and coordinates cannot be assigned.
 
 `const` may appear at module scope or inside a function. It produces a `bool`,
-numeric scalar, or numeric vector entirely during `tach check`/`tach build`:
+numeric scalar, numeric vector, or Boolean vector entirely during
+`tach check`/`tach build`:
 
 ```tach
 const tileWidth: uint32 = 16;
@@ -864,8 +868,9 @@ later local. Constant dependency cycles are errors.
 The constant algebra is ordinary typed Tach expression algebra: literals,
 constant references, unary/binary/conditional operators, scalar conversions,
 `vec(...)`, swizzles, vector indexing, and pure math/vector intrinsics including
-`fma`. It excludes parameters, coordinates, `let`, buffers, structs, runtime
-arrays, transient allocation, atomics, barriers, and user-function calls.
+`fma`, `all`, `any`, and `select`. It excludes parameters, coordinates, `let`,
+buffers, structs, runtime arrays, transient allocation, atomics, barriers, and
+user-function calls.
 Integer arithmetic has Tach's 32-bit wrapping and masked-shift semantics.
 Invalid integer division and any non-finite Float16/Float32 result are compile
 errors.
@@ -878,8 +883,8 @@ has one obvious meaning.
 
 Indexed functions support:
 
-- arithmetic, numeric comparison, logical, bitwise, shift, conditional, and
-  assignment operators;
+- arithmetic, scalar/vector comparison, scalar logical, integer/Boolean
+  bitwise, shift, conditional, and assignment operators;
 - field, lane, and array access;
 - `if`/`else`;
 - `while`;
@@ -899,6 +904,7 @@ Portable scalar/vector intrinsics include:
 | exponential | `exp`, `exp2`, `log`, `log2`, `pow` |
 | multiply-add | `fma` |
 | vector geometry | `dot`, `cross`, `length`, `distance`, `normalize` |
+| Boolean masks | `all`, `any`, `select` |
 
 `floor`, `ceil`, `trunc`, trigonometric, exponential, `sqrt`, and `rsqrt`
 preserve a `float16` or `float32` scalar/vector type. `abs` accepts signed
@@ -923,6 +929,15 @@ exits the nearest enclosing loop. `continue` advances its nearest loop and, in
 a `for`, performs the update before testing the condition again. Neither may
 appear outside a loop. Tach has no labeled transfer, function values, methods,
 or recursion.
+
+Numeric vector comparisons produce `vec<bool, N>` lane masks and broadcast a
+scalar operand to the vector width. `==` and `!=` also compare Boolean values.
+`!`, `&`, `|`, and `^` operate component by component on Boolean masks; `&`,
+`|`, and `^` are eager. `all(mask)` and `any(mask)` reduce a mask to one scalar
+Boolean. `select(mask, whenTrue, whenFalse)` chooses lanes component by
+component, permits scalar arms to broadcast, and evaluates both arms. Use
+scalar `&&`, `||`, and `condition ? trueValue : falseValue` when lazy control
+flow matters.
 
 Use `tach check` as the authority for exact overloads. `float32` has about
 seven decimal digits of precision; `float16` has roughly three and a maximum

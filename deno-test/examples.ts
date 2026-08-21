@@ -146,6 +146,17 @@ async function verifyLanguage(gpu: Tach): Promise<void> {
     }
   });
 
+  const masks = gpu.buffer(
+    Array.from({ length: 4 }, () => [0, 0, 0, 0] as const),
+  );
+  await gpu.submit(programs.masks(masks));
+  equal(await masks.read(), [
+    [-1, 0, 1, -2],
+    [0, 0, 1, -1],
+    [1, 0, 1, -1],
+    [2, 0, 1, -1],
+  ], "boolean vector masks");
+
   const particles = gpu.buffer([
     { position: [1, 2, 3, 4] as const, velocity: [2, 4, 6, 8] as const },
     { position: [-1, -2, -3, -4] as const, velocity: [1, 2, 3, 4] as const },
@@ -244,7 +255,8 @@ const first = await tach(async (gpu) => {
     "gradientInto",
     "halveFloat16",
     "integrate",
-    "math",
+		"masks",
+		"math",
     "reduceLanes",
     "scale",
     "scaleFloat16",
@@ -262,4 +274,4 @@ const second = await tach(async (gpu) => {
   return gpu.adapter.name;
 });
 equal(second, first, "owner-neutral scalar view across sessions");
-console.log(`Vulkan execution: ${first}; 17 programs; 72 projected frames`);
+console.log(`Vulkan execution: ${first}; 18 programs; 72 projected frames`);

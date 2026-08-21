@@ -195,7 +195,7 @@ func validateArity(op Op, a []uint32) error {
 	case OpCompositeExtract:
 		return atLeast(a, 4)
 	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast,
-		OpSNegate, OpFNegate, OpLogicalNot, OpNot:
+		OpSNegate, OpFNegate, OpLogicalNot, OpNot, OpAny, OpAll:
 		return exact(a, 3)
 	case OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv,
 		OpUMod, OpSRem, OpFRem, OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual,
@@ -426,7 +426,7 @@ func hasResultType(op Op) bool {
 		OpFunctionCall, OpVariable, OpLoad, OpAccessChain, OpArrayLength, OpCompositeConstruct, OpVectorExtractDynamic, OpCompositeExtract,
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
-		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
+		OpVectorTimesScalar, OpAny, OpAll, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
 		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd, OpSelect,
 		OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual,
 		OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual,
@@ -1016,6 +1016,10 @@ func (v *validation) validateReferencesAndTypes() error {
 			}
 		case OpSNegate, OpFNegate, OpLogicalNot, OpNot:
 			if err := v.validateUnary(in); err != nil {
+				return err
+			}
+		case OpAny, OpAll:
+			if err := v.validateMaskReduction(in); err != nil {
 				return err
 			}
 		case OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
@@ -1728,6 +1732,25 @@ func (v *validation) validateUnary(in Instruction) error {
 	}
 	if !ok {
 		return fmt.Errorf("%s invalid operand type", ctx)
+	}
+	v.valueType[a[1]] = a[0]
+	return nil
+}
+
+func (v *validation) validateMaskReduction(in Instruction) error {
+	a := in.Operands
+	ctx := fmt.Sprintf("word %d %s", in.Offset, opName(in.Op))
+	result, err := v.requireType(a[0], ctx)
+	if err != nil {
+		return err
+	}
+	operandType, err := v.requireValue(a[2], ctx)
+	if err != nil {
+		return err
+	}
+	operand := v.types[operandType]
+	if result.kind != typeBool || operand == nil || operand.kind != typeVector || baseScalar(operand, v.types).kind != typeBool {
+		return fmt.Errorf("%s requires a boolean vector and returns bool", ctx)
 	}
 	v.valueType[a[1]] = a[0]
 	return nil
@@ -2526,7 +2549,7 @@ func valueUses(in Instruction) []uint32 {
 		return []uint32{a[2], a[3]}
 	case OpCompositeExtract:
 		return []uint32{a[2]}
-	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast, OpSNegate, OpFNegate, OpLogicalNot, OpNot:
+	case OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast, OpSNegate, OpFNegate, OpLogicalNot, OpNot, OpAny, OpAll:
 		return []uint32{a[2]}
 	case OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem, OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual, OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual, OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual, OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd:
 		return []uint32{a[2], a[3]}

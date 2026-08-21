@@ -127,6 +127,9 @@ func TestBoolHasNoHostLayout(t *testing.T) {
 	if _, err := Of(types.TBool); err == nil {
 		t.Fatal("expected bool host layout to be rejected")
 	}
+	if _, err := Of(types.Vec(types.TBool, 4)); err == nil {
+		t.Fatal("expected boolean vector host layout to be rejected")
+	}
 }
 
 func TestRuntimeArrayMustBeFinal(t *testing.T) {

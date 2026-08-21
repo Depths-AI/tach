@@ -178,7 +178,11 @@ boundary.
 | 32-bit four-lane numeric vector | 16 | 16 |
 
 `bool` has no direct storage-buffer representation. In a physical parameter
-block, each logical bool leaf becomes one `uint32` word containing `0` or `1`.
+block, each logical scalar-bool leaf becomes one `uint32` word containing `0`
+or `1`. A `vec<bool, N>` is a value-only mask: it has no parameter-block,
+storage-buffer, runtime-array, or workgroup representation. Consequently it
+cannot be a public value parameter or occur inside a host-visible aggregate.
+Numeric vectors retain the layouts above.
 
 ### Structs
 
@@ -287,7 +291,9 @@ They are not module-global public-resource IDs.
 After target-neutral Kernel IR optimization and backend parameter pruning,
 `src/abi` flattens the remaining plain stage parameters into one private
 struct. It walks parameters in order and struct fields in declaration order.
-Numeric leaves retain their type; bool leaves become `uint32`.
+Numeric leaves retain their type; scalar-bool leaves become `uint32`.
+Boolean-vector leaves are rejected before ABI construction rather than being
+invented as integer vectors.
 
 The canonical layout determines every field offset and rounds the struct to
 its 16-byte alignment. A stage with no remaining values has no parameter

@@ -12,6 +12,14 @@ function wrongBounds(): bool {
   return min(true, false);
 }
 
+function scalarSelectionMask(): vec<float32, 2> {
+  return select(true, vec(1.0, 2.0), vec(3.0, 4.0));
+}
+
+export function storedBooleanMask[i](out: buffer<vec<bool, 2>[]>) {
+  out[i] = vec(true, false);
+}
+
 export function wrongAtomic[i](state: buffer<uint32[]>) {
   atomicCompareExchange(state[i], 0, 1);
 }

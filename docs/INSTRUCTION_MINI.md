@@ -1,16 +1,15 @@
 # Tach application instructions: mini edition
 
-This is the dense AI-agent context emitted by `tach instructions`. Each `§N`
-points to an authoritative detail chunk in the published `@depths/tach`
-package. Fetch only needed chunks with
+This dense AI-agent context is emitted by `tach instructions`. Each `§N` points
+to a detail chunk in `@depths/tach`; fetch only needed chunks with
 `tach instructions --details N [N ...]`.
 
 ## 1. Mental model
 
 Tach is a typed portable GPU-compute language, not TypeScript or shader source.
-Tach owns parallel work, dispatch, layout, projection, and target validation;
-TypeScript owns application control, I/O, sessions, recipes, submission, and
-readback. Generated functions construct recipes, not execution. `submit` queues;
+Tach owns parallel work, dispatch, layout, projection, and validation;
+TypeScript owns control, I/O, sessions, submission, and readback. Generated
+functions construct recipes; `submit` queues;
 browser `present` executes a `ComputeView` with frame backpressure. `read`,
 `idle`, scoped exit, and `present` complete work. Identical imports use WebGPU
 in browsers and Tach-owned Vulkan 1.3 in Deno. See §1:
@@ -33,9 +32,9 @@ See §14: function roles,
 
 A Tach project is the nearest ancestor `tach.json`, not an npm project. Every
 project command processes the whole project; none accepts one `.tach` file. The
-strict manifest requires Tach `name`, shared SemVer `version`, generated npm
-`javascript.package`, and documentation `title`/`summary`. Do not invent source lists,
-output paths, modules, dependencies, or settings. See §3: project identity
+manifest requires Tach `name`, shared SemVer `version`, npm
+`javascript.package`, and documentation `title`/`summary`. Do not invent source
+lists, output paths, modules, dependencies, or settings. See §3: project identity
 and §4: manifest.
 
 Every source is exactly `<module>/<kernel>.tach`: one directory tier, never at
@@ -47,20 +46,18 @@ and non-transitive; import every owner whose declaration this file names. See
 §6: imports, and
 §7: visibility.
 
-All top-level constant, type, and function names share one project-global
-namespace. Public names must also be portable TypeScript identifiers. Both file and
-collapsed-module dependency graphs must be DAGs; opposite cross-module edges
-are invalid even without a literal file cycle. See §8: names
+Top-level constants, types, and functions share one project-global namespace.
+Public names must be portable TypeScript identifiers. File and collapsed-module
+graphs must be DAGs; opposite cross-module edges are invalid. See §8: names
 and §9: DAGs.
 
 ## 3. Files, documentation, and exposure
 
 File order is: optional file `@docs(...);`, contiguous imports, declarations.
-Every `@docs` needs `summary`. File docs may add `title`; type docs may add
-`field`; function docs may add `param`; indexed functions may add `coordinate`;
-value-returning helpers and view programs may add `returns`. Referenced
-identifiers are checked. Constants cannot carry `@docs` because they have no
-generated API surface.
+Every `@docs` needs `summary`; file/type/function docs may respectively add
+`title`, `field`, and `param`. Indexed functions may add `coordinate`;
+value-returning helpers and views may add `returns`. References are checked.
+Constants have no `@docs` or generated API surface.
 Use `//` only for local implementation reasoning; block comments do not exist.
 See §10: file anatomy,
 §11: structured docs, and
@@ -96,16 +93,13 @@ edge access. See §20: domains,
 §21: workgroups, and
 §22: edge guards.
 
-Indexed shorthand takes rank-matching host `size`; 1D may infer from the first
-runtime-sized public buffer, otherwise omission means one workgroup. Explicit
-programs derive domains in Tach and never accept host size. Runtime program
-shapes are checked `uint32` expressions; zero, underflow, overflow, or division
-by zero is a runtime error. `run` buffer arguments directly name public buffers
-or transients. Compile-time `run` value arguments specialize the physical stage
-and disappear before runtime metadata. Transients are not zero-initialized and
-must be defined before read. Every `run` is a distinct ordered dispatch; assume
-no stage fusion. A terminal view conversion alone may fold into its proven
-final writer. See
+Indexed shorthand takes rank-matching host `size`; 1D may infer it from the
+first runtime-sized public buffer, otherwise omission means one workgroup.
+Explicit programs derive domains in Tach. Runtime shapes are checked `uint32`;
+zero, underflow, overflow, or division by zero fails. `run` buffers directly
+name public buffers or transients; compile-time values specialize and disappear.
+Transients are uninitialized. Every `run` is an ordered dispatch; only terminal
+view conversion may fold into its proven final writer. See
 §23: size inference,
 §24: shapes, and
 §25: transients.
@@ -113,8 +107,10 @@ final writer. See
 ## 5. Types and ordinary computation
 
 Scalars are `bool`, `int32`, `uint32`, `float16`, `float32`, and helper-only
-`void`. Numeric vectors are solely `vec<T, N>`, with `N` 2–4. Only `vec(...)`
-constructs them, flattening exactly 2–4 scalar/vector lanes without conversion.
+`void`. Vectors are solely `vec<T, N>`, with scalar `T` and `N` 2–4. Only
+`vec(...)` constructs them, flattening exactly 2–4 same-element scalar/vector
+lanes without conversion. `vec<bool, N>` is a computation-only mask, not a
+host, buffer, or shared-memory type.
 Structs are named value types with exact fields; literal order is irrelevant,
 declaration order affects storage. Runtime `T[]` occurs only directly in a
 buffer or as a struct's final field and cannot move as one value. Fixed `T[N]`
@@ -131,13 +127,12 @@ sRGB conversion; WebGPU stores it as an `rgba8unorm` texel and Vulkan as that
 word. Source never packs display bytes or names provider objects. See §18: view
 programs and §26: type boundary.
 
-`buffer<T>` is addressable GPU storage with inferred access. Distinct public
-parameters need distinct handles; use one parameter for in-place work. Match
-generated `index.d.ts`: scalars are numbers, vectors tuples, structs readonly
-objects, and compatible arrays typed arrays; padded three-lane vectors require
-tuple arrays. `float16[]` is `Float16Array` and remains binary16, with roughly
-three decimal digits and maximum finite magnitude 65504. Generated requirements
-gate optional Float16 support. Never pad or hand-pack source values. See
+`buffer<T>` is GPU storage with inferred access. Distinct public parameters need
+distinct handles; use one for in-place work. Match generated `index.d.ts`:
+scalars are numbers, vectors tuples, structs readonly objects, compatible arrays
+typed arrays; padded three-lane vectors require tuples. `float16[]` is
+`Float16Array`, with roughly three decimal digits and maximum 65504. Generated
+requirements gate Float16. Never hand-pack values. See
 §30: buffers,
 §31: non-aliasing,
 §32: host shapes, and
@@ -153,12 +148,18 @@ converts values, and has no splat form.
 `min`/`max`/`clamp` support numeric scalars/vectors with exact portable edge
 semantics (§41).
 
-`const` means compiler-evaluated scalar/vector algebra, never runtime
-immutability. Module constants follow direct imports and may reference visible
-module constants in any order; local constants see module constants and earlier
-lexical constants only. They may use ordinary typed operators, conversions,
-conditionals, pure math including `fma`, vector construction, indexing, and
-swizzles. They cannot depend on parameters, coordinates, buffers, runtime
+Numeric vector comparisons return `vec<bool, N>`. `!`, `&`, `|`, and `^`
+combine lanes eagerly; `all`/`any` reduce masks to scalar control; and
+`select(mask, whenTrue, whenFalse)` eagerly chooses numeric or boolean lanes
+with scalar-arm broadcast. `&&`, `||`, and `?:` remain lazy and
+scalar-conditioned. See §27, §37, and §41.
+
+`const` is compiler-evaluated scalar/vector algebra, not runtime immutability.
+Module constants follow imports and may reference visible constants in any
+order; locals see module and earlier lexical constants. They allow typed operators, conversions,
+conditionals, pure math including `fma`, vector/mask construction, indexing,
+swizzles, mask reduction, and selection. They cannot depend on parameters,
+coordinates, buffers, runtime
 `let`, structs, transients, atomics, barriers, or user calls. Cycles, zero
 integer divisors, invalid signed division, and non-finite float results are
 compile errors. `let` is the sole mutable runtime local. Shadowing is forbidden.

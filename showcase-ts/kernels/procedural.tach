@@ -24,9 +24,8 @@ type ProceduralParams = {
 )
 function boxDistance(point: vec<float32, 3>, halfSize: vec<float32, 3>): float32 {
   let q = abs(point) - halfSize;
-  let outside = length(
-    vec(q.x > 0.0 ? q.x : 0.0, q.y > 0.0 ? q.y : 0.0, q.z > 0.0 ? q.z : 0.0),
-  );
+  // A comparison produces a reusable per-axis mask; select applies it without scalar branches.
+  let outside = length(select(q > 0.0, q, 0.0));
   let inside = q.x;
   if (q.y > inside) {
     inside = q.y;
