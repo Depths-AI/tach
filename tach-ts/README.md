@@ -892,7 +892,7 @@ Portable scalar/vector intrinsics include:
 
 | Family | Operations |
 |---|---|
-| integer bounds | `min`, `max`, `clamp` |
+| numeric bounds | `min`, `max`, `clamp` |
 | magnitude | `abs`, `sqrt`, `rsqrt` |
 | rounding | `floor`, `ceil`, `trunc` |
 | trigonometry | `sin`, `cos`, `tan` |
@@ -912,8 +912,11 @@ both generated targets. The adapter may use one fused hardware instruction or
 separate multiply and add operations, so do not assume one physical
 instruction or one universal intermediate-rounding rule.
 
-`min`, `max`, and `clamp` currently accept integer scalar/vector values so Tach
-does not silently choose a cross-backend floating-point NaN policy. `cross`
+`min`, `max`, and `clamp` accept numeric scalars/vectors and broadcast scalars
+to the shared vector width. `min(a, b)` chooses `b` only when `b < a`;
+`max(a, b)` chooses `b` only when `a < b`; and `clamp(x, low, high)` is exactly
+`min(max(x, low), high)`. That comparison-shaped rule is identical across
+targets and defines NaN, signed-zero, and inverted-limit behavior. `cross`
 accepts a matching `vec<float16, 3>` or `vec<float32, 3>`; the other geometry operations
 accept matching floating vectors and return their component width. `break`
 exits the nearest enclosing loop. `continue` advances its nearest loop and, in
@@ -951,9 +954,11 @@ size. The next team, and the next stage, cannot see it.
 ### 12.2 Atomics
 
 `atomic<int32>` and `atomic<uint32>` support atomic load, store, exchange,
-add, subtract, minimum, maximum, and bitwise updates. Use them when many
-runs must update one integer. Atomic state in a public buffer survives
-across commands.
+add, subtract, minimum, maximum, bitwise updates, and strong compare-exchange.
+`atomicCompareExchange(place, expected, replacement)` returns the old value
+and replaces it only when it equals `expected`; Tach hides WGSL's weak result
+and retries spurious failures. Use atomics when many runs must update one
+integer. Atomic state in a public buffer survives across commands.
 
 ### 12.3 Barriers
 

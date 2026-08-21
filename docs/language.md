@@ -872,8 +872,19 @@ backend or device may execute it as a fused instruction or as separate
 multiply and add operations; Tach promises the portable operation, not one
 physical instruction or one universal intermediate-rounding rule.
 
-`min`, `max`, and `clamp` accept integer scalars/vectors. Their floating forms
-remain unavailable until Tach defines one portable NaN and signed-zero policy.
+`min`, `max`, and `clamp` accept every numeric scalar/vector type and broadcast
+scalar arguments to a shared vector width. Their exact portable definitions
+are:
+
+```text
+min(a, b)         = b if b < a, otherwise a
+max(a, b)         = b if a < b, otherwise a
+clamp(x, low, hi) = min(max(x, low), hi)
+```
+
+These definitions settle the awkward floating cases without backend guesses:
+an unordered comparison is false, equal values preserve the first operand
+(including its signed zero), and inverted clamp limits produce `hi`.
 
 | Function | Input | Result |
 |---|---|---|
@@ -932,6 +943,13 @@ Atomic operations receive an addressable atomic place:
 | `atomicMin`, `atomicMax` | ordered update | previous value |
 | `atomicAnd`, `atomicOr`, `atomicXor` | bitwise update | previous value |
 | `atomicExchange` | replacement | previous value |
+| `atomicCompareExchange` | replace only when the old value equals `expected` | previous value |
+
+`atomicCompareExchange(place, expected, replacement)` is strong: returning
+`expected` means the replacement occurred, while any other result proves the
+place held that returned value. WGSL's weak primitive is retried internally,
+so source code never handles spurious failure or a backend-specific result
+structure.
 
 Atomics on a public buffer are visible to every run on the device. Atomics
 on shared memory are visible only inside this team. Updates are relaxed:

@@ -1692,8 +1692,21 @@ Additional rules:
 - `fma(a, b, c)` accepts `float16` or `float32` values and computes
   component-wise `a * b + c`; equal-width vectors may mix with scalars, which
   broadcast to that width.
-- `min`, `max`, and `clamp` accept integer scalars/vectors.
-- Floating `min`, `max`, and `clamp` are intentionally unavailable.
+- `min`, `max`, and `clamp` accept numeric scalars/vectors and broadcast scalar
+  arguments to a shared vector width.
+
+Bounds have exact comparison-shaped semantics:
+
+```text
+min(a, b)         = b if b < a, otherwise a
+max(a, b)         = b if a < b, otherwise a
+clamp(x, low, hi) = min(max(x, low), hi)
+```
+
+An unordered floating comparison is false. Equal operands preserve the first
+operand, including signed zero. Inverted clamp limits produce `hi`. Do not
+substitute a host library's differently specified NaN or inverted-limit rule
+when writing an exact CPU oracle.
 
 Geometric intrinsics are:
 
@@ -1773,6 +1786,14 @@ through:
 | `atomicMin`, `atomicMax` | ordered update | previous value |
 | `atomicAnd`, `atomicOr`, `atomicXor` | bitwise update | previous value |
 | `atomicExchange` | replace | previous value |
+| `atomicCompareExchange` | conditional replace | previous value |
+
+`atomicCompareExchange(place, expected, replacement)` atomically reads the
+place, stores `replacement` only if the old value equals `expected`, and
+returns that old value. It is strong: a returned value different from
+`expected` proves the comparison failed because the place held that value.
+Tach retries WGSL's weak primitive internally, so never write a source retry
+loop for spurious failure and never expect a backend-shaped result structure.
 
 Example global accumulation:
 
@@ -3138,7 +3159,7 @@ Do not generate Tach code that assumes any of the following exist:
 - strings as runtime values;
 - implicit general numeric conversion or JavaScript coercion;
 - whole-program, later-use, host-TypeScript, or backend-dependent inference;
-- matrices, 64-bit numbers, floating atomics, or floating `min/max/clamp`;
+- matrices, 64-bit numbers, or floating atomics;
 - public resource aliasing;
 - global synchronization inside one dispatch;
 - arbitrary host control flow inside an orchestration program;

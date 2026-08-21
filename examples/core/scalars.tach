@@ -53,13 +53,14 @@ export function float16Math[i](
     let x = input.values[i] / float16(input.values.length) + input.offset;
     let value = vec(x, 2.0, 3.0);
     let unit = normalize(value);
-    let geometry = dot(value, unit) + length(value) + distance(value, unit)
-      + cross(value, unit).x;
+    let boundedUnit = clamp(unit, -1.0, 1.0);
+    let geometry = dot(value, boundedUnit) + length(value) + distance(value, boundedUnit)
+      + cross(value, boundedUnit).x;
     let wave = sin(x) + cos(x) + tan(float16(0.25));
     let shaped = sqrt(abs(wave)) + rsqrt(x + 1.0);
     let exponential = exp2(log2(x + 1.0)) + exp(log(x + 1.0));
     let rounded = floor(pow(x + 1.0, 2.0)) + ceil(geometry) + trunc(shaped);
-    output[i] = vec(unit, shaped + exponential + rounded);
+    output[i] = vec(boundedUnit, shaped + exponential + rounded);
   }
 }
 

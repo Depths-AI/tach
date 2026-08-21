@@ -262,7 +262,7 @@ your head.
 ## `math` - the functions you already know
 
 `core/math.tach` is a tour of Tach's math library: `sin`, `cos`, `sqrt`,
-`length`, `normalize`, `dot`, `cross`, `pow`, rounding, and integer
+`length`, `normalize`, `dot`, `cross`, `pow`, rounding, and scalar/vector
 `min` / `max` / `clamp`. Each invocation seeds a 3D vector from its
 index and writes a `vec<float32, 4>` result.
 
@@ -271,9 +271,9 @@ differences matter:
 
 - These run per invocation on 32-bit floats, not on JavaScript's 64-bit
   `number`.
-- Tach does not yet offer floating-point `min` / `max` / `clamp`, because
-  those need a single rule for `NaN` that both backends share. The kernel
-  uses the integer forms so it does not pretend that rule exists.
+- Floating bounds have comparison-shaped behavior shared by both backends.
+  `clamp(value, low, high)` means `min(max(value, low), high)`, including
+  when a bound is `NaN` or `low` is greater than `high`.
 
 The test compares against a CPU version with a small tolerance. `sin` on
 a GPU does not have to match `Math.sin` bit for bit. It has to be the
@@ -385,10 +385,10 @@ Sometimes they must meet. A histogram, a count, a lock-free flag: many
 workers update the same integer. `simulation/atomics.tach` is that
 pattern, stripped down.
 
-64 workers share a small scratch array that only they can see. Each one
-adds 1 to its own scratch slot. The first worker to touch a slot sees
-`0` and adds 1 to a global `total`. Then they all continue. Because
-there are 64 slots and 64 workers, `total` becomes 64.
+64 workers share a small scratch array that only they can see. Each one adds 1
+to its own scratch slot and sees the previous zero. The first contributor
+atomically changes the global `total` from 0 to 1; each later contributor adds
+one. Because there are 64 slots and 64 workers, `total` becomes 64.
 
 Two new tools appear:
 
@@ -397,6 +397,10 @@ Two new tools appear:
 - `atomicAdd` is "add to this integer even if someone else is adding at
   the same time." A normal `total += 1` from many workers can lose
   updates. An atomic add cannot.
+- `atomicCompareExchange(place, expected, replacement)` returns the old value
+  and replaces it only when it equals `expected`. Exactly one worker can claim
+  the initial zero. Tach makes that comparison strong on both backends, so a
+  failed comparison is never a permitted spurious failure.
 
 They also wait together (`workgroupBarrier`) so nobody uses the
 whiteboard before it is set up. Everyone has to reach that wait. You

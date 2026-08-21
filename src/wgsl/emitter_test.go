@@ -166,6 +166,36 @@ export function control[i](out: buffer<float32[]>, limit: uint32) {
 	}
 }
 
+func TestFloatBoundsAndStrongCompareExchangeWGSL(t *testing.T) {
+	a, err := parser.Parse("bounds-atomic.tach", `
+export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, state: buffer<atomic<uint32>[]>) {
+  if (i < values.length && i < state.length) {
+    values[i] = clamp(values[i], -1.0, 1.0);
+    let observed = atomicCompareExchange(state[i], 0, 1);
+    if (observed != 0) { atomicAdd(state[i], 1); }
+  }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sema.CheckAndLower(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"clamp(", "atomicCompareExchangeWeak(", ".exchanged ||", ".old_value !=", "loop {"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("bounds/CAS WGSL missing %q:\n%s", want, out)
+		}
+	}
+	if err := wgsl.Validate(out); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestViewProjectsStraightIntoStorageTexture(t *testing.T) {
 	a, err := parser.Parse("view.tach", `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) {

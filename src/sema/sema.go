@@ -2117,7 +2117,9 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 	}
 	if op, atomic := atomicBuiltin(id.Name); atomic {
 		want := 1
-		if op != ir.AtomicLoad {
+		if op == ir.AtomicCompareExchange {
+			want = 3
+		} else if op != ir.AtomicLoad {
 			want = 2
 		}
 		if len(x.Args) != want {
@@ -2130,23 +2132,27 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 		if pt.Kind != types.Atomic || (pt.Elem.Kind != types.I32 && pt.Elem.Kind != types.U32) {
 			return 0, nil, diag(x.Args[0].GetSpan(), "%s requires an atomic<int32> or atomic<uint32> place, got %s", id.Name, pt)
 		}
-		var value ir.ValueID
-		if op != ir.AtomicLoad {
-			v, vt, err := c.lowerExpr(b, e, x.Args[1], pt.Elem)
+		var value, expected ir.ValueID
+		for argument := 1; argument < want; argument++ {
+			v, vt, err := c.lowerExpr(b, e, x.Args[argument], pt.Elem)
 			if err != nil {
 				return 0, nil, err
 			}
 			if !types.Equal(vt, pt.Elem) {
-				return 0, nil, diag(x.Args[1].GetSpan(), "%s value is %s, want %s", id.Name, vt, pt.Elem)
+				return 0, nil, diag(x.Args[argument].GetSpan(), "%s value is %s, want %s", id.Name, vt, pt.Elem)
 			}
-			value = v
+			if op == ir.AtomicCompareExchange && argument == 1 {
+				expected = v
+			} else {
+				value = v
+			}
 		}
 		if op == ir.AtomicStore {
 			b.emit(&ir.Atomic{Type: pt.Elem, Op: op, Place: p, Value: value, Span: x.Span})
 			return 0, types.TVoid, nil
 		}
 		r := b.value()
-		b.emit(&ir.Atomic{Result: r, Type: pt.Elem, Op: op, Place: p, Value: value, Span: x.Span})
+		b.emit(&ir.Atomic{Result: r, Type: pt.Elem, Op: op, Place: p, Value: value, Expected: expected, Span: x.Span})
 		return r, pt.Elem, nil
 	}
 	sig := c.funcs[id.Name]
@@ -2206,6 +2212,8 @@ func atomicBuiltin(name string) (ir.AtomicKind, bool) {
 		return ir.AtomicXor, true
 	case "atomicExchange":
 		return ir.AtomicExchange, true
+	case "atomicCompareExchange":
+		return ir.AtomicCompareExchange, true
 	default:
 		return 0, false
 	}

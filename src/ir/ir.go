@@ -256,7 +256,6 @@ const (
 	NumericAny NumericDomain = iota
 	NumericSigned
 	NumericFloat
-	NumericInteger
 )
 
 type IntrinsicRule struct {
@@ -277,11 +276,9 @@ func (k IntrinsicKind) Rule() IntrinsicRule {
 	case IntrinsicPow:
 		return IntrinsicRule{Arity: 2, Domain: NumericFloat, Broadcast: 1 << 1}
 	case IntrinsicMin, IntrinsicMax:
-		// DECISION: Float bounds stay unavailable until Tach defines NaN and
-		// signed-zero behavior; integer-only semantics are identical everywhere.
-		return IntrinsicRule{Arity: 2, Domain: NumericInteger, Broadcast: 0b11}
+		return IntrinsicRule{Arity: 2, Domain: NumericAny, Broadcast: 0b11}
 	case IntrinsicClamp:
-		return IntrinsicRule{Arity: 3, Domain: NumericInteger, Broadcast: 0b111}
+		return IntrinsicRule{Arity: 3, Domain: NumericAny, Broadcast: 0b111}
 	case IntrinsicFma:
 		return IntrinsicRule{Arity: 3, Domain: NumericFloat, Broadcast: 0b111}
 	case IntrinsicDot, IntrinsicDistance:
@@ -305,8 +302,6 @@ func (d NumericDomain) Accepts(t *types.Type) bool {
 		return t != nil && (t.Kind == types.I32 || t.Kind == types.F16 || t.Kind == types.F32)
 	case NumericFloat:
 		return t != nil && (t.Kind == types.F16 || t.Kind == types.F32)
-	case NumericInteger:
-		return types.IsInteger(t)
 	default:
 		return false
 	}
@@ -320,8 +315,6 @@ func (d NumericDomain) String() string {
 		return "signed numeric"
 	case NumericFloat:
 		return "floating-point"
-	case NumericInteger:
-		return "integer"
 	default:
 		return "invalid"
 	}
@@ -465,15 +458,17 @@ const (
 	AtomicOr
 	AtomicXor
 	AtomicExchange
+	AtomicCompareExchange
 )
 
 type Atomic struct {
-	Result ValueID     // zero only for AtomicStore
-	Type   *types.Type // underlying int32/uint32 result/value type
-	Op     AtomicKind
-	Place  PlaceID
-	Value  ValueID // zero only for AtomicLoad
-	Span   source.Span
+	Result   ValueID     // zero only for AtomicStore
+	Type     *types.Type // underlying int32/uint32 result/value type
+	Op       AtomicKind
+	Place    PlaceID
+	Value    ValueID // zero only for AtomicLoad
+	Expected ValueID // nonzero only for AtomicCompareExchange
+	Span     source.Span
 }
 
 func (*Atomic) instrNode()                {}
@@ -781,6 +776,8 @@ func (k AtomicKind) String() string {
 		return "atomic_xor"
 	case AtomicExchange:
 		return "atomic_exchange"
+	case AtomicCompareExchange:
+		return "atomic_compare_exchange"
 	default:
 		return fmt.Sprintf("atomic(%d)", k)
 	}
@@ -880,6 +877,8 @@ func dumpBlock(b *strings.Builder, bl *Block, ind string) {
 				fmt.Fprintf(b, "%s%%%d = %s &p%d : %s\n", ind, x.Result, x.Op, x.Place, x.Type)
 			} else if x.Op == AtomicStore {
 				fmt.Fprintf(b, "%s%s &p%d, %%%d\n", ind, x.Op, x.Place, x.Value)
+			} else if x.Op == AtomicCompareExchange {
+				fmt.Fprintf(b, "%s%%%d = %s &p%d, %%%d, %%%d : %s\n", ind, x.Result, x.Op, x.Place, x.Expected, x.Value, x.Type)
 			} else {
 				fmt.Fprintf(b, "%s%%%d = %s &p%d, %%%d : %s\n", ind, x.Result, x.Op, x.Place, x.Value, x.Type)
 			}

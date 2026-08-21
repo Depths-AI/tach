@@ -14,6 +14,19 @@ import (
 	"tach/src/types"
 )
 
+func lower(t *testing.T, name, source string) *flow.Module {
+	t.Helper()
+	parsed, err := parser.Parse(name, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := sema.CheckAndLower(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return module
+}
+
 func TestParticlesEndToIR(t *testing.T) {
 	var modules []*ast.Module
 	for _, name := range []string{"types", "particles"} {
@@ -165,7 +178,7 @@ export function constants[i](out: buffer<vec<float32, 3>[]>) {
 }
 
 func TestCompileTimeConstantAlgebraCoversEveryValueKind(t *testing.T) {
-	parsed, err := parser.Parse("algebra.tach", `
+	module := lower(t, "algebra.tach", `
 const enabled = !false && 3 < 4;
 const signedResult: int32 = -7 + 2 * 3;
 const maskedShift: uint32 = ((0xff & 0x0f) << 36) | 2;
@@ -204,13 +217,6 @@ export function algebra[i](
     vectorOut[i] = unit * broadcast.x;
   }
 }`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	module, err := sema.CheckAndLower(parsed)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dump := ir.Dump(module.Kernel)
 	for _, want := range []string{
 		"const uint32 243",
@@ -401,6 +407,10 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 		{`export function bad[i](out: buffer<uint32[]>) { continue; }`, "continue is only valid inside a loop"},
 		{`export function bad[i](out: buffer<uint32[]>) { out[i] = fma(1, 2, 3); }`, "cannot satisfy uint32 context"},
 		{`export function bad[i](out: buffer<float32[]>) { out[i] = fma(1.0, 2.0); }`, "expects 3 argument"},
+		{`export function bad[i](state: buffer<atomic<uint32>[]>) { atomicCompareExchange(state[i], 0); }`, "expects 3 argument"},
+		{`export function bad[i](state: buffer<uint32[]>) { atomicCompareExchange(state[i], 0, 1); }`, "requires an atomic"},
+		{`export function bad[i](state: buffer<atomic<uint32>[]>) { atomicCompareExchange(state[i], 0, -1); }`, "unary - requires"},
+		{`export function bad[i](out: buffer<uint32[]>) { if (min(true, false)) { out[i] = 0; } }`, "requires numeric values"},
 	} {
 		parsed, parseErr := parser.Parse("invalid-control.tach", test.source)
 		if parseErr != nil {
@@ -408,6 +418,25 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 		}
 		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil || !strings.Contains(checkErr.Error(), test.want) {
 			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
+		}
+	}
+}
+
+func TestFloatBoundsAndStrongCompareExchangeLowerToCoreIR(t *testing.T) {
+	module := lower(t, "bounds-atomic.tach", `
+const bounded: float32 = clamp(0.5, 2.0, 1.0);
+export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, half: buffer<float16[]>, state: buffer<atomic<uint32>[]>) {
+  if (i < values.length && i < half.length && i < state.length) {
+    values[i] = clamp(values[i], min(values[i], -bounded), max(values[i], bounded));
+    half[i] = clamp(half[i], float16(-1), float16(1));
+    let observed = atomicCompareExchange(state[i], 0, 1);
+    if (observed != 0) { atomicAdd(state[i], 1); }
+  }
+}`)
+	dump := ir.Dump(module.Kernel)
+	for _, want := range []string{"const float32 1", "intrinsic min", "intrinsic max", "intrinsic clamp", "atomic_compare_exchange", "vec<float32, 2>", "float16"} {
+		if !strings.Contains(dump, want) {
+			t.Fatalf("bounds/CAS IR missing %q:\n%s", want, dump)
 		}
 	}
 }

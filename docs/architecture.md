@@ -468,7 +468,12 @@ access chains, atomics, barriers, and extended instructions.
 Early loop transfers become edges to the structured continuation or merge
 block and contribute their carried values to that block's `OpPhi` nodes.
 `fma` becomes GLSL.std.450 `Fma`; neither mapping changes its target-neutral
-source type contract.
+source type contract. Numeric `min`, `max`, and `clamp` use ordered comparisons
+plus `OpSelect`, rather than GLSL extended bounds whose NaN and signed-zero
+choices differ from Tach's comparison-shaped rule. Strong compare-exchange
+maps directly to `OpAtomicCompareExchange`; WGSL lowering instead retries
+`atomicCompareExchangeWeak` when its comparison matched but the weak operation
+reported no exchange.
 
 Host-visible StorageBuffer/uniform aggregates use decorated physical types.
 SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise

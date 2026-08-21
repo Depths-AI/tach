@@ -150,6 +150,9 @@ fractions to `float32`. Scalar constructors convert; binary16 is never inferred.
 `vec(...)` takes its element type from context or typed arguments, never
 converts values, and has no splat form.
 
+`min`/`max`/`clamp` support numeric scalars/vectors with exact portable edge
+semantics (§41).
+
 `const` means compiler-evaluated scalar/vector algebra, never runtime
 immutability. Module constants follow direct imports and may reference visible
 module constants in any order; local constants see module constants and earlier
@@ -179,6 +182,8 @@ uniform control; neither barrier synchronizes workgroups. Use another ordered
 dispatch for device-wide sequencing. See §42: shared,
 §43: atomics, and
 §44: barriers.
+
+`atomicCompareExchange` is strong and returns the old value (§43).
 
 Assume invocations and workgroups execute in arbitrary order. Each write must
 be uniquely owned, atomic, workgroup-synchronized, or separated into another

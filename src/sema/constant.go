@@ -573,27 +573,24 @@ func intrinsicLane(kind ir.IntrinsicKind, t *types.Type, arguments []uint32) (ui
 			return left, nil
 		case ir.IntrinsicMin, ir.IntrinsicMax:
 			right := arguments[1]
-			less := left < right
-			if t.Kind == types.I32 {
-				less = int32(left) < int32(right)
+			first, second := left, right
+			if kind == ir.IntrinsicMin {
+				first, second = right, left
 			}
-			if kind == ir.IntrinsicMin && !less || kind == ir.IntrinsicMax && less {
+			less := first < second
+			if t.Kind == types.I32 {
+				less = int32(first) < int32(second)
+			}
+			if less {
 				return right, nil
 			}
 			return left, nil
 		case ir.IntrinsicClamp:
-			minimum, maximum := arguments[1], arguments[2]
-			lessMin, greaterMax := left < minimum, left > maximum
-			if t.Kind == types.I32 {
-				lessMin, greaterMax = int32(left) < int32(minimum), int32(left) > int32(maximum)
+			bounded, err := intrinsicLane(ir.IntrinsicMax, t, arguments[:2])
+			if err != nil {
+				return 0, err
 			}
-			if lessMin {
-				return minimum, nil
-			}
-			if greaterMax {
-				return maximum, nil
-			}
-			return left, nil
+			return intrinsicLane(ir.IntrinsicMin, t, []uint32{bounded, arguments[2]})
 		}
 		return 0, fmt.Errorf("intrinsic %s is invalid for %s constants", kind, t)
 	}
@@ -628,6 +625,22 @@ func intrinsicLane(kind ir.IntrinsicKind, t *types.Type, arguments []uint32) (ui
 		result = 1 / math.Sqrt(x)
 	case ir.IntrinsicPow:
 		result = math.Pow(x, floatValue(t, arguments[1]))
+	case ir.IntrinsicMin, ir.IntrinsicMax:
+		y := floatValue(t, arguments[1])
+		first, second := x, y
+		if kind == ir.IntrinsicMin {
+			first, second = y, x
+		}
+		if first < second {
+			return arguments[1], nil
+		}
+		return arguments[0], nil
+	case ir.IntrinsicClamp:
+		bounded, err := intrinsicLane(ir.IntrinsicMax, t, arguments[:2])
+		if err != nil {
+			return 0, err
+		}
+		return intrinsicLane(ir.IntrinsicMin, t, []uint32{bounded, arguments[2]})
 	case ir.IntrinsicFma:
 		result = math.FMA(x, floatValue(t, arguments[1]), floatValue(t, arguments[2]))
 	default:

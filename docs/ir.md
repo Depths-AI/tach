@@ -410,8 +410,12 @@ planning consume this shared analysis rather than scanning source again.
 
 ## 8. Atomics, barriers, and uniformity
 
-An `Atomic` records the portable operation, place, logical integer type, input,
-and optional result. Scope and memory-semantics operands are backend-owned.
+An `Atomic` records the portable operation, place, logical integer type,
+replacement/update input, optional compare-exchange expected input, and
+optional result. Scope and memory-semantics operands are backend-owned. Strong
+compare-exchange is Kernel IR meaning, not a backend choice: SPIR-V maps it to
+`OpAtomicCompareExchange`, while WGSL lowering retries
+`atomicCompareExchangeWeak` only after a spurious failure.
 
 `Barrier` records workgroup-memory or buffer-memory synchronization. Uniformity
 analysis propagates a conservative property through values, helper calls,
@@ -558,7 +562,7 @@ stores the word in a storage buffer.
 | `fma` | `fma` builtin | GLSL.std.450 `Fma` |
 | `float16` | `f16` after `enable f16;` | 16-bit `OpTypeFloat` plus exact capabilities |
 | f16/f32 conversion | constructor conversion | `OpFConvert` |
-| atomic | WGSL atomic builtin | `OpAtomic*` at QueueFamily or Workgroup |
+| atomic | WGSL atomic builtin; strong CAS retries weak failure | `OpAtomic*` at QueueFamily or Workgroup |
 | source barrier | WGSL barrier | `OpControlBarrier` with availability/visibility |
 | plan barrier | ordered WebGPU pass dispatches | `vkCmdPipelineBarrier2` in Tach's Vulkan 1.3 runtime |
 | view output | `rgba8unorm` storage texture | packed `uint32[]` RGBA8 scratch |

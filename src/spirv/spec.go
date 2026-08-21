@@ -76,6 +76,7 @@ const (
 	OpLogicalOr            Op = 166
 	OpLogicalAnd           Op = 167
 	OpLogicalNot           Op = 168
+	OpSelect               Op = 169
 	OpIEqual               Op = 170
 	OpINotEqual            Op = 171
 	OpUGreaterThan         Op = 172
@@ -123,6 +124,8 @@ const (
 	OpUnreachable          Op = 255
 )
 
+const OpAtomicCompareExchange Op = 230
+
 // GLSL.std.450 extended instruction numbers used by Tach's portable math
 // profile. These values are fixed by the Khronos extended instruction set.
 const (
@@ -141,15 +144,6 @@ const (
 	GLSL450Log2        uint32 = 30
 	GLSL450Sqrt        uint32 = 31
 	GLSL450InverseSqrt uint32 = 32
-	GLSL450FMin        uint32 = 37
-	GLSL450UMin        uint32 = 38
-	GLSL450SMin        uint32 = 39
-	GLSL450FMax        uint32 = 40
-	GLSL450UMax        uint32 = 41
-	GLSL450SMax        uint32 = 42
-	GLSL450FClamp      uint32 = 43
-	GLSL450UClamp      uint32 = 44
-	GLSL450SClamp      uint32 = 45
 	GLSL450Fma         uint32 = 50
 	GLSL450Length      uint32 = 66
 	GLSL450Distance    uint32 = 67
@@ -248,7 +242,7 @@ var opNames = map[Op]string{
 	OpSDiv: "OpSDiv", OpFDiv: "OpFDiv", OpUMod: "OpUMod", OpSRem: "OpSRem", OpFRem: "OpFRem",
 	OpVectorTimesScalar: "OpVectorTimesScalar", OpDot: "OpDot", OpLogicalEqual: "OpLogicalEqual",
 	OpLogicalNotEqual: "OpLogicalNotEqual", OpLogicalOr: "OpLogicalOr", OpLogicalAnd: "OpLogicalAnd",
-	OpLogicalNot: "OpLogicalNot", OpIEqual: "OpIEqual", OpINotEqual: "OpINotEqual",
+	OpLogicalNot: "OpLogicalNot", OpSelect: "OpSelect", OpIEqual: "OpIEqual", OpINotEqual: "OpINotEqual",
 	OpUGreaterThan: "OpUGreaterThan", OpSGreaterThan: "OpSGreaterThan", OpUGreaterThanEqual: "OpUGreaterThanEqual",
 	OpSGreaterThanEqual: "OpSGreaterThanEqual", OpULessThan: "OpULessThan", OpSLessThan: "OpSLessThan",
 	OpULessThanEqual: "OpULessThanEqual", OpSLessThanEqual: "OpSLessThanEqual", OpFOrdEqual: "OpFOrdEqual",
@@ -258,7 +252,7 @@ var opNames = map[Op]string{
 	OpShiftLeftLogical: "OpShiftLeftLogical", OpBitwiseOr: "OpBitwiseOr", OpBitwiseXor: "OpBitwiseXor",
 	OpBitwiseAnd: "OpBitwiseAnd", OpNot: "OpNot",
 	OpControlBarrier: "OpControlBarrier", OpAtomicLoad: "OpAtomicLoad", OpAtomicStore: "OpAtomicStore",
-	OpAtomicExchange: "OpAtomicExchange", OpAtomicIAdd: "OpAtomicIAdd", OpAtomicISub: "OpAtomicISub",
+	OpAtomicExchange: "OpAtomicExchange", OpAtomicCompareExchange: "OpAtomicCompareExchange", OpAtomicIAdd: "OpAtomicIAdd", OpAtomicISub: "OpAtomicISub",
 	OpAtomicSMin: "OpAtomicSMin", OpAtomicUMin: "OpAtomicUMin", OpAtomicSMax: "OpAtomicSMax", OpAtomicUMax: "OpAtomicUMax",
 	OpAtomicAnd: "OpAtomicAnd", OpAtomicOr: "OpAtomicOr", OpAtomicXor: "OpAtomicXor",
 	OpPhi: "OpPhi", OpLoopMerge: "OpLoopMerge", OpSelectionMerge: "OpSelectionMerge", OpLabel: "OpLabel",

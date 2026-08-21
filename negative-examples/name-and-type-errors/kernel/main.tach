@@ -7,3 +7,11 @@ export function wrongType[i](out: buffer<float32[]>) {
     out[i] = true;
   }
 }
+
+function wrongBounds(): bool {
+  return min(true, false);
+}
+
+export function wrongAtomic[i](state: buffer<uint32[]>) {
+  atomicCompareExchange(state[i], 0, 1);
+}

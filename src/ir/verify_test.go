@@ -64,7 +64,43 @@ func TestVerifyUsesIntrinsicSignatureRules(t *testing.T) {
 	}
 	function.Return = types.TF32
 	function.Body.Instrs[2].(*Intrinsic).Type = types.TF32
-	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "does not accept float32") {
+	if err := Verify(module); err != nil {
+		t.Fatal(err)
+	}
+	for _, instruction := range function.Body.Instrs[:2] {
+		instruction.(*Const).Type = types.TBool
+	}
+	function.Return = types.TBool
+	function.Body.Instrs[2].(*Intrinsic).Type = types.TBool
+	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "does not accept bool") {
 		t.Fatalf("invalid intrinsic domain error = %v", err)
+	}
+}
+
+func TestVerifyAtomicCompareExchangeShape(t *testing.T) {
+	atomicArray := types.Runtime(types.AtomicOf(types.TU32))
+	operation := &Atomic{Result: 4, Type: types.TU32, Op: AtomicCompareExchange, Place: 2, Expected: 2, Value: 3}
+	function := &Function{
+		Name:         "claim",
+		Kind:         Stage,
+		Indices:      []Param{{Name: "i", ID: 1, Type: types.TU32}},
+		BufferParams: []BufferParam{{Name: "state", Type: atomicArray, Access: Mutable}},
+		SourceParams: []SourceParam{{Name: "state", Kind: SourceBuffer, Buffer: 0}},
+		Return:       types.TVoid,
+		Body: &Block{Instrs: []Instr{
+			&Const{Result: 2, Type: types.TU32, Raw: "0"},
+			&Const{Result: 3, Type: types.TU32, Raw: "1"},
+			&PlaceRoot{Result: 1, Type: atomicArray, Buffer: 0},
+			&PlaceIndex{Result: 2, Type: types.AtomicOf(types.TU32), Base: 1, Index: 1},
+			operation,
+		}, Term: &Return{}},
+	}
+	module := &Module{Functions: []*Function{function}}
+	if err := Verify(module); err != nil {
+		t.Fatal(err)
+	}
+	operation.Expected = 0
+	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "result/operand shape") {
+		t.Fatalf("invalid compare-exchange shape error = %v", err)
 	}
 }

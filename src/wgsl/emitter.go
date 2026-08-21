@@ -591,10 +591,23 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 			name = "atomicXor"
 		case ir.AtomicExchange:
 			name = "atomicExchange"
+		case ir.AtomicCompareExchange:
+			name = "atomicCompareExchangeWeak"
 		default:
 			return fmt.Errorf("unknown atomic op %d", x.Op)
 		}
-		if x.Op == ir.AtomicStore {
+		if x.Op == ir.AtomicCompareExchange {
+			attempt := v(x.Result) + "_attempt"
+			e.line("var %s: %s;", v(x.Result), e.typeName(x.Type))
+			e.line("loop {")
+			e.indent++
+			e.line("let %s = %s(&%s, %s, %s);", attempt, name, p.expr, v(x.Expected), v(x.Value))
+			e.line("%s = %s.old_value;", v(x.Result), attempt)
+			e.line("if (%s.exchanged || %s.old_value != %s) { break; }", attempt, attempt, v(x.Expected))
+			e.indent--
+			e.line("}")
+			s.def(x.Result, x.Type)
+		} else if x.Op == ir.AtomicStore {
 			e.line("%s(&%s, %s);", name, p.expr, v(x.Value))
 		} else if x.Op == ir.AtomicLoad {
 			e.line("let %s: %s = %s(&%s);", v(x.Result), e.typeName(x.Type), name, p.expr)

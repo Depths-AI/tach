@@ -14,7 +14,7 @@ type Counters = {
 };
 
 @docs(
-  summary("Counts the first atomic update performed by each workgroup lane."),
+  summary("Counts workgroup contributions with atomic addition and strong compare-exchange."),
   coordinate(i, "Global invocation index."),
   param(counters, "Global counter state updated by all workgroups."),
 )
@@ -28,9 +28,12 @@ export function accumulate[i](counters: buffer<Counters>) {
   }
   workgroupBarrier();
   let previous = atomicAdd(scratch[lane], 1);
-  // Only the first update to a lane contributes to the global total.
+  // Strong compare-exchange claims the zero state; every later winner adds one.
   if (previous == 0) {
-    atomicAdd(counters.total, 1);
+    let observed = atomicCompareExchange(counters.total, 0, 1);
+    if (observed != 0) {
+      atomicAdd(counters.total, 1);
+    }
   }
   bufferBarrier();
 }

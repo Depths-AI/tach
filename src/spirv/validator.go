@@ -205,6 +205,8 @@ func validateArity(op Op, a []uint32) error {
 		OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual,
 		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd:
 		return exact(a, 4)
+	case OpSelect:
+		return exact(a, 5)
 	case OpDot:
 		return exact(a, 4)
 	case OpControlBarrier:
@@ -216,6 +218,8 @@ func validateArity(op Op, a []uint32) error {
 	case OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
 		OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor:
 		return exact(a, 6)
+	case OpAtomicCompareExchange:
+		return exact(a, 8)
 	case OpPhi:
 		if len(a) < 6 || (len(a)-2)%2 != 0 {
 			return fmt.Errorf("phi must contain at least two value/label pairs")
@@ -423,11 +427,11 @@ func hasResultType(op Op) bool {
 		OpConvertFToU, OpConvertFToS, OpConvertSToF, OpConvertUToF, OpFConvert, OpBitcast, OpSNegate, OpFNegate,
 		OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem,
 		OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpLogicalNot, OpNot,
-		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd,
+		OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd, OpSelect,
 		OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual,
 		OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual,
 		OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual,
-		OpAtomicLoad, OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
+		OpAtomicLoad, OpAtomicExchange, OpAtomicCompareExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin,
 		OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpPhi, OpExtInst, OpDot:
 		return true
 	}
@@ -775,8 +779,8 @@ func (v *validation) validateReferencesAndTypes() error {
 			if err != nil {
 				return err
 			}
-			if t.kind != typeInt && t.kind != typeFloat {
-				return fmt.Errorf("%s vector element must be integer/float", ctx)
+			if t.kind != typeBool && t.kind != typeInt && t.kind != typeFloat {
+				return fmt.Errorf("%s vector element must be bool, integer, or float", ctx)
 			}
 		case OpTypeArray:
 			if _, err := v.requireType(a[1], ctx); err != nil {
@@ -977,7 +981,7 @@ func (v *validation) validateReferencesAndTypes() error {
 			if root != 0 && v.decoration(root).nonWritable {
 				return fmt.Errorf("%s stores through NonWritable resource %%%d", ctx, root)
 			}
-		case OpAtomicLoad, OpAtomicStore, OpAtomicExchange, OpAtomicIAdd, OpAtomicISub,
+		case OpAtomicLoad, OpAtomicStore, OpAtomicExchange, OpAtomicCompareExchange, OpAtomicIAdd, OpAtomicISub,
 			OpAtomicSMin, OpAtomicUMin, OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor:
 			if err := v.validateAtomic(in); err != nil {
 				return err
@@ -1021,6 +1025,10 @@ func (v *validation) validateReferencesAndTypes() error {
 			OpFOrdLessThanEqual, OpFOrdGreaterThanEqual, OpShiftRightLogical, OpShiftRightArithmetic,
 			OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd:
 			if err := v.validateBinary(in); err != nil {
+				return err
+			}
+		case OpSelect:
+			if err := v.validateSelect(in); err != nil {
 				return err
 			}
 		case OpPhi:
@@ -1203,12 +1211,14 @@ func (v *validation) constantU32(id uint32, ctx string) (uint32, error) {
 func (v *validation) validateAtomic(in Instruction) error {
 	a := in.Operands
 	ctx := fmt.Sprintf("word %d %s", in.Offset, opName(in.Op))
-	var resultType, resultID, ptrID, scopeID, semanticsID, valueID uint32
+	var resultType, resultID, ptrID, scopeID, semanticsID, unequalSemanticsID, valueID, comparatorID uint32
 	switch in.Op {
 	case OpAtomicLoad:
 		resultType, resultID, ptrID, scopeID, semanticsID = a[0], a[1], a[2], a[3], a[4]
 	case OpAtomicStore:
 		ptrID, scopeID, semanticsID, valueID = a[0], a[1], a[2], a[3]
+	case OpAtomicCompareExchange:
+		resultType, resultID, ptrID, scopeID, semanticsID, unequalSemanticsID, valueID, comparatorID = a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
 	default:
 		resultType, resultID, ptrID, scopeID, semanticsID, valueID = a[0], a[1], a[2], a[3], a[4], a[5]
 	}
@@ -1243,6 +1253,15 @@ func (v *validation) validateAtomic(in Instruction) error {
 			return fmt.Errorf("%s value type does not match pointer", ctx)
 		}
 	}
+	if comparatorID != 0 {
+		comparatorType, err := v.requireValue(comparatorID, ctx)
+		if err != nil {
+			return err
+		}
+		if comparatorType != pt.elem {
+			return fmt.Errorf("%s comparator type does not match pointer", ctx)
+		}
+	}
 	scope, err := v.constantU32(scopeID, ctx+" scope")
 	if err != nil {
 		return err
@@ -1260,6 +1279,15 @@ func (v *validation) validateAtomic(in Instruction) error {
 	}
 	if sem != MemorySemanticsRelaxed {
 		return fmt.Errorf("%s memory semantics=0x%x, Tach atomics require Relaxed", ctx, sem)
+	}
+	if unequalSemanticsID != 0 {
+		unequal, err := v.constantU32(unequalSemanticsID, ctx+" unequal semantics")
+		if err != nil {
+			return err
+		}
+		if unequal != MemorySemanticsRelaxed {
+			return fmt.Errorf("%s unequal memory semantics=0x%x, Tach atomics require Relaxed", ctx, unequal)
+		}
 	}
 	root := v.pointerRoot[ptrID]
 	if root != 0 && v.decoration(root).nonWritable {
@@ -1566,54 +1594,12 @@ func (v *validation) validateExtInst(in Instruction) error {
 		if !allResultType() || base.kind != typeFloat {
 			return fmt.Errorf("%s Pow requires matching floating scalar/vector operands and result", ctx)
 		}
-	case GLSL450FMin, GLSL450FMax:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s float min/max requires matching floating scalar/vector operands and result", ctx)
-		}
-	case GLSL450UMin, GLSL450UMax:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !allResultType() || base.kind != typeInt || base.signed {
-			return fmt.Errorf("%s unsigned min/max requires matching uint32 scalar/vector operands and result", ctx)
-		}
-	case GLSL450SMin, GLSL450SMax:
-		if err := need(2); err != nil {
-			return err
-		}
-		if !allResultType() || base.kind != typeInt || !base.signed {
-			return fmt.Errorf("%s signed min/max requires matching int32 scalar/vector operands and result", ctx)
-		}
-	case GLSL450UClamp:
-		if err := need(3); err != nil {
-			return err
-		}
-		if !allResultType() || base.kind != typeInt || base.signed {
-			return fmt.Errorf("%s UClamp requires matching uint32 scalar/vector operands and result", ctx)
-		}
-	case GLSL450FClamp:
-		if err := need(3); err != nil {
-			return err
-		}
-		if !allResultType() || base.kind != typeFloat {
-			return fmt.Errorf("%s FClamp requires matching floating scalar/vector operands and result", ctx)
-		}
 	case GLSL450Fma:
 		if err := need(3); err != nil {
 			return err
 		}
 		if !allResultType() || base.kind != typeFloat {
 			return fmt.Errorf("%s Fma requires matching floating scalar/vector operands and result", ctx)
-		}
-	case GLSL450SClamp:
-		if err := need(3); err != nil {
-			return err
-		}
-		if !allResultType() || base.kind != typeInt || !base.signed {
-			return fmt.Errorf("%s SClamp requires matching int32 scalar/vector operands and result", ctx)
 		}
 	case GLSL450Length:
 		if err := need(1); err != nil {
@@ -1796,7 +1782,7 @@ func (v *validation) validateBinary(in Instruction) error {
 	}
 	comparison := in.Op >= OpLogicalEqual && in.Op <= OpFOrdGreaterThanEqual
 	if comparison {
-		if rt.kind != typeBool {
+		if baseScalar(rt, v.types).kind != typeBool || !sameShape(rt, l) {
 			return fmt.Errorf("%s comparison result must be bool", ctx)
 		}
 		if lt != rr {
@@ -1837,6 +1823,34 @@ func (v *validation) validateBinary(in Instruction) error {
 		}
 		if !ok {
 			return fmt.Errorf("%s arithmetic opcode/type mismatch", ctx)
+		}
+	}
+	v.valueType[a[1]] = a[0]
+	return nil
+}
+
+func (v *validation) validateSelect(in Instruction) error {
+	a := in.Operands
+	ctx := fmt.Sprintf("word %d OpSelect", in.Offset)
+	result, err := v.requireType(a[0], ctx)
+	if err != nil {
+		return err
+	}
+	conditionType, err := v.requireValue(a[2], ctx)
+	if err != nil {
+		return err
+	}
+	condition := v.types[conditionType]
+	if baseScalar(condition, v.types).kind != typeBool || !sameShape(result, condition) {
+		return fmt.Errorf("%s condition must be a shape-matching bool", ctx)
+	}
+	for _, operand := range a[3:] {
+		operandType, err := v.requireValue(operand, ctx)
+		if err != nil {
+			return err
+		}
+		if operandType != a[0] {
+			return fmt.Errorf("%s operands must match the result type", ctx)
 		}
 	}
 	v.valueType[a[1]] = a[0]
@@ -2498,6 +2512,8 @@ func valueUses(in Instruction) []uint32 {
 		return []uint32{a[0], a[1], a[2], a[3]}
 	case OpAtomicExchange, OpAtomicIAdd, OpAtomicISub, OpAtomicSMin, OpAtomicUMin, OpAtomicSMax, OpAtomicUMax, OpAtomicAnd, OpAtomicOr, OpAtomicXor:
 		return []uint32{a[2], a[3], a[4], a[5]}
+	case OpAtomicCompareExchange:
+		return []uint32{a[2], a[3], a[4], a[5], a[6], a[7]}
 	case OpControlBarrier:
 		return []uint32{a[0], a[1], a[2]}
 	case OpAccessChain:
@@ -2514,6 +2530,8 @@ func valueUses(in Instruction) []uint32 {
 		return []uint32{a[2]}
 	case OpIAdd, OpFAdd, OpISub, OpFSub, OpIMul, OpFMul, OpUDiv, OpSDiv, OpFDiv, OpUMod, OpSRem, OpFRem, OpVectorTimesScalar, OpLogicalEqual, OpLogicalNotEqual, OpLogicalOr, OpLogicalAnd, OpIEqual, OpINotEqual, OpUGreaterThan, OpSGreaterThan, OpUGreaterThanEqual, OpSGreaterThanEqual, OpULessThan, OpSLessThan, OpULessThanEqual, OpSLessThanEqual, OpFOrdEqual, OpFOrdNotEqual, OpFOrdLessThan, OpFOrdGreaterThan, OpFOrdLessThanEqual, OpFOrdGreaterThanEqual, OpShiftRightLogical, OpShiftRightArithmetic, OpShiftLeftLogical, OpBitwiseOr, OpBitwiseXor, OpBitwiseAnd:
 		return []uint32{a[2], a[3]}
+	case OpSelect:
+		return []uint32{a[2], a[3], a[4]}
 	case OpBranchConditional:
 		return []uint32{a[0]}
 	case OpReturnValue:

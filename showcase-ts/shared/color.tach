@@ -10,5 +10,5 @@ const displayLuminance: vec<float32, 3> = vec(0.21, 0.72, 0.07);
   returns("The clamped value."),
 )
 function saturate(value: float32): float32 {
-  return value < 0.0 ? 0.0 : value > 1.0 ? 1.0 : value;
+  return clamp(value, 0.0, 1.0);
 }

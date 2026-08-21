@@ -177,6 +177,41 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 	}
 }
 
+func TestFloatBoundsAndStrongCompareExchangeSPIRV(t *testing.T) {
+	bin := emitSource(t, "bounds-atomic.tach", `
+export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, half: buffer<float16[]>, state: buffer<atomic<uint32>[]>) {
+  if (i < values.length && i < half.length && i < state.length) {
+    values[i] = clamp(values[i], min(values[i], -1.0), max(values[i], 1.0));
+    half[i] = clamp(half[i], float16(-1), float16(1));
+    let observed = atomicCompareExchange(state[i], 0, 1);
+    if (observed != 0) { atomicAdd(state[i], 1); }
+  }
+}`)
+	if err := spirv.Validate(bin); err != nil {
+		t.Fatal(err)
+	}
+	m, err := spirv.Decode(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compareExchange, selects, orderedLess, extendedInstructions int
+	for _, instruction := range m.Instructions {
+		switch instruction.Op {
+		case spirv.OpAtomicCompareExchange:
+			compareExchange++
+		case spirv.OpSelect:
+			selects++
+		case spirv.OpFOrdLessThan:
+			orderedLess++
+		case spirv.OpExtInst:
+			extendedInstructions++
+		}
+	}
+	if compareExchange != 1 || selects < 6 || orderedLess < 6 || extendedInstructions != 0 {
+		t.Fatalf("SPIR-V bounds/CAS: compare-exchange=%d selects=%d ordered-less=%d extended-instructions=%d", compareExchange, selects, orderedLess, extendedInstructions)
+	}
+}
+
 func TestViewProjectionIsValidSPIRV16(t *testing.T) {
 	bin := emitSource(t, "view.tach", `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) {

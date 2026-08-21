@@ -137,6 +137,7 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 			case *Atomic:
 				usePlace(x.Place)
 				useValue(x.Value)
+				useValue(x.Expected)
 			case *If:
 				useValue(x.Cond)
 				if err := block(x.Then); err != nil {
@@ -266,7 +267,7 @@ func RewriteOperands(instruction Instr, value func(ValueID) ValueID, place func(
 	case *ArrayLength:
 		item.Place = place(item.Place)
 	case *Atomic:
-		item.Place, item.Value = place(item.Place), value(item.Value)
+		item.Place, item.Value, item.Expected = place(item.Place), value(item.Value), value(item.Expected)
 	case *If:
 		item.Cond = value(item.Cond)
 	case *Loop:

@@ -601,14 +601,14 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			}
 			switch x.Op {
 			case AtomicLoad:
-				if x.Result == 0 || x.Value != 0 {
+				if x.Result == 0 || x.Value != 0 || x.Expected != 0 {
 					return e, fmt.Errorf("atomicLoad result/value shape is invalid")
 				}
 				if err := defVal(x.Result, x.Type); err != nil {
 					return e, err
 				}
 			case AtomicStore:
-				if x.Result != 0 || x.Value == 0 {
+				if x.Result != 0 || x.Value == 0 || x.Expected != 0 {
 					return e, fmt.Errorf("atomicStore result/value shape is invalid")
 				}
 				vt, err := val(x.Value)
@@ -619,7 +619,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 					return e, fmt.Errorf("atomicStore value is %s, want %s", vt, x.Type)
 				}
 			case AtomicAdd, AtomicSub, AtomicMin, AtomicMax, AtomicAnd, AtomicOr, AtomicXor, AtomicExchange:
-				if x.Result == 0 || x.Value == 0 {
+				if x.Result == 0 || x.Value == 0 || x.Expected != 0 {
 					return e, fmt.Errorf("atomic read-modify-write result/value shape is invalid")
 				}
 				vt, err := val(x.Value)
@@ -628,6 +628,22 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				}
 				if !types.Equal(vt, x.Type) {
 					return e, fmt.Errorf("atomic operand is %s, want %s", vt, x.Type)
+				}
+				if err := defVal(x.Result, x.Type); err != nil {
+					return e, err
+				}
+			case AtomicCompareExchange:
+				if x.Result == 0 || x.Value == 0 || x.Expected == 0 {
+					return e, fmt.Errorf("atomicCompareExchange result/operand shape is invalid")
+				}
+				for _, operand := range []ValueID{x.Expected, x.Value} {
+					operandType, err := val(operand)
+					if err != nil {
+						return e, err
+					}
+					if !types.Equal(operandType, x.Type) {
+						return e, fmt.Errorf("atomic compare-exchange operand is %s, want %s", operandType, x.Type)
+					}
 				}
 				if err := defVal(x.Result, x.Type); err != nil {
 					return e, err

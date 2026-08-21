@@ -1360,13 +1360,47 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		}
 		args[i] = v
 	}
-	id := s.b.id()
 	if x.Kind == ir.IntrinsicDot {
+		id := s.b.id()
 		emit(&s.b.functions, OpDot, tid, id, args[0], args[1])
 		s.def(x.Result, id, x.Type)
 		return nil
 	}
+	if x.Kind == ir.IntrinsicMin || x.Kind == ir.IntrinsicMax || x.Kind == ir.IntrinsicClamp {
+		conditionType := types.TBool
+		if x.Type.Kind == types.Vector {
+			conditionType = types.Vec(types.TBool, x.Type.Lanes)
+		}
+		conditionTypeID, err := s.b.typeID(conditionType, typeLogical)
+		if err != nil {
+			return err
+		}
+		kind := scalarKind(x.Type)
+		less := OpFOrdLessThan
+		if kind == types.I32 {
+			less = OpSLessThan
+		} else if kind == types.U32 {
+			less = OpULessThan
+		}
+		bound := func(minimum bool, left, right uint32) uint32 {
+			condition, result := s.b.id(), s.b.id()
+			first, second := left, right
+			if minimum {
+				first, second = right, left
+			}
+			emit(&s.b.functions, less, conditionTypeID, condition, first, second)
+			emit(&s.b.functions, OpSelect, tid, result, condition, right, left)
+			return result
+		}
+		result := bound(x.Kind == ir.IntrinsicMin, args[0], args[1])
+		if x.Kind == ir.IntrinsicClamp {
+			result = bound(true, result, args[2])
+		}
+		s.def(x.Result, result, x.Type)
+		return nil
+	}
 
+	id := s.b.id()
 	var inst uint32
 	switch x.Kind {
 	case ir.IntrinsicAbs:
@@ -1401,30 +1435,6 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		inst = GLSL450InverseSqrt
 	case ir.IntrinsicPow:
 		inst = GLSL450Pow
-	case ir.IntrinsicMin:
-		if types.IsFloatLike(x.Type) {
-			inst = GLSL450FMin
-		} else if scalarKind(x.Type) == types.I32 {
-			inst = GLSL450SMin
-		} else {
-			inst = GLSL450UMin
-		}
-	case ir.IntrinsicMax:
-		if types.IsFloatLike(x.Type) {
-			inst = GLSL450FMax
-		} else if scalarKind(x.Type) == types.I32 {
-			inst = GLSL450SMax
-		} else {
-			inst = GLSL450UMax
-		}
-	case ir.IntrinsicClamp:
-		if types.IsFloatLike(x.Type) {
-			inst = GLSL450FClamp
-		} else if scalarKind(x.Type) == types.I32 {
-			inst = GLSL450SClamp
-		} else {
-			inst = GLSL450UClamp
-		}
 	case ir.IntrinsicFma:
 		inst = GLSL450Fma
 	case ir.IntrinsicLength:
@@ -1482,6 +1492,20 @@ func (s *fnEmitter) emitAtomic(x *ir.Atomic) error {
 			return err
 		}
 		emit(&s.b.functions, OpAtomicStore, p.ptr, scope, semantics, value)
+		return nil
+	}
+	if x.Op == ir.AtomicCompareExchange {
+		expected, err := s.value(x.Expected)
+		if err != nil {
+			return err
+		}
+		value, err := s.value(x.Value)
+		if err != nil {
+			return err
+		}
+		id := s.b.id()
+		emit(&s.b.functions, OpAtomicCompareExchange, tid, id, p.ptr, scope, semantics, semantics, value, expected)
+		s.def(x.Result, id, x.Type)
 		return nil
 	}
 
