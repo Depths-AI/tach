@@ -3,6 +3,7 @@ package sema
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"runtime"
 	"sort"
@@ -54,7 +55,6 @@ type namedType struct {
 }
 
 type symbol struct {
-	name      string
 	ty        *types.Type
 	value     ir.ValueID
 	constant  *types.Value
@@ -64,14 +64,8 @@ type symbol struct {
 }
 type env struct{ syms map[string]symbol }
 
-func newEnv() env { return env{syms: map[string]symbol{}} }
-func (e env) clone() env {
-	m := make(map[string]symbol, len(e.syms))
-	for k, v := range e.syms {
-		m[k] = v
-	}
-	return env{m}
-}
+func newEnv() env        { return env{syms: map[string]symbol{}} }
+func (e env) clone() env { return env{maps.Clone(e.syms)} }
 
 type idAllocator struct {
 	nextValue ir.ValueID
@@ -79,7 +73,6 @@ type idAllocator struct {
 }
 
 type fnBuilder struct {
-	c        *Checker
 	fn       *ir.Function
 	ids      *idAllocator
 	block    *ir.Block
@@ -106,7 +99,7 @@ func (b *fnBuilder) emit(i ir.Instr) { b.block.Instrs = append(b.block.Instrs, i
 func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	// Structured regions share one allocator. SSA/place IDs are function-global
 	// identities even when definitions have region-scoped visibility.
-	return &fnBuilder{c: b.c, fn: b.fn, ids: b.ids, block: block, loop: b.loop, comptime: b.comptime}
+	return &fnBuilder{fn: b.fn, ids: b.ids, block: block, loop: b.loop, comptime: b.comptime}
 }
 
 func CheckAndLower(m *ast.Module) (*flow.Module, error) {
@@ -348,19 +341,8 @@ func (c *Checker) checkTypeCycles() error {
 
 func (c *Checker) declarationSpan(name string) source.Span {
 	for _, declaration := range c.ast.Decls {
-		switch item := declaration.(type) {
-		case *ast.TypeDecl:
-			if item.Name == name {
-				return item.Span
-			}
-		case *ast.ConstDecl:
-			if item.Name == name {
-				return item.Span
-			}
-		case *ast.FunctionDecl:
-			if item.Name == name {
-				return item.Span
-			}
+		if item, ok := declaration.(*ast.TypeDecl); ok && item.Name == name {
+			return item.Span
 		}
 	}
 	return source.Span{}
@@ -632,13 +614,13 @@ func (c *Checker) lowerHelper(d *ast.FunctionDecl) error {
 	sig := c.funcs[d.Name]
 	f := &ir.Function{Name: d.Name, Kind: ir.Helper, Return: sig.ret, Body: &ir.Block{}, Span: d.Span}
 	e := newEnv()
-	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body, top: true}
+	b := &fnBuilder{fn: f, ids: &idAllocator{}, block: f.Body, top: true}
 	for _, p := range sig.params {
 		id := b.value()
 		f.Params = append(f.Params, ir.Param{Name: p.name, ID: id, Type: p.ty})
-		e.syms[p.name] = symbol{name: p.name, ty: p.ty, value: id, buffer: -1, workgroup: -1}
+		e.syms[p.name] = symbol{ty: p.ty, value: id, buffer: -1, workgroup: -1}
 	}
-	if err := c.lowerBlock(b, d.Body, e, "function"); err != nil {
+	if err := c.lowerBlock(b, d.Body, e); err != nil {
 		return err
 	}
 	if f.Body.Term == nil {
@@ -660,14 +642,14 @@ func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
 	}
 	f := &ir.Function{Name: d.Name, Kind: ir.Stage, Return: types.TVoid, Body: &ir.Block{}, Workgroup: wg, Span: d.Span}
 	e := newEnv()
-	b := &fnBuilder{c: c, fn: f, ids: &idAllocator{}, block: f.Body, top: true}
+	b := &fnBuilder{fn: f, ids: &idAllocator{}, block: f.Body, top: true}
 	for _, index := range d.Indices {
 		if _, used := e.syms[index.Name]; used {
 			return diag(index.Span, "duplicate logical index %q", index.Name)
 		}
 		id := b.value()
 		f.Indices = append(f.Indices, ir.Param{Name: index.Name, ID: id, Type: types.TU32})
-		e.syms[index.Name] = symbol{name: index.Name, ty: types.TU32, value: id, buffer: -1, workgroup: -1}
+		e.syms[index.Name] = symbol{ty: types.TU32, value: id, buffer: -1, workgroup: -1}
 	}
 	hasBuffer := false
 	for _, p := range d.Params {
@@ -682,19 +664,19 @@ func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
 			hasBuffer = true
 			idx := len(f.BufferParams)
 			f.BufferParams = append(f.BufferParams, ir.BufferParam{Name: p.Name, Type: ty, Access: ir.Read, Span: p.Span})
-			e.syms[p.Name] = symbol{name: p.Name, ty: ty, buffer: idx, workgroup: -1}
+			e.syms[p.Name] = symbol{ty: ty, buffer: idx, workgroup: -1}
 			f.SourceParams = append(f.SourceParams, ir.SourceParam{Name: p.Name, Kind: ir.SourceBuffer, Buffer: idx})
 			continue
 		}
 		id := b.value()
 		f.Params = append(f.Params, ir.Param{Name: p.Name, ID: id, Type: ty})
-		e.syms[p.Name] = symbol{name: p.Name, ty: ty, value: id, buffer: -1, workgroup: -1}
+		e.syms[p.Name] = symbol{ty: ty, value: id, buffer: -1, workgroup: -1}
 		f.SourceParams = append(f.SourceParams, ir.SourceParam{Name: p.Name, Kind: ir.SourceValue, Value: id, Buffer: -1})
 	}
 	if !hasBuffer {
 		return diag(d.Span, "kernel %s requires at least one buffer parameter", d.Name)
 	}
-	if err := c.lowerBlock(b, d.Body, e, "function"); err != nil {
+	if err := c.lowerBlock(b, d.Body, e); err != nil {
 		return err
 	}
 	if f.Body.Term == nil {
@@ -805,7 +787,7 @@ func splitNumberLiteral(raw string) (body string, basePrefixed bool) {
 	return body, basePrefixed
 }
 
-func (c *Checker) lowerBlock(b *fnBuilder, src *ast.BlockStmt, e env, kind string) error {
+func (c *Checker) lowerBlock(b *fnBuilder, src *ast.BlockStmt, e env) error {
 	for _, s := range src.Stmts {
 		if b.block.Term != nil {
 			return diag(s.GetSpan(), "unreachable statement")
@@ -837,28 +819,17 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		}
 		idx := len(b.fn.WorkgroupVars)
 		b.fn.WorkgroupVars = append(b.fn.WorkgroupVars, ir.WorkgroupVar{Name: x.Name, Type: ty, Span: x.Span})
-		e.syms[x.Name] = symbol{name: x.Name, ty: ty, buffer: -1, workgroup: idx}
+		e.syms[x.Name] = symbol{ty: ty, buffer: -1, workgroup: idx}
 		return nil
 	case *ast.ConstStmt:
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
 		}
-		var expected *types.Type
-		var err error
-		if x.Type != nil {
-			expected, err = c.resolveTypeIn(x.Type, &e)
-			if err != nil {
-				return err
-			}
-			if !constantType(expected) {
-				return diag(x.Type.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
-			}
-		}
-		value, err := c.evaluateConstant(x.Value, expected, e)
+		value, err := c.evaluateConstantBinding(x.Type, x.Value, e)
 		if err != nil {
 			return err
 		}
-		e.syms[x.Name] = symbol{name: x.Name, ty: value.Type, constant: value, buffer: -1, workgroup: -1}
+		e.syms[x.Name] = symbol{ty: value.Type, constant: value, buffer: -1, workgroup: -1}
 		return nil
 	case *ast.VarStmt:
 		if _, ok := e.syms[x.Name]; ok {
@@ -885,7 +856,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		if t.Kind == types.Void {
 			return diag(x.Value.GetSpan(), "cannot bind a void expression")
 		}
-		e.syms[x.Name] = symbol{name: x.Name, ty: t, value: id, mutable: true, buffer: -1, workgroup: -1}
+		e.syms[x.Name] = symbol{ty: t, value: id, mutable: true, buffer: -1, workgroup: -1}
 		return nil
 	case *ast.AssignStmt:
 		return c.lowerAssign(b, e, x.Target, x.Op, x.Value, x.Span)
@@ -1035,14 +1006,8 @@ func carriedNames(blocks []*ast.BlockStmt, e env) []string {
 		if set[name] && s.buffer < 0 && s.workgroup < 0 && s.mutable {
 			out = append(out, name)
 		}
-	} // deterministic source-independent order by name
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j] < out[i] {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1058,14 +1023,14 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 	thenBlock := &ir.Block{}
 	tb := b.child(thenBlock)
 	te := e.clone()
-	if err := c.lowerBlock(tb, x.Then, te, "branch"); err != nil {
+	if err := c.lowerBlock(tb, x.Then, te); err != nil {
 		return err
 	}
 	elseBlock := &ir.Block{}
 	eb := b.child(elseBlock)
 	ee := e.clone()
 	if x.Else != nil {
-		if err := c.lowerBlock(eb, x.Else, ee, "branch"); err != nil {
+		if err := c.lowerBlock(eb, x.Else, ee); err != nil {
 			return err
 		}
 	}
@@ -1164,7 +1129,7 @@ func (c *Checker) lowerLoop(b *fnBuilder, e env, cond ast.Expr, body *ast.BlockS
 	bb := b.child(bodyBlock)
 	bb.loop = &loopContext{names: names, base: loopEnv, post: post}
 	bodyEnv := loopEnv.clone()
-	if err := c.lowerBlock(bb, body, bodyEnv, "loop"); err != nil {
+	if err := c.lowerBlock(bb, body, bodyEnv); err != nil {
 		return err
 	}
 	if bodyBlock.Term == nil {

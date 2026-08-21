@@ -305,9 +305,7 @@ func Clone(m *Module) *Module {
 				if value.Constant != nil {
 					value.Constant = &types.Value{Type: value.Constant.Type, Bits: append([]uint32(nil), value.Constant.Bits...)}
 				}
-			}
-			for k := range q.Dispatches[j].Values {
-				q.Dispatches[j].Values[k].Path = append([]string(nil), p.Dispatches[j].Values[k].Path...)
+				value.Path = append([]string(nil), value.Path...)
 			}
 		}
 		if p.View != nil {

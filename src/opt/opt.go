@@ -249,7 +249,7 @@ type promotedBufferValue struct {
 
 func promoteLoopBufferValues(m *ir.Module, f *ir.Function) {
 	resources := placeResourceRoots(f)
-	next := maximumValueID(f)
+	next := ir.MaxValueID(f)
 	promoteNestedLoops(f, f.Body, resources, &next)
 }
 
@@ -405,23 +405,12 @@ func zeroable(t *types.Type) bool {
 }
 
 func zeroValue(t *types.Type, span source.Span, fresh func() ir.ValueID, out []ir.Instr) (ir.ValueID, []ir.Instr) {
-	if t.Kind != types.Vector {
-		id := fresh()
-		raw := "0"
-		if t.Kind == types.Bool {
-			raw = "false"
-		} else if types.IsFloatLike(t) {
-			raw = "0.0"
-		}
-		return id, append(out, &ir.Const{Result: id, Type: t, Raw: raw, Span: span})
+	lanes := 1
+	if t.Kind == types.Vector {
+		lanes = t.Lanes
 	}
-	lane, out := zeroValue(t.Elem, span, fresh, out)
-	id := fresh()
-	values := make([]ir.ValueID, t.Lanes)
-	for index := range values {
-		values[index] = lane
-	}
-	return id, append(out, &ir.Composite{Result: id, Type: t, Values: values, Span: span})
+	id, instructions := ir.MaterializeConstant(&types.Value{Type: t, Bits: make([]uint32, lanes)}, span, fresh)
+	return id, append(out, instructions...)
 }
 
 func rewriteBlockValues(block *ir.Block, resolve func(ir.ValueID) ir.ValueID) {
@@ -506,48 +495,6 @@ func loopTouchesResourceElsewhere(loop *ir.Loop, resources map[ir.PlaceID]int, r
 	walk(loop.Cond)
 	walk(loop.Body)
 	return touches
-}
-
-func maximumValueID(f *ir.Function) ir.ValueID {
-	var maximum ir.ValueID
-	remember := func(id ir.ValueID) {
-		if id > maximum {
-			maximum = id
-		}
-	}
-	for _, parameter := range f.Params {
-		remember(parameter.ID)
-	}
-	for _, index := range f.Indices {
-		remember(index.ID)
-	}
-	var walk func(*ir.Block)
-	walk = func(block *ir.Block) {
-		for _, in := range block.Instrs {
-			if definition, ok := in.(ir.ValueDef); ok {
-				remember(definition.ResultValue())
-			}
-			switch x := in.(type) {
-			case *ir.If:
-				for _, result := range x.Results {
-					remember(result.ID)
-				}
-				walk(x.Then)
-				walk(x.Else)
-			case *ir.Loop:
-				for _, parameter := range x.Params {
-					remember(parameter.ID)
-				}
-				for _, result := range x.Results {
-					remember(result.ID)
-				}
-				walk(x.Cond)
-				walk(x.Body)
-			}
-		}
-	}
-	walk(f.Body)
-	return maximum
 }
 
 func canonicalizeBlock(f *ir.Function, b *ir.Block, replacements map[ir.ValueID]ir.ValueID, placeReplacements map[ir.PlaceID]ir.PlaceID, placeResources map[ir.PlaceID]int, available map[valueKey]ir.ValueID, availablePlaces map[placeKey]ir.PlaceID) {

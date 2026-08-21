@@ -113,6 +113,25 @@ func (x *Const) SpanOf() source.Span     { return x.Span }
 func (x *Const) ResultValue() ValueID    { return x.Result }
 func (x *Const) ResultType() *types.Type { return x.Type }
 
+// MaterializeConstant creates scalar constants and, for a vector, its final composite.
+func MaterializeConstant(value *types.Value, span source.Span, fresh func() ValueID) (ValueID, []Instr) {
+	element := value.Type
+	if value.Type.Kind == types.Vector {
+		element = value.Type.Elem
+	}
+	components := make([]ValueID, len(value.Bits))
+	instructions := make([]Instr, 0, len(value.Bits)+1)
+	for index, bits := range value.Bits {
+		components[index] = fresh()
+		instructions = append(instructions, &Const{Result: components[index], Type: element, Raw: types.ScalarRaw(element, bits), Span: span})
+	}
+	if value.Type.Kind != types.Vector {
+		return components[0], instructions
+	}
+	result := fresh()
+	return result, append(instructions, &Composite{Result: result, Type: value.Type, Values: components, Span: span})
+}
+
 type Unary struct {
 	Result ValueID
 	Type   *types.Type

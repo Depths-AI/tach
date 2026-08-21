@@ -189,6 +189,47 @@ func UseCounts(f *Function) (map[ValueID]int, map[PlaceID]int, error) {
 	return values, places, block(f.Body)
 }
 
+// MaxValueID returns the greatest function-global SSA value identity.
+func MaxValueID(function *Function) ValueID {
+	var maximum ValueID
+	remember := func(id ValueID) { maximum = max(maximum, id) }
+	for _, parameter := range function.Indices {
+		remember(parameter.ID)
+	}
+	for _, parameter := range function.Params {
+		remember(parameter.ID)
+	}
+	var block func(*Block)
+	block = func(body *Block) {
+		for _, instruction := range body.Instrs {
+			if definition, ok := instruction.(ValueDef); ok {
+				remember(definition.ResultValue())
+			}
+			switch item := instruction.(type) {
+			case *If:
+				for _, result := range item.Results {
+					remember(result.ID)
+				}
+				block(item.Then)
+				block(item.Else)
+			case *Loop:
+				for _, parameter := range item.Params {
+					remember(parameter.ID)
+				}
+				for _, result := range item.Results {
+					remember(result.ID)
+				}
+				block(item.Cond)
+				block(item.Body)
+			case *Scope:
+				block(item.Body)
+			}
+		}
+	}
+	block(function.Body)
+	return maximum
+}
+
 // RewriteOperands rewrites one instruction's uses without touching definitions.
 func RewriteOperands(instruction Instr, value func(ValueID) ValueID, place func(PlaceID) PlaceID) {
 	switch item := instruction.(type) {

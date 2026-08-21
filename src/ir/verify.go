@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"maps"
 
 	"tach/src/types"
 )
@@ -17,15 +18,7 @@ type verifyEnv struct {
 }
 
 func (e verifyEnv) clone() verifyEnv {
-	v := make(map[ValueID]*types.Type, len(e.values))
-	for k, x := range e.values {
-		v[k] = x
-	}
-	p := make(map[PlaceID]placeInfo, len(e.places))
-	for k, x := range e.places {
-		p[k] = x
-	}
-	return verifyEnv{v, p}
+	return verifyEnv{maps.Clone(e.values), maps.Clone(e.places)}
 }
 
 func Verify(m *Module) error {

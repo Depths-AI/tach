@@ -3,6 +3,7 @@ package spirv
 import (
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 )
@@ -2470,22 +2471,10 @@ func (v *validation) validateDominance(f *functionInfo, funcOfInst map[int]*func
 	return nil
 }
 func cloneSet(s map[uint32]bool) map[uint32]bool {
-	r := map[uint32]bool{}
-	for x := range s {
-		r[x] = true
-	}
-	return r
+	return maps.Clone(s)
 }
 func setEq(a, b map[uint32]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for x := range a {
-		if !b[x] {
-			return false
-		}
-	}
-	return true
+	return maps.Equal(a, b)
 }
 
 // valueUses returns only ordinary SSA/object value operands; type ids, function

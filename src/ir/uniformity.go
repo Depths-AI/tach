@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"maps"
 
 	"tach/src/source"
 )
@@ -35,15 +36,7 @@ func newUniformEnv() uniformEnv {
 	return uniformEnv{values: map[ValueID]bool{}, places: map[PlaceID]uniformPlace{}}
 }
 func (e uniformEnv) clone() uniformEnv {
-	v := make(map[ValueID]bool, len(e.values))
-	for k, x := range e.values {
-		v[k] = x
-	}
-	p := make(map[PlaceID]uniformPlace, len(e.places))
-	for k, x := range e.places {
-		p[k] = x
-	}
-	return uniformEnv{values: v, places: p, loop: e.loop}
+	return uniformEnv{values: maps.Clone(e.values), places: maps.Clone(e.places), loop: e.loop}
 }
 
 func verifyUniformity(m *Module, f *Function, fmap map[string]*Function) error {

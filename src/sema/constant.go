@@ -91,53 +91,46 @@ func (c *Checker) resolveConstant(name string, reference source.Span) (*types.Va
 	definition.state = 1
 	c.constantStack = append(c.constantStack, name)
 	defer func() { c.constantStack = c.constantStack[:len(c.constantStack)-1] }()
-	var expected *types.Type
-	var err error
-	if definition.decl.Type != nil {
-		expected, err = c.resolveType(definition.decl.Type)
-		if err == nil && !constantType(expected) {
-			err = diag(definition.decl.Type.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
-		}
-	}
-	if err == nil {
-		definition.value, err = c.evaluateConstant(definition.decl.Value, expected, newEnv())
-	}
+	value, err := c.evaluateConstantBinding(definition.decl.Type, definition.decl.Value, newEnv())
 	if err != nil {
 		if definition.state != 3 {
 			definition.state, definition.err = 3, err
 		}
 		return nil, err
 	}
+	definition.value = value
 	definition.state = 2
 	return definition.value, nil
 }
 
-func constantType(t *types.Type) bool {
-	return types.IsScalar(t) || t != nil && t.Kind == types.Vector && types.IsNumericScalar(t.Elem)
-}
-
-func cloneValue(value *types.Value) *types.Value {
-	if value == nil {
-		return nil
+func (c *Checker) evaluateConstantBinding(typeExpression ast.TypeExpr, expression ast.Expr, environment env) (*types.Value, error) {
+	var expected *types.Type
+	var err error
+	if typeExpression != nil {
+		expected, err = c.resolveTypeIn(typeExpression, &environment)
+		if err != nil {
+			return nil, err
+		}
+		if !types.IsConstantType(expected) {
+			return nil, diag(typeExpression.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
+		}
 	}
-	return &types.Value{Type: value.Type, Bits: append([]uint32(nil), value.Bits...)}
+	return c.evaluateConstant(expression, expected, environment)
 }
 
 func (c *Checker) evaluateConstant(expression ast.Expr, expected *types.Type, environment env) (*types.Value, error) {
 	block := &ir.Block{}
 	builder := &fnBuilder{
-		c:        c,
 		fn:       &ir.Function{Kind: ir.Helper, Return: types.TVoid, Body: block},
 		ids:      &idAllocator{},
 		block:    block,
-		top:      true,
 		comptime: true,
 	}
 	result, resultType, err := c.lowerExpr(builder, environment, expression, expected)
 	if err != nil {
 		return nil, err
 	}
-	if !constantType(resultType) {
+	if !types.IsConstantType(resultType) {
 		return nil, diag(expression.GetSpan(), "compile-time expression produces %s; constants must be scalar or vector values", resultType)
 	}
 	if expected != nil && !types.Equal(resultType, expected) {
@@ -151,7 +144,7 @@ func (c *Checker) evaluateConstant(expression ast.Expr, expected *types.Type, en
 	if value == nil {
 		return nil, diag(expression.GetSpan(), "compile-time expression has no value")
 	}
-	return cloneValue(value), nil
+	return value, nil
 }
 
 func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) ([]*types.Value, error) {
@@ -238,42 +231,40 @@ func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) 
 }
 
 func parseConstant(t *types.Type, raw string) (*types.Value, error) {
-	value := &types.Value{Type: t, Bits: []uint32{}}
+	var bits uint32
 	switch t.Kind {
 	case types.Bool:
-		if raw == "true" {
-			value.Bits = append(value.Bits, 1)
-		} else if raw == "false" {
-			value.Bits = append(value.Bits, 0)
-		} else {
-			return nil, fmt.Errorf("invalid bool constant %q", raw)
+		if raw != "false" {
+			if raw != "true" {
+				return nil, fmt.Errorf("invalid bool constant %q", raw)
+			}
+			bits = 1
 		}
 	case types.I32:
 		number, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil {
 			return nil, err
 		}
-		value.Bits = append(value.Bits, uint32(int32(number)))
+		bits = uint32(int32(number))
 	case types.U32:
 		number, err := strconv.ParseUint(raw, 10, 32)
 		if err != nil {
 			return nil, err
 		}
-		value.Bits = append(value.Bits, uint32(number))
+		bits = uint32(number)
 	case types.F16, types.F32:
 		number, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			return nil, err
 		}
-		bits, err := floatBits(t, number)
+		bits, err = floatBits(t, number)
 		if err != nil {
 			return nil, err
 		}
-		value.Bits = append(value.Bits, bits)
 	default:
 		return nil, fmt.Errorf("%s is not a scalar constant type", t)
 	}
-	return value, nil
+	return &types.Value{Type: t, Bits: []uint32{bits}}, nil
 }
 
 func composeConstant(t *types.Type, ids []ir.ValueID, values map[ir.ValueID]*types.Value) (*types.Value, error) {
@@ -459,19 +450,6 @@ func convertConstant(value *types.Value, target *types.Type) (*types.Value, erro
 	if (value.Type.Kind == types.I32 || value.Type.Kind == types.U32) && (target.Kind == types.I32 || target.Kind == types.U32) {
 		return &types.Value{Type: target, Bits: []uint32{bits}}, nil
 	}
-	if target.Kind == types.F16 || target.Kind == types.F32 {
-		var number float64
-		switch value.Type.Kind {
-		case types.I32:
-			number = float64(int32(bits))
-		case types.U32:
-			number = float64(bits)
-		case types.F16, types.F32:
-			number = floatValue(value.Type, bits)
-		}
-		converted, err := floatBits(target, number)
-		return &types.Value{Type: target, Bits: []uint32{converted}}, err
-	}
 	var number float64
 	switch value.Type.Kind {
 	case types.I32:
@@ -479,7 +457,14 @@ func convertConstant(value *types.Value, target *types.Type) (*types.Value, erro
 	case types.U32:
 		number = float64(bits)
 	case types.F16, types.F32:
-		number = math.Trunc(floatValue(value.Type, bits))
+		number = floatValue(value.Type, bits)
+	}
+	if target.Kind == types.F16 || target.Kind == types.F32 {
+		converted, err := floatBits(target, number)
+		return &types.Value{Type: target, Bits: []uint32{converted}}, err
+	}
+	if value.Type.Kind == types.F16 || value.Type.Kind == types.F32 {
+		number = math.Trunc(number)
 	}
 	if target.Kind == types.I32 {
 		if number < math.MinInt32 || number > math.MaxInt32 {
@@ -677,17 +662,7 @@ func floatBits(t *types.Type, value float64) (uint32, error) {
 }
 
 func materializeConstant(builder *fnBuilder, value *types.Value, span source.Span) (ir.ValueID, *types.Type) {
-	if value.Type.Kind != types.Vector {
-		id := builder.value()
-		builder.emit(&ir.Const{Result: id, Type: value.Type, Raw: types.ScalarRaw(value.Type, value.Bits[0]), Span: span})
-		return id, value.Type
-	}
-	lanes := make([]ir.ValueID, value.Type.Lanes)
-	for index := range lanes {
-		lanes[index] = builder.value()
-		builder.emit(&ir.Const{Result: lanes[index], Type: value.Type.Elem, Raw: types.ScalarRaw(value.Type.Elem, value.Bits[index]), Span: span})
-	}
-	result := builder.value()
-	builder.emit(&ir.Composite{Result: result, Type: value.Type, Values: lanes, Span: span})
+	result, instructions := ir.MaterializeConstant(value, span, builder.value)
+	builder.block.Instrs = append(builder.block.Instrs, instructions...)
 	return result, value.Type
 }

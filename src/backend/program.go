@@ -236,8 +236,10 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 				}
 				values = append(values, flow.ValueArgument{Formal: len(values), Kind: flow.ValueRepeat})
 			}
-			specializeConstants(function, values)
-			values = pruneUnusedParameters(function, values)
+			values, err := specializeParameters(function, values)
+			if err != nil {
+				return nil, err
+			}
 			logicalLengths := appendLogicalLengths(function, &values, program, &dispatch)
 			var viewWidth, viewHeight ir.ValueID
 			if dispatchIndex == fusedDispatch {
@@ -362,41 +364,48 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 	return executable, nil
 }
 
-func specializeConstants(function *ir.Function, values []flow.ValueArgument) {
-	next := maxValue(function)
+func specializeParameters(function *ir.Function, values []flow.ValueArgument) ([]flow.ValueArgument, error) {
+	uses, _, err := ir.UseCounts(function)
+	if err != nil {
+		return nil, err
+	}
+	next := ir.MaxValueID(function)
+	fresh := func() ir.ValueID { next++; return next }
 	replacements := map[ir.ValueID]ir.ValueID{}
 	var definitions []ir.Instr
+	parameters := make([]ir.Param, 0, len(function.Params))
+	kept := make([]flow.ValueArgument, 0, len(values))
 	for index, parameter := range function.Params {
-		if index >= len(values) || values[index].Kind != flow.ValueConstant || values[index].Constant == nil {
+		if uses[parameter.ID] == 0 {
 			continue
 		}
-		value := values[index].Constant
-		if value.Type.Kind != types.Vector {
-			next++
-			definitions = append(definitions, &ir.Const{Result: next, Type: value.Type, Raw: types.ScalarRaw(value.Type, value.Bits[0]), Span: function.Span})
-			replacements[parameter.ID] = next
+		value := values[index]
+		if value.Kind != flow.ValueConstant {
+			value.Formal = len(kept)
+			parameters, kept = append(parameters, parameter), append(kept, value)
 			continue
 		}
-		lanes := make([]ir.ValueID, value.Type.Lanes)
-		for lane := range lanes {
-			next++
-			lanes[lane] = next
-			definitions = append(definitions, &ir.Const{Result: next, Type: value.Type.Elem, Raw: types.ScalarRaw(value.Type.Elem, value.Bits[lane]), Span: function.Span})
-		}
-		next++
-		definitions = append(definitions, &ir.Composite{Result: next, Type: value.Type, Values: lanes, Span: function.Span})
-		replacements[parameter.ID] = next
+		replacement, added := ir.MaterializeConstant(value.Constant, function.Span, fresh)
+		definitions, replacements[parameter.ID] = append(definitions, added...), replacement
 	}
-	if len(definitions) == 0 {
-		return
+	if len(replacements) > 0 {
+		ir.ReplaceValueUses(function, replacements)
+		function.Body.Instrs = append(definitions, function.Body.Instrs...)
 	}
-	ir.ReplaceValueUses(function, replacements)
-	function.Body.Instrs = append(definitions, function.Body.Instrs...)
+	function.Params = parameters
+	function.SourceParams = function.SourceParams[:0]
+	for index, parameter := range function.BufferParams {
+		function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: parameter.Name, Kind: ir.SourceBuffer, Buffer: index})
+	}
+	for _, parameter := range function.Params {
+		function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: parameter.Name, Kind: ir.SourceValue, Value: parameter.ID, Buffer: -1})
+	}
+	return kept, nil
 }
 
 func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, program *flow.Program, dispatch *flow.Dispatch) map[int]ir.ValueID {
 	lengths := map[int]ir.ValueID{}
-	next := maxValue(function) + 1
+	next := ir.MaxValueID(function) + 1
 	for buffer, parameter := range function.BufferParams {
 		path, ok := f16RuntimePath(parameter.Type)
 		if !ok || !usesBufferLength(function.Body, buffer, map[ir.PlaceID]bool{}) {
@@ -501,7 +510,7 @@ func containsLoop(block *ir.Block) bool {
 }
 
 func internalizeRepeat(function *ir.Function) error {
-	next := maxValue(function)
+	next := ir.MaxValueID(function)
 	next++
 	repeat := ir.Param{Name: "__tach_repeat", ID: next, Type: types.TU32}
 	function.Params = append(function.Params, repeat)
@@ -569,77 +578,6 @@ func rewriteReturns(block *ir.Block) bool {
 		block.Term = &ir.ExitScope{}
 	}
 	return true
-}
-
-func maxValue(function *ir.Function) ir.ValueID {
-	var maximum ir.ValueID
-	see := func(id ir.ValueID) {
-		if id > maximum {
-			maximum = id
-		}
-	}
-	for _, parameter := range function.Indices {
-		see(parameter.ID)
-	}
-	for _, parameter := range function.Params {
-		see(parameter.ID)
-	}
-	var walk func(*ir.Block)
-	walk = func(block *ir.Block) {
-		for _, instruction := range block.Instrs {
-			if definition, ok := instruction.(ir.ValueDef); ok {
-				see(definition.ResultValue())
-			}
-			switch x := instruction.(type) {
-			case *ir.If:
-				for _, result := range x.Results {
-					see(result.ID)
-				}
-				walk(x.Then)
-				walk(x.Else)
-			case *ir.Loop:
-				for _, result := range x.Results {
-					see(result.ID)
-				}
-				for _, parameter := range x.Params {
-					see(parameter.ID)
-				}
-				walk(x.Cond)
-				walk(x.Body)
-			case *ir.Scope:
-				walk(x.Body)
-			}
-		}
-	}
-	walk(function.Body)
-	return maximum
-}
-
-func pruneUnusedParameters(function *ir.Function, values []flow.ValueArgument) []flow.ValueArgument {
-	uses, _, err := ir.UseCounts(function)
-	if err != nil {
-		return values
-	}
-	keptParameters := make([]ir.Param, 0, len(function.Params))
-	keptValues := make([]flow.ValueArgument, 0, len(values))
-	for index, parameter := range function.Params {
-		if uses[parameter.ID] == 0 {
-			continue
-		}
-		keptParameters = append(keptParameters, parameter)
-		value := values[index]
-		value.Formal = len(keptValues)
-		keptValues = append(keptValues, value)
-	}
-	function.Params = keptParameters
-	function.SourceParams = function.SourceParams[:0]
-	for index, parameter := range function.BufferParams {
-		function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: parameter.Name, Kind: ir.SourceBuffer, Buffer: index})
-	}
-	for _, parameter := range function.Params {
-		function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: parameter.Name, Kind: ir.SourceValue, Value: parameter.ID, Buffer: -1})
-	}
-	return keptValues
 }
 
 func cloneFunction(function *ir.Function) *ir.Function {
@@ -830,7 +768,7 @@ func shapeProduct(program *flow.Program, product, left, right flow.ShapeID) bool
 }
 
 func appendViewExtent(function *ir.Function, values *[]flow.ValueArgument, view *flow.View) (ir.ValueID, ir.ValueID) {
-	next := maxValue(function) + 1
+	next := ir.MaxValueID(function) + 1
 	width, height := next, next+1
 	for _, parameter := range []ir.Param{{Name: "__tach_view_width", ID: width, Type: types.TU32}, {Name: "__tach_view_height", ID: height, Type: types.TU32}} {
 		function.Params = append(function.Params, parameter)
@@ -848,7 +786,7 @@ func fuseView(function *ir.Function, binding int) error {
 	output := types.Runtime(types.TU32)
 	function.BufferParams[binding].Type = output
 	places := map[ir.PlaceID]bool{}
-	next, stores := maxValue(function)+1, 0
+	next, stores := ir.MaxValueID(function)+1, 0
 	var rewrite func(*ir.Block) error
 	rewrite = func(block *ir.Block) error {
 		var instructions []ir.Instr

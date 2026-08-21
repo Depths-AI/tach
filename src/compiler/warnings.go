@@ -35,14 +35,14 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 	for i := range project.Kernels {
 		kernel := &project.Kernels[i]
 		used := map[string]bool{}
-		visibleConstants := map[string]*ast.ConstDecl{}
+		visibleConstants := map[string]bool{}
 		visibleOwners := map[string]bool{kernel.Identity: true}
 		for _, item := range kernel.AST.Imports {
 			visibleOwners[item.Target] = true
 		}
-		for name, constant := range constants {
+		for name := range constants {
 			if visibleOwners[owners[name]] {
-				visibleConstants[name] = constant
+				visibleConstants[name] = true
 			}
 		}
 		for _, declaration := range kernel.AST.Decls {
@@ -84,7 +84,9 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 		}
 		reachable[name] = true
 		for dependency := range refs[name] {
-			visit(dependency)
+			if functions[dependency] != nil || constants[dependency] != nil {
+				visit(dependency)
+			}
 		}
 	}
 	for _, roots := range typeRoots {
@@ -162,7 +164,7 @@ type binding struct {
 
 type analysis struct {
 	refs, reads map[string]bool
-	globals     map[string]*ast.ConstDecl
+	globals     map[string]bool
 	locals      map[string]bool
 	bindings    []binding
 	diagnostics source.Diagnostics
@@ -294,7 +296,7 @@ func (a *analysis) expression(expression ast.Expr) {
 	switch item := expression.(type) {
 	case *ast.IdentExpr:
 		a.reads[item.Name] = true
-		if !a.locals[item.Name] && a.globals[item.Name] != nil {
+		if !a.locals[item.Name] && a.globals[item.Name] {
 			a.refs[item.Name] = true
 		}
 	case *ast.UnaryExpr:

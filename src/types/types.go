@@ -45,6 +45,31 @@ type Value struct {
 	Bits []uint32
 }
 
+func IsConstantType(t *Type) bool {
+	return IsScalar(t) || t != nil && t.Kind == Vector && IsNumericScalar(t.Elem)
+}
+
+func (v *Value) Valid() bool {
+	if v == nil || !IsConstantType(v.Type) {
+		return false
+	}
+	lanes, element := 1, v.Type
+	if v.Type.Kind == Vector {
+		lanes, element = v.Type.Lanes, v.Type.Elem
+	}
+	if len(v.Bits) != lanes {
+		return false
+	}
+	for _, bits := range v.Bits {
+		if element.Kind == Bool && bits > 1 || element.Kind == F16 && (bits > 0xffff || !finite(Float16frombits(uint16(bits)))) || element.Kind == F32 && !finite(float64(math.Float32frombits(bits))) {
+			return false
+		}
+	}
+	return true
+}
+
+func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
+
 var (
 	TVoid = &Type{Kind: Void, Name: "void"}
 	TBool = &Type{Kind: Bool, Name: "bool"}

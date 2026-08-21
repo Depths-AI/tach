@@ -1,8 +1,6 @@
 package sema
 
 import (
-	"fmt"
-
 	"tach/src/ast"
 	"tach/src/flow"
 	"tach/src/ir"
@@ -92,17 +90,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 			if _, exists := symbols[x.Name]; exists {
 				return nil, diag(x.Span, "%q is already defined", x.Name)
 			}
-			var expected *types.Type
-			if x.Type != nil {
-				expected, err = c.resolveType(x.Type)
-				if err != nil {
-					return nil, err
-				}
-				if !constantType(expected) {
-					return nil, diag(x.Type.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
-				}
-			}
-			value, err := c.evaluateConstant(x.Value, expected, programEnvironment(symbols))
+			value, err := c.evaluateConstantBinding(x.Type, x.Value, programEnvironment(symbols))
 			if err != nil {
 				return nil, err
 			}
@@ -218,7 +206,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 func programEnvironment(symbols map[string]programSymbol) env {
 	environment := newEnv()
 	for name, item := range symbols {
-		environment.syms[name] = symbol{name: name, ty: item.type_, constant: item.constant, buffer: -1, workgroup: -1}
+		environment.syms[name] = symbol{ty: item.type_, constant: item.constant, buffer: -1, workgroup: -1}
 	}
 	return environment
 }
@@ -452,5 +440,3 @@ func programPath(expression ast.Expr, symbols map[string]programSymbol) (program
 		return programSymbol{}, nil, nil, false
 	}
 }
-
-var _ = fmt.Sprintf

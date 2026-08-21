@@ -66,7 +66,6 @@ func verifyProgram(m *Module, p *Program) error {
 			return fmt.Errorf("transient %d has invalid length", r.ID)
 		}
 	}
-	producers := map[VersionID]DispatchID{}
 	for i, v := range p.Versions {
 		if v.ID != VersionID(i+1) || p.Resource(v.Resource) == nil {
 			return fmt.Errorf("version IDs must be dense and reference a resource")
@@ -76,9 +75,6 @@ func verifyProgram(m *Module, p *Program) error {
 			if previous == nil || previous.Resource != v.Resource || previous.ID >= v.ID {
 				return fmt.Errorf("version %d has invalid predecessor", v.ID)
 			}
-		}
-		if v.Producer != 0 {
-			producers[v.ID] = v.Producer
 		}
 	}
 	for i, s := range p.Shapes {
@@ -165,7 +161,6 @@ func verifyProgram(m *Module, p *Program) error {
 			return fmt.Errorf("view source is not the defined final resource version")
 		}
 	}
-	_ = producers
 	return nil
 }
 
@@ -217,22 +212,7 @@ func validValue(p *Program, value ValueArgument, want *types.Type) bool {
 	case ValueParameterRef:
 		return value.Parameter >= 0 && value.Parameter < len(p.Parameters) && p.Parameters[value.Parameter].Kind == ValueParameter && types.Equal(pathType(p.Parameters[value.Parameter].Type, value.Path), want)
 	case ValueConstant:
-		if value.Constant == nil || !types.Equal(value.Constant.Type, want) {
-			return false
-		}
-		lanes, element := 1, want
-		if want.Kind == types.Vector {
-			lanes, element = want.Lanes, want.Elem
-		}
-		if len(value.Constant.Bits) != lanes {
-			return false
-		}
-		for _, bits := range value.Constant.Bits {
-			if element.Kind == types.Bool && bits > 1 || element.Kind == types.F16 && bits > 0xffff {
-				return false
-			}
-		}
-		return true
+		return value.Constant.Valid() && types.Equal(value.Constant.Type, want)
 	case ValueRepeat:
 		return want.Kind == types.U32
 	case ValueShape:

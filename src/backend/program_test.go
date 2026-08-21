@@ -1,6 +1,7 @@
 package backend_test
 
 import (
+	"strings"
 	"testing"
 
 	"tach/src/backend"
@@ -137,13 +138,13 @@ func TestDispatchConstantsSpecializeBeforeBackendLowering(t *testing.T) {
 	executable := lower(t, `
 const factor: float16 = 0.5;
 const adjustment: vec<float16, 2> = vec(0.25, 0.75);
-function half[i](values: buffer<float16[]>, scale: float16, bias: vec<float16, 2>) {
+function half[i](values: buffer<float16[]>, scale: float16, bias: vec<float16, 2>, unused: uint32) {
   if (i < values.length) { values[i] *= scale + bias.x - bias.x; }
 }
 export function halve(values: buffer<float16[]>) {
   const localFactor = factor;
   const localAdjustment = adjustment;
-  run half(values, localFactor, localAdjustment) over values.length;
+  run half(values, localFactor, localAdjustment, 99) over values.length;
 }`, backend.WebProfile)
 	kernel := executable.PhysicalKernels[0]
 	for _, parameter := range kernel.Function.Params {
@@ -159,6 +160,9 @@ export function halve(values: buffer<float16[]>) {
 	}
 	if !found {
 		t.Fatalf("specialized Float16 value missing from kernel:\n%s", ir.Dump(executable.KernelModule))
+	}
+	if dump := ir.Dump(executable.KernelModule); strings.Contains(dump, "const uint32 99") {
+		t.Fatalf("unused compile-time argument was materialized:\n%s", dump)
 	}
 }
 

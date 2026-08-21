@@ -1,6 +1,7 @@
 package flow_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -72,11 +73,11 @@ func TestVerifierRejectsVersionAndShapeMutations(t *testing.T) {
 
 func TestConstantArgumentsCloneAndVerifyCanonically(t *testing.T) {
 	a, err := parser.Parse("constant.tach", `
-function fill[i](out: buffer<uint32[]>, value: uint32) {
+function fill[i](out: buffer<float32[]>, value: float32) {
   if (i < out.length) { out[i] = value; }
 }
-export function filled(out: buffer<uint32[]>) {
-  run fill(out, 7) over out.length;
+export function filled(out: buffer<float32[]>) {
+  run fill(out, 7.0) over out.length;
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -87,13 +88,18 @@ export function filled(out: buffer<uint32[]>) {
 	}
 	constant := m.Programs[0].Dispatches[0].Values[0].Constant
 	clone := flow.Clone(m)
-	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits[0] = 8
-	if constant.Bits[0] != 7 {
+	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits[0] = math.Float32bits(8)
+	if constant.Bits[0] != math.Float32bits(7) {
 		t.Fatal("constant clone aliases the original bits")
 	}
 	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits = nil
 	if err := flow.Verify(clone); err == nil {
 		t.Fatal("accepted malformed constant argument")
+	}
+	clone = flow.Clone(m)
+	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits[0] = math.Float32bits(float32(math.Inf(1)))
+	if err := flow.Verify(clone); err == nil {
+		t.Fatal("accepted non-finite constant argument")
 	}
 }
 
