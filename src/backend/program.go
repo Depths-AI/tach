@@ -736,7 +736,7 @@ func fusibleView(module *flow.Module, program *flow.Program) (int, int) {
 	}
 	dispatch := program.Dispatches[last]
 	stage := module.Kernel.Function(dispatch.Stage)
-	if stage == nil || len(stage.Indices) != 1 || len(dispatch.Domain) != 1 || dispatch.Domain[0] != resource.Length {
+	if stage == nil {
 		return -1, -1
 	}
 	summary := ir.AnalyzeAccess(stage)
@@ -745,7 +745,7 @@ func fusibleView(module *flow.Module, program *flow.Program) (int, int) {
 			continue
 		}
 		access := summary.Buffers[argument.Formal]
-		if access.CompleteWrite && len(access.Accesses) == 1 && len(access.Accesses[0].FieldPath) == 0 {
+		if program.DispatchDefines(&dispatch, argument, access) && len(access.Accesses[0].FieldPath) == 0 {
 			return last, argument.Formal
 		}
 	}

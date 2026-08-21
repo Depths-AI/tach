@@ -99,6 +99,9 @@ func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, err
 	}
 	block := &ParameterBlock{Function: function, Binding: binding, Type: &types.Type{Kind: types.Struct, Name: "__tach_parameters_" + Mangle(function.Name)}}
 	for parameter, value := range function.Params {
+		if !types.IsHostParameter(value.Type) {
+			return nil, fmt.Errorf("kernel %s parameter %s: type %s cannot cross the host parameter ABI", function.Name, value.Name, value.Type)
+		}
 		if err := flattenParameter(block, parameter, nil, value.Type); err != nil {
 			return nil, fmt.Errorf("kernel %s parameter %s: %w", function.Name, value.Name, err)
 		}

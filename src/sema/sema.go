@@ -387,6 +387,9 @@ func (c *Checker) collectFunctions() error {
 			if err != nil {
 				return err
 			}
+			if x.Exported && !buffer && !types.IsHostParameter(t) {
+				return diag(p.Type.GetSpan(), "public value parameter type %s cannot cross the host parameter ABI", t)
+			}
 			if buffer && !sig.indexed && !x.Exported {
 				return diag(p.Span, "helper parameter %s cannot be a buffer", p.Name)
 			}
@@ -1648,6 +1651,13 @@ func (c *Checker) emitBooleanBinary(b *fnBuilder, left, right detachedExpr, op s
 func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID, leftType *types.Type, right ast.Expr, span source.Span) (ir.ValueID, *types.Type, error) {
 	if op == "<<" || op == ">>" {
 		return c.lowerShift(b, e, op, left, leftType, right, span)
+	}
+	if types.IsBoolean(leftType) {
+		operand, err := c.lowerDetached(b, e, right, nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		return c.emitBooleanBinary(b, detachedExpr{block: &ir.Block{}, value: left, type_: leftType}, operand, op, span)
 	}
 	rightArguments, err := c.lowerNumericArguments(b, e, op, []ast.Expr{right})
 	if err != nil {

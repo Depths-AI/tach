@@ -123,6 +123,8 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 		{`function paint[i](pixels: buffer<uint32[]>) { pixels[i] = 0; } export function image(): view<srgb8> { let pixels = transient<uint32>(1); run paint(pixels) over 1; return view(pixels, 1, 1); }`, "vec<float32, 4> buffer or transient"},
 		{strings.Replace(valid, "view(pixels, width, height)", "view(pixels, 1.0, height)", 1), "uint32 literal must be an integer"},
 		{strings.Replace(valid, "view<srgb8>", "view<rgba8>", 1), "can only return view<srgb8>"},
+		{`function paint[i](pixels: buffer<vec<float32, 4>[]>) { if (i < 1) { pixels[i] = vec(0.0, 0.0, 0.0, 1.0); } } export function image(): view<srgb8> { let pixels = transient<vec<float32, 4>>(4); run paint(pixels) over pixels.length; return view(pixels, 2, 2); }`, "fully defined before presentation"},
+		{`function fill[i](data: buffer<uint32[]>) { data[i] = i; } function copy[i](input: buffer<uint32[]>, output: buffer<uint32[]>) { output[i] = input[i]; } export function incomplete(output: buffer<uint32[]>) { let scratch = transient<uint32>(8); run fill(scratch) over 4; run copy(scratch, output) over scratch.length; }`, "before every element has been defined"},
 	}
 	for _, test := range invalid {
 		parsed, parseErr := parser.Parse("invalid-view.tach", test.source)
@@ -531,9 +533,14 @@ const defaults: vec<float32, 4> = select(policy, vec(1, 2, 3, 4), 0);
 const valid: bool = all((defaults > 0.0) | !policy);
 function choose(value: vec<float32, 4>): vec<float32, 4> {
   let inside = value >= -1.0 & value <= 1.0;
+  inside &= value != 2.0;
   let changed = inside ^ vec(false, true, false, true);
+  changed |= value == 0.0;
+  changed ^= policy;
   let selected = select(changed | value == 0.0, abs(value), -value);
-  return (any(changed) || all(inside)) && valid ? selected : defaults;
+  let usable = valid;
+  usable &= any(changed);
+  return usable || all(inside) ? selected : defaults;
 }
 export function masks[i](out: buffer<vec<float32, 4>[]>) {
   if (i < out.length) { out[i] = choose(vec(float32(i) - 2.0, -0.5, 0.0, 2.0)); }
@@ -547,6 +554,8 @@ export function masks[i](out: buffer<vec<float32, 4>[]>) {
 
 	for _, test := range []struct{ source, want string }{
 		{`export function bad[i](out: buffer<vec<bool, 2>[]>) {}`, "not host-shareable"},
+		{`export function bad[i](out: buffer<uint32[]>, mask: vec<bool, 2>) {}`, "cannot cross the host parameter ABI"},
+		{`type Options = { mask: vec<bool, 2> }; export function bad[i](out: buffer<uint32[]>, options: Options) {}`, "cannot cross the host parameter ABI"},
 		{`export function bad[i](out: buffer<uint32[]>) { let x = all(true); out[i] = x ? 1 : 0; }`, "requires vec<bool, N>"},
 		{`export function bad[i](out: buffer<uint32[]>) { let x = select(true, vec(1, 2), vec(3, 4)); out[i] = x.x; }`, "mask must be vec<bool, N>"},
 		{`export function bad[i](out: buffer<uint32[]>) { let x = select(vec(true, false), vec(1, 2, 3), vec(4, 5, 6)); out[i] = x.x; }`, "conflicting vector widths"},
@@ -562,6 +571,12 @@ export function masks[i](out: buffer<vec<float32, 4>[]>) {
 			t.Fatalf("CheckAndLower error = %v, want %q", checkErr, test.want)
 		}
 	}
+	lower(t, "private-mask.tach", `
+const enabled: vec<bool, 2> = vec(true, false);
+function apply[i](out: buffer<uint32[]>, mask: vec<bool, 2>) {
+  if (i < out.length) { out[i] = any(mask) ? 1 : 0; }
+}
+export function masks(out: buffer<uint32[]>) { run apply(out, enabled) over out.length; }`)
 }
 
 func TestLoopControlPreservesBarrierUniformity(t *testing.T) {

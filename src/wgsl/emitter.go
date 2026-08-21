@@ -475,6 +475,16 @@ func (s *fnState) emitInstr(in ir.Instr) error {
 		if x.Kind == ir.IntrinsicSelect {
 			args = []string{args[2], args[1], args[0]}
 		}
+		switch x.Kind {
+		case ir.IntrinsicMin:
+			name, args = "select", []string{args[0], args[1], fmt.Sprintf("%s < %s", args[1], args[0])}
+		case ir.IntrinsicMax:
+			name, args = "select", []string{args[0], args[1], fmt.Sprintf("%s < %s", args[0], args[1])}
+		case ir.IntrinsicClamp:
+			bounded := v(x.Result) + "_bounded"
+			e.line("let %s: %s = select(%s, %s, %s < %s);", bounded, e.typeName(x.Type), args[0], args[1], args[0], args[1])
+			name, args = "select", []string{bounded, args[2], fmt.Sprintf("%s < %s", args[2], bounded)}
+		}
 		e.line("let %s: %s = %s(%s);", v(x.Result), e.typeName(x.Type), name, strings.Join(args, ", "))
 		s.def(x.Result, x.Type)
 	case *ir.Convert:

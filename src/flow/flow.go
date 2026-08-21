@@ -227,6 +227,11 @@ type Program struct {
 	nextDisp   DispatchID
 }
 
+func (p *Program) DispatchDefines(dispatch *Dispatch, argument BufferArgument, access ir.BufferSummary) bool {
+	resource := p.Resource(argument.Resource)
+	return access.CoordinateWrite && resource != nil && resource.Length != 0 && len(dispatch.Domain) == 1 && dispatch.Domain[0] == resource.Length
+}
+
 func (p *Program) AddResource(r Resource) ResourceID {
 	p.nextRes++
 	r.ID = p.nextRes

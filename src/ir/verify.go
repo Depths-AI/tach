@@ -899,7 +899,7 @@ func verifyBinary(x *Binary, l, r *types.Type) error {
 		}
 		return fmt.Errorf("* invalid for %s and %s -> %s", l, r, x.Type)
 	case "/", "%":
-		if types.Equal(l, r) && types.Equal(x.Type, l) && types.IsNumeric(l) {
+		if types.Equal(l, r) && types.Equal(x.Type, l) && types.IsNumeric(l) && (x.Op == "/" || types.IsNumericScalar(l)) {
 			return nil
 		}
 		if x.Op == "/" && l.Kind == types.Vector && types.Equal(r, l.Elem) && types.Equal(x.Type, l) {

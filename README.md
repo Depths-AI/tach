@@ -394,8 +394,8 @@ function multiply[i](
   scratch: buffer<float32[]>,
   factor: float32,
 ) {
-  if (i < input.length && i < scratch.length) {
-    scratch[i] = input[i] * factor;
+  if (i < scratch.length) {
+    scratch[i] = i < input.length ? input[i] * factor : 0.0;
   }
 }
 

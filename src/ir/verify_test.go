@@ -127,3 +127,10 @@ func TestVerifyAtomicCompareExchangeShape(t *testing.T) {
 		t.Fatalf("invalid compare-exchange shape error = %v", err)
 	}
 }
+
+func TestVerifyRejectsVectorRemainder(t *testing.T) {
+	vector := types.Vec(types.TU32, 2)
+	if err := verifyBinary(&Binary{Op: "%", Type: vector}, vector, vector); err == nil {
+		t.Fatal("accepted vector remainder")
+	}
+}

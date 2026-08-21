@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"slices"
 	"strconv"
 
 	"tach/src/source"
@@ -27,14 +28,15 @@ type MemoryAccess struct {
 	Indices   []Affine
 	Value     ValueID
 	Span      source.Span
+	complete  bool
 }
 
 type BufferSummary struct {
-	Read          bool
-	Write         bool
-	Atomic        bool
-	CompleteWrite bool
-	Accesses      []MemoryAccess
+	Read            bool
+	Write           bool
+	Atomic          bool
+	CoordinateWrite bool
+	Accesses        []MemoryAccess
 }
 
 type EffectSummary struct {
@@ -66,8 +68,15 @@ func AnalyzeAccess(function *Function) AccessSummary {
 		coordinates[parameter.ID] = dimension
 	}
 	places := map[PlaceID]placeAccess{}
-	var walk func(*Block)
-	walk = func(block *Block) {
+	earlyReturn := false
+	var walk func(*Block, []ValueID, bool)
+	walk = func(block *Block, guards []ValueID, eligible bool) {
+		if block == nil {
+			return
+		}
+		if _, ok := block.Term.(*Return); block != function.Body && ok {
+			earlyReturn = true
+		}
 		for _, instruction := range block.Instrs {
 			summary.InstructionCount++
 			if definition, ok := instruction.(ValueDef); ok && definition.ResultValue() != 0 {
@@ -85,11 +94,16 @@ func AnalyzeAccess(function *Function) AccessSummary {
 				p.index = append(append([]ValueID(nil), p.index...), x.Index)
 				places[x.Result] = p
 			case *Load:
-				addMemoryAccess(&summary, places[x.Place], MemoryRead, 0, x.Span, definitions, coordinates)
+				addMemoryAccess(&summary, places[x.Place], MemoryRead, 0, x.Span, false, definitions, coordinates)
 			case *Store:
-				addMemoryAccess(&summary, places[x.Place], MemoryWrite, x.Value, x.Span, definitions, coordinates)
+				place := places[x.Place]
+				complete := eligible
+				for _, guard := range guards {
+					complete = complete && lengthGuard(guard, place, definitions, places, coordinates)
+				}
+				addMemoryAccess(&summary, place, MemoryWrite, x.Value, x.Span, complete, definitions, coordinates)
 			case *Atomic:
-				addMemoryAccess(&summary, places[x.Place], MemoryAtomic, x.Value, x.Span, definitions, coordinates)
+				addMemoryAccess(&summary, places[x.Place], MemoryAtomic, x.Value, x.Span, false, definitions, coordinates)
 				summary.Effects.Atomic = true
 			case *Barrier:
 				summary.Effects.Barrier = true
@@ -98,21 +112,21 @@ func AnalyzeAccess(function *Function) AccessSummary {
 				summary.Effects.Workgroup = true
 				places[x.Result] = placeAccess{buffer: -1}
 			case *If:
-				walk(x.Then)
-				walk(x.Else)
+				walk(x.Then, append(append([]ValueID(nil), guards...), x.Cond), eligible)
+				walk(x.Else, guards, false)
 			case *Loop:
-				walk(x.Cond)
-				walk(x.Body)
+				walk(x.Cond, guards, false)
+				walk(x.Body, guards, false)
 			case *Scope:
-				walk(x.Body)
+				walk(x.Body, guards, eligible)
 			}
 		}
 	}
-	walk(function.Body)
+	walk(function.Body, nil, true)
 	for i := range summary.Buffers {
 		buffer := &summary.Buffers[i]
-		if len(buffer.Accesses) == 1 && buffer.Accesses[0].Kind == MemoryWrite && identityMap(buffer.Accesses[0].Indices, len(function.Indices)) {
-			buffer.CompleteWrite = true
+		if len(buffer.Accesses) == 1 && buffer.Accesses[0].Kind == MemoryWrite && buffer.Accesses[0].complete && !earlyReturn && identityMap(buffer.Accesses[0].Indices, len(function.Indices)) {
+			buffer.CoordinateWrite = true
 		}
 		for _, access := range buffer.Accesses {
 			switch access.Kind {
@@ -134,15 +148,28 @@ func AnalyzeAccess(function *Function) AccessSummary {
 	return summary
 }
 
-func addMemoryAccess(summary *AccessSummary, place placeAccess, kind MemoryAccessKind, value ValueID, span source.Span, definitions map[ValueID]Instr, coordinates map[ValueID]int) {
+func addMemoryAccess(summary *AccessSummary, place placeAccess, kind MemoryAccessKind, value ValueID, span source.Span, complete bool, definitions map[ValueID]Instr, coordinates map[ValueID]int) {
 	if place.buffer < 0 || place.buffer >= len(summary.Buffers) {
 		return
 	}
-	access := MemoryAccess{Buffer: place.buffer, FieldPath: append([]int(nil), place.fields...), Kind: kind, Value: value, Span: span}
+	access := MemoryAccess{Buffer: place.buffer, FieldPath: append([]int(nil), place.fields...), Kind: kind, Value: value, Span: span, complete: complete}
 	for _, index := range place.index {
 		access.Indices = append(access.Indices, affineValue(index, definitions, coordinates, map[ValueID]bool{}))
 	}
 	summary.Buffers[place.buffer].Accesses = append(summary.Buffers[place.buffer].Accesses, access)
+}
+
+func lengthGuard(id ValueID, target placeAccess, definitions map[ValueID]Instr, places map[PlaceID]placeAccess, coordinates map[ValueID]int) bool {
+	comparison, ok := definitions[id].(*Binary)
+	if !ok || comparison.Op != "<" || !identityMap([]Affine{affineValue(comparison.Left, definitions, coordinates, map[ValueID]bool{})}, 1) {
+		return false
+	}
+	length, ok := definitions[comparison.Right].(*ArrayLength)
+	if !ok {
+		return false
+	}
+	limit, found := places[length.Place]
+	return found && limit.buffer == target.buffer && slices.Equal(limit.fields, target.fields)
 }
 
 func affineValue(id ValueID, definitions map[ValueID]Instr, coordinates map[ValueID]int, active map[ValueID]bool) Affine {
@@ -201,7 +228,7 @@ func scaleAffine(value Affine, factor int64) Affine {
 	return value
 }
 func identityMap(indices []Affine, rank int) bool {
-	if len(indices) != 1 || rank < 1 {
+	if len(indices) != 1 || rank != 1 {
 		return false
 	}
 	want := Affine{Exact: true}

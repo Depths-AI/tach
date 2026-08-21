@@ -67,7 +67,9 @@ func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*flow.Prog
 		return nil, err
 	}
 	id := program.AddDispatch(dispatch)
-	c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current)
+	if err := c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current); err != nil {
+		return nil, err
+	}
 	finishResources(program, current)
 	return program, nil
 }
@@ -175,7 +177,9 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 				return nil, err
 			}
 			id := program.AddDispatch(dispatch)
-			c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current)
+			if err := c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current); err != nil {
+				return nil, err
+			}
 		case *ast.ReturnStmt:
 			if c.funcs[declaration.Name].view == 0 {
 				return nil, diag(x.Span, "public program %s does not return a view", declaration.Name)
@@ -222,6 +226,9 @@ func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols 
 	pixel := types.Vec(types.TF32, 4)
 	if !ok || !exists || symbol.resource == 0 || symbol.type_.Kind != types.RuntimeArray || !types.Equal(symbol.type_.Elem, pixel) {
 		return nil, diag(call.Args[0].GetSpan(), "view pixels must be a vec<float32, 4> buffer or transient")
+	}
+	if version := program.Version(current[symbol.resource]); version == nil || !version.Defined {
+		return nil, diag(call.Args[0].GetSpan(), "view pixels must be fully defined before presentation")
 	}
 	width, err := c.lowerShape(program, call.Args[1], symbols)
 	if err != nil {
@@ -307,19 +314,24 @@ func identifierName(identifier *ast.IdentExpr) string {
 	return identifier.Name
 }
 
-func (c *Checker) finishDispatch(program *flow.Program, dispatch *flow.Dispatch, id flow.DispatchID, current map[flow.ResourceID]flow.VersionID) {
+func (c *Checker) finishDispatch(program *flow.Program, dispatch *flow.Dispatch, id flow.DispatchID, current map[flow.ResourceID]flow.VersionID) error {
 	stage := c.mod.Function(dispatch.Stage)
 	summary := ir.AnalyzeAccess(stage)
 	for i := range dispatch.Buffers {
 		argument := &dispatch.Buffers[i]
+		input := program.Version(argument.Input)
+		access := summary.Buffers[argument.Formal]
+		if (input == nil || !input.Defined) && access.Read {
+			return diag(dispatch.Span, "stage %s reads resource %s before every element has been defined", stage.Name, program.Resource(argument.Resource).Name)
+		}
 		if stage.BufferParams[argument.Formal].Access == ir.Mutable {
-			input := program.Version(argument.Input)
-			defined := input != nil && input.Defined || summary.Buffers[argument.Formal].CompleteWrite
+			defined := input != nil && input.Defined || program.DispatchDefines(dispatch, *argument, access)
 			output := program.AddVersion(flow.Version{Resource: argument.Resource, Previous: argument.Input, Producer: id, Defined: defined})
 			argument.Output = output
 			current[argument.Resource] = output
 		}
 	}
+	return nil
 }
 
 func finishResources(program *flow.Program, current map[flow.ResourceID]flow.VersionID) {

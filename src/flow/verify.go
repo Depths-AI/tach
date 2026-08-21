@@ -137,7 +137,7 @@ func verifyProgram(m *Module, p *Program) error {
 				if v == nil || v.Resource != a.Resource || v.Previous != a.Input || v.Producer != d.ID {
 					return fmt.Errorf("dispatch %d has invalid output version", d.ID)
 				}
-				if v.Defined != (input.Defined || summary.Buffers[formal].CompleteWrite) {
+				if v.Defined != (input.Defined || p.DispatchDefines(&d, a, summary.Buffers[formal])) {
 					return fmt.Errorf("dispatch %d output definition proof mismatch", d.ID)
 				}
 				current[a.Resource] = a.Output

@@ -170,7 +170,9 @@ func TestFloatBoundsAndStrongCompareExchangeWGSL(t *testing.T) {
 	a, err := parser.Parse("bounds-atomic.tach", `
 export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, state: buffer<atomic<uint32>[]>) {
   if (i < values.length && i < state.length) {
-    values[i] = clamp(values[i], -1.0, 1.0);
+    let lower = min(values[i], -values[i]);
+    let upper = max(lower, values[i]);
+    values[i] = clamp(upper, 1.0, -1.0);
     let observed = atomicCompareExchange(state[i], 0, 1);
     if (observed != 0) { atomicAdd(state[i], 1); }
   }
@@ -186,9 +188,14 @@ export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, state: buffer
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"clamp(", "atomicCompareExchangeWeak(", ".exchanged ||", ".old_value !=", "loop {"} {
+	for _, want := range []string{"_bounded", "select(", "atomicCompareExchangeWeak(", ".exchanged ||", ".old_value !=", "loop {"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("bounds/CAS WGSL missing %q:\n%s", want, out)
+		}
+	}
+	for _, incompatible := range []string{"min(", "max(", "clamp("} {
+		if strings.Contains(out, incompatible) {
+			t.Fatalf("Tach bounds leaked WGSL's incompatible %s contract:\n%s", incompatible, out)
 		}
 	}
 	if err := wgsl.Validate(out); err != nil {

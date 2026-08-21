@@ -247,6 +247,23 @@ func IsHostShareable(t *Type) bool {
 	}
 	return false
 }
+func IsHostParameter(t *Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Kind == Bool || IsNumeric(t) {
+		return true
+	}
+	if t.Kind == Struct {
+		for _, field := range t.Fields {
+			if !IsHostParameter(field.Type) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
 func FieldIndex(t *Type, name string) int {
 	if t == nil || t.Kind != Struct {
 		return -1

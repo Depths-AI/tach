@@ -448,8 +448,8 @@ function doubleValues[i](
   input: buffer<float32[]>,
   scratch: buffer<float32[]>,
 ) {
-  if (i < input.length && i < scratch.length) {
-    scratch[i] = input[i] * 2.0;
+  if (i < scratch.length) {
+    scratch[i] = i < input.length ? input[i] * 2.0 : 0.0;
   }
 }
 

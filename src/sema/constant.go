@@ -341,9 +341,6 @@ func evaluateBinary(operator string, left, right *types.Value, resultType *types
 			return nil, err
 		}
 	}
-	if resultType.Kind == types.Bool {
-		out.Bits = out.Bits[:1]
-	}
 	return out, nil
 }
 
