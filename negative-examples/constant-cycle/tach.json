@@ -1,0 +1,1 @@
+{"name":"negative-constant-cycle","version":"0.2.0","javascript":{"package":"@tach-negative/constant-cycle"},"docs":{"title":"Compile-time constant cycle","summary":"Module constants must form an acyclic value graph."}}

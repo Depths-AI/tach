@@ -1,0 +1,95 @@
+@docs(
+  title("Multi-attractor particle dynamics"),
+  summary("Advances millions of particles through a softened time-varying gravitational field."),
+);
+
+@docs(
+  summary("Particle integration parameters."),
+  field(dt, "Integration time step."),
+  field(time, "Field animation time."),
+  field(softening, "Squared-distance singularity guard."),
+)
+type ParticleParams = {
+  dt: float32,
+  time: float32,
+  softening: float32,
+};
+
+@docs(
+  summary("Computes softened inverse-square acceleration toward one attractor."),
+  param(position, "Particle position."),
+  param(center, "Attractor position."),
+  param(strength, "Signed attractor strength."),
+  param(softening, "Squared-distance singularity guard."),
+  returns("Acceleration contribution."),
+)
+function attraction(
+  position: vec<float32, 3>,
+  center: vec<float32, 3>,
+  strength: float32,
+  softening: float32,
+): vec<float32, 3> {
+  let offset = center - position;
+  let inverse = rsqrt(dot(offset, offset) + softening);
+  return offset * (strength * inverse * inverse * inverse);
+}
+
+@docs(
+  summary("Integrates one particle under four moving attractors, drag, and a bounded force field."),
+  coordinate(i, "Particle index."),
+  param(positions, "Particle XYZ positions and unit mass."),
+  param(velocities, "Particle XYZ velocities and age."),
+  param(params, "Integration and field parameters."),
+)
+export function particleDynamics[i](
+  positions: buffer<vec<float32, 4>[]>,
+  velocities: buffer<vec<float32, 4>[]>,
+  params: ParticleParams,
+) {
+  if (i < positions.length && i < velocities.length) {
+    let oldPosition = positions[i];
+    let oldVelocity = velocities[i];
+    let position = oldPosition.xyz;
+    let time = params.time + oldVelocity.w;
+    // Mixed moving and repulsive centers keep the field spatially irregular.
+    let acceleration = attraction(
+      position,
+      vec(sin(time * 0.7) * 3.2, cos(time * 0.5) * 2.4, sin(time * 0.3) * 2.0),
+      5.5,
+      params.softening,
+    )
+      + attraction(
+      position,
+      vec(-4.5, sin(time * 0.4) * 3.0, 1.5),
+      3.8,
+      params.softening,
+    )
+      + attraction(
+      position,
+      vec(4.2, -2.8, cos(time * 0.6) * 2.5),
+      4.4,
+      params.softening,
+    ) + attraction(position, vec(0.0, 3.8, -3.5), -1.2, params.softening);
+    let velocity = (oldVelocity.xyz + acceleration * params.dt) * 0.9994;
+    let next = position + velocity * params.dt;
+    let absolute = abs(next);
+    let boundedPosition = vec(
+      absolute.x > 12.0
+        ? (next.x > 0.0
+        ? 12.0 : -12.0) : next.x,
+      absolute.y > 12.0
+        ? (next.y > 0.0
+        ? 12.0 : -12.0) : next.y,
+      absolute.z > 12.0 ? (next.z > 0.0 ? 12.0 : -12.0) : next.z,
+    );
+    let boundedVelocity = vec(
+      absolute.x > 12.0
+        ? -velocity.x * 0.82 : velocity.x,
+      absolute.y > 12.0
+        ? -velocity.y * 0.82 : velocity.y,
+      absolute.z > 12.0 ? -velocity.z * 0.82 : velocity.z,
+    );
+    positions[i] = vec(boundedPosition, 1.0);
+    velocities[i] = vec(boundedVelocity, oldVelocity.w + params.dt);
+  }
+}

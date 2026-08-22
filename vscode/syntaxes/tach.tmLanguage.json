@@ -186,7 +186,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.tach",
-          "match": "\\b(void|bool|int32|uint32|float16|float32|vec|buffer|shared|atomic|transient)\\b"
+          "match": "\\b(void|bool|int32|uint32|float16|float32|vec|buffer|shared|atomic|transient|view|srgb8)\\b"
         },
         {
           "name": "entity.name.type.tach",
@@ -198,7 +198,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.tach",
-          "match": "\\b(vec|abs|floor|ceil|trunc|sin|cos|tan|exp|exp2|log|log2|sqrt|rsqrt|pow|min|max|clamp|fma|dot|length|distance|cross|normalize|ceilDiv|workgroupBarrier|bufferBarrier|atomicLoad|atomicStore|atomicAdd|atomicSub|atomicMin|atomicMax|atomicAnd|atomicOr|atomicXor|atomicExchange)(?=\\s*\\()"
+          "match": "\\b(vec|abs|floor|ceil|trunc|sin|cos|tan|exp|exp2|log|log2|sqrt|rsqrt|pow|min|max|clamp|fma|dot|length|distance|cross|normalize|all|any|select|ceilDiv|workgroupBarrier|bufferBarrier|atomicLoad|atomicStore|atomicAdd|atomicSub|atomicMin|atomicMax|atomicAnd|atomicOr|atomicXor|atomicExchange|atomicCompareExchange)(?=\\s*\\()"
         }
       ]
     },

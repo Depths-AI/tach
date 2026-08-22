@@ -194,7 +194,7 @@ npx tach build
 ```
 
 `fmt` formats every kernel in the project. `check` validates the complete
-project through both targets without writing output. `build` writes one
+project through both backends without writing output. `build` writes one
 cohesive generated package:
 
 Errors and optimization warnings include an exact source location, source
@@ -282,8 +282,8 @@ can use `[x, y]`; the host then supplies a matching logical size:
 
 ```tach
 export function image[x, y](pixels: buffer<vec<float32, 4>[]>) {
-  const width = 1920;
-  const pixel = y * width + x;
+  let width = 1920;
+  let pixel = y * width + x;
   if (pixel < pixels.length) {
     pixels[pixel] = vec(
       float32(x) / 1920.0,
@@ -302,11 +302,34 @@ await gpu.submit(image(pixels, { size: [1920, 1080] }));
 Tach rounds logical sizes to complete workgroups, so kernels guard edge
 invocations before indexing. Parameters are either `buffer<T>` GPU storage or
 immutable values packed by the compiler. The core value types are `bool`,
-`int32`, `uint32`, `float16`, `float32`, and `vec<T, N>` numeric vectors where
+`int32`, `uint32`, `float16`, `float32`, and `vec<T, N>` vectors where
 `N` is 2, 3, or 4. Binary16 stays binary16 in buffers, arithmetic, WGSL, and SPIR-V;
 generated modules record and enforce its optional GPU requirements. Projects
 without `float16` keep the ordinary feature floor.
 Struct types are always emitted into the TypeScript API.
+
+Tach makes compile-time and runtime values visually distinct. `const` is
+compiler-evaluated scalar/vector algebra with no JavaScript/TypeScript identity;
+`let` is the sole mutable runtime local. Module constants follow direct imports,
+and local constants may depend only on visible constants:
+
+```tach
+const tileWidth: uint32 = 16;
+
+@workgroup(tileWidth)
+function tiled[i](output: buffer<float32[]>) {
+  const tileArea = tileWidth * tileWidth;
+  let lane = i % tileArea;
+  if (i < output.length) {
+    output[i] = float32(lane);
+  }
+}
+```
+
+The compiler substitutes constants into workgroup dimensions, shared-array
+lengths, loop bounds, math, and multi-stage calls before WGSL or SPIR-V is
+lowered. A value that depends on a parameter, coordinate, buffer, or runtime
+shape is a `let`, never a `const`.
 
 Tach infers expression-local numeric types from annotations, assignments,
 parameters, returns, struct fields, sibling operands, and intrinsic domains.
@@ -315,6 +338,30 @@ from scalar/vector components without repeating a known element type. For exampl
 `normalize(vec(1, 0, 0))` is `vec<float32, 3>`, while a `vec<float16, 3>` result context
 makes the same components binary16. Typed values are never silently converted;
 ambiguous or conflicting contexts are errors.
+
+Vector comparisons produce `vec<bool, N>` masks. Combine their lanes eagerly
+with `!`, `&`, `|`, or `^`, reduce them to control flow with `all(mask)` and
+`any(mask)`, or choose numeric/boolean lanes with
+`select(mask, whenTrue, whenFalse)`. Masks are computation values, not
+host-visible storage types:
+
+```tach
+function clipInside(
+  point: vec<float32, 3>,
+  lower: vec<float32, 3>,
+  upper: vec<float32, 3>,
+): vec<float32, 3> {
+  let inside = point >= lower & point <= upper;
+  let clipped = select(inside, point, 0.0);
+  if (all(inside)) {
+    return clipped;
+  }
+  return vec(0.0, 0.0, 0.0);
+}
+```
+
+`select` evaluates both arms; scalar `?:`, `&&`, and `||` remain the lazy forms
+when evaluation itself must be guarded.
 
 Inside a helper or indexed stage, ordinary structured `if`, `while`, and `for`
 control is available. `break` exits the nearest loop; `continue` advances it
@@ -330,7 +377,7 @@ Files import other project files by extensionless module/kernel identity:
 import "data/particles";
 ```
 
-Declarations from the current file and from files it directly imports are
+Constants, types, and functions from the current file and files it directly imports are
 visible. Imports are not transitive: unlike `export *` in TypeScript,
 importing a file does not also expose that file's imports. Names are unique
 across the project, and the compiler rejects cyclic file or module
@@ -347,8 +394,8 @@ function multiply[i](
   scratch: buffer<float32[]>,
   factor: float32,
 ) {
-  if (i < input.length && i < scratch.length) {
-    scratch[i] = input[i] * factor;
+  if (i < scratch.length) {
+    scratch[i] = i < input.length ? input[i] * factor : 0.0;
   }
 }
 
@@ -369,7 +416,7 @@ export function transform(
   factor: float32,
   bias: float32,
 ) {
-  const scratch = transient<float32>(count);
+  let scratch = transient<float32>(count);
   run multiply(input, scratch, factor) over count;
   run addBias(scratch, output, bias) over count;
 }
@@ -381,8 +428,10 @@ The host still receives one recipe constructor:
 await gpu.submit(transform(input, output, count, 2, 0.5));
 ```
 
-The compiler checks stage calls, domains, transient lifetimes, storage access,
-and synchronization before either target is emitted.
+The compiler checks stage calls, domains, transient lifetimes, and storage
+access once. Each backend then independently chooses its physical kernels,
+scratch reuse, barriers, bindings, and presentation representation before
+validating its own output.
 
 ## Produce and present a view
 
@@ -393,8 +442,8 @@ can be driven entirely by scalar parameters:
 ```tach
 function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32) {
   if (i < pixels.length) {
-    const x = i % width;
-    const y = i / width;
+    let x = i % width;
+    let y = i / width;
     pixels[i] = vec(
       float32(x) / float32(width),
       float32(y) / float32(height),
@@ -405,7 +454,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint
 }
 
 export function gradient(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels, width, height) over pixels.length;
   return view(pixels, width, height);
 }
@@ -465,12 +514,12 @@ Other available commands are shown by `npx tach help`.
   programs, memory, synchronization, documentation, and diagnostics.
 - [Examples guide](examples/README.md) - the canonical kernels, what each
   one does, and why it is in the corpus.
-- [TypeScript guide](tach-ts/README.md) - runtime behavior, buffers, commands,
+- [TypeScript guide](tach/README.md) - runtime behavior, buffers, commands,
   execution, readback, errors, and generated bindings.
 - [AI-agent guide](docs/INSTRUCTIONS.md) - the complete language and tooling
   reference intended for programmatic consumption.
 - [Architecture guide](docs/architecture.md) - how projects move through the
-  frontend, two IRs, target planning, code generation, packaging, and runtime.
+  frontend, two IRs, independent backend lowering, packaging, and runtime.
 - [IR guide](docs/ir.md) - Flow programs, Kernel templates, verification,
   optimization, and backend mapping.
 - [ABI guide](docs/abi.md) - generated signatures, memory layout, metadata,

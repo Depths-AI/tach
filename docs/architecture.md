@@ -3,16 +3,17 @@
 This is how Tach is built, not how to write a first kernel. If you want to
 author GPU work from TypeScript, start with the [root README](../README.md),
 the [language guide](language.md), the [examples](../examples/README.md),
-and the [TypeScript guide](../tach-ts/README.md). Come here when you need
+and the [TypeScript guide](../tach/README.md). Come here when you need
 to know why a view is not a canvas, why WebGPU and Vulkan share one pack
 but not one container, or where a change belongs.
 
 Tach has one project compiler, two target-independent intermediate
-representations, two target executable plans, two shader emitters, one
-canonical host layout, and one managed runtime with WebGPU and Tach-owned
-Vulkan drivers. The split keeps beginner syntax small: imports, multi-step
-programs, and display views have real compiler objects instead of living
-as generated glue.
+representations, two self-contained backend lowerers, one canonical host
+layout, and one managed runtime with WebGPU and Tach-owned Vulkan drivers.
+Each backend independently turns the same optimized logical program into its
+own physical plan and shader. The split keeps beginner syntax small: imports,
+multi-step programs, and display views have real compiler objects instead of
+living as generated glue.
 
 For exact source rules, read [the language guide](language.md). For internal
 data models, read [the IR guide](ir.md). For bytes and host execution, read
@@ -24,9 +25,10 @@ The shortest accurate model is:
 project loading owns filesystem identity, imports, DAGs, and canonical order
 Kernel IR owns per-invocation portable meaning
 Flow IR owns public programs, dispatch dependencies, and terminal views
-target plans own physical kernels, bindings, scratch, barriers, and view output
-emitters own WGSL/SPIR-V representation
-bindings and runtimes own the host boundary
+WGSL owns its physical plan, bindings, textures, emission, and validation
+SPIR-V owns its physical plan, descriptors, barriers, emission, and validation
+the driver owns common public metadata and project descriptions
+the TypeScript package and runtimes own the host boundary
 ```
 
 ## 1. Design invariants
@@ -38,11 +40,12 @@ Tach is organized around these rules:
 3. Immutable values and addressable GPU places are different IR concepts.
 4. Structured control remains structured until a backend needs a CFG.
 5. Public resources and their versions are explicit across dispatches.
-6. General Kernel IR optimization is separate from target planning.
-7. Physical kernels are target-owned clones, not public API identities.
-8. Layout, parameter packing, metadata, and runtimes share one ABI plan.
+6. General Kernel IR optimization is separate from backend planning.
+7. Physical kernels are backend-owned clones, not public API identities.
+8. Canonical layout is shared meaning; each backend owns its physical plan and
+   runtime metadata.
 9. Every emitted artifact is validated at its owning boundary.
-10. Flow dispatch order and boundaries are explicit inputs to target planning.
+10. Flow dispatch order and boundaries are explicit inputs to both backends.
 11. One project-global declaration namespace feeds one merged IR and one
     cohesive dual-host artifact set.
 12. Parallel scheduling may change elapsed time, never diagnostics or bytes.
@@ -64,7 +67,7 @@ nearest tach.json
 strict manifest + canonical one-tier source discovery
     |
     v
-concurrent lexer/recovering parser -> one AST per kernel
+concurrent tokenization/recovering parse -> one syntax tree per kernel
     |
     v
 imports + global names + kernel DAG + collapsed module DAG
@@ -96,7 +99,8 @@ helpers + stages      programs + resources
  + validation           + binary validation
        +---------+---------+
                  v
- schema-2 runtime metadata + schema-2 project description
+ independently validated backend plans
+ + common schema-2 runtime metadata + schema-2 project description
                  |
                  v
  TypeScript JS/declaration/Markdown/package rendering
@@ -106,67 +110,76 @@ helpers + stages      programs + resources
  atomic build replacement
 ```
 
-`src/compiler.Build`, `Check`, and `Describe` are the three internal Go entry
-points used by the private native engine. They share project discovery and the
-same semantic pipeline. `Build` and `Check` lower and validate both targets;
+`compiler/driver.Build`, `Check`, and `Describe` are the three internal Go entry
+points used by the compiler executable. They share project discovery and the
+same semantic pipeline. `Build` and `Check` lower and validate both backends;
 only `Build` stages their artifacts. `Describe` stops before optimization,
-target lowering, and execution-metadata emission after producing a trustworthy
+backend lowering, and execution-metadata emission after producing a trustworthy
 documentation model.
 
-No consumer reparses another artifact to recover meaning. Bindings consume IR
-and executable plans, not WGSL. The SPIR-V validator and diagnostic decoder
-consume emitted bytes, never private emitter state. Ordinary builds discard
-the two private JSON descriptions; `tach build --verbose` relocates them and
-the IR/plan/disassembly views under `build/diagnostics/`.
+No consumer reparses a shader to recover meaning. Each backend derives and
+validates its runtime plan directly from optimized IR. The driver adds common
+public programs and host layouts while treating both backend plans as opaque
+validated JSON. The SPIR-V validator and diagnostic decoder consume emitted
+bytes, never private emitter state. Ordinary builds consume the private Go
+descriptions while assembling the package; `tach build --verbose` preserves
+the IR, both plans, and SPIR-V disassembly under `build/diagnostics/`.
 
 ## 3. Front end
 
-### Source, lexer, parser, and AST
+### Source and parser
 
-`src/compiler/project.go` first canonicalizes the nearest project root, parses
+`compiler/driver/project.go` first canonicalizes the nearest project root, parses
 the strict manifest, discovers exactly `<module>/<kernel>.tach`, rejects
 misplaced/case-colliding/physically duplicated sources, and assigns canonical
 forward-slash identities. It resolves imports without concatenating or
 rewriting source, checks project-global declaration uniqueness, and validates
 both dependency DAGs.
 
-`src/source` owns positions, primary and related spans, ordered diagnostic
-sets, and rendering inputs. `src/lexer` owns Unicode identifiers, strings used
-by imports and `@docs`, suffix-free numbers, preserved line-comment trivia,
-punctuation, and operators. Lexing advances after invalid UTF-8 input and
-returns all independently recoverable lexical diagnostics.
+`compiler/foundation` owns positions, primary and related spans, ordered
+diagnostic sets, and rendering inputs. `compiler/parser` owns the complete source front end:
+Unicode identifiers, strings used by imports and `@docs`, suffix-free numbers,
+preserved line comments, punctuation, operators, recovery, and the resulting
+syntax tree. Tokenization advances after invalid UTF-8 input and returns every
+independently recoverable lexical diagnostic.
 
-`src/parser` builds `src/ast`. The AST retains source roles:
+The syntax tree retains source roles:
 
 - file and declaration attributes;
 - explicit whole-file imports;
+- module and lexical compile-time constants;
 - types and fields;
 - helpers, indexed stages, and exported functions;
 - ordinary statements and structured control;
 - `run` domains, `transient<T>(length)` expressions, and terminal
   `view<srgb8>` returns; and
-- exact source spans and comment trivia needed by formatting.
+- exact source spans for later diagnostics.
 
-The parser recovers at declaration and statement boundaries so one broken
-kernel does not suppress diagnostics from siblings. It decides grammar only. It does not resolve types, decide whether an
-export is baseline sugar or explicit orchestration, infer resource access, or
-assign target representation.
+The same package exposes its comment-preserving token stream to the formatter.
+Parsing recovers at declaration and statement boundaries so one broken kernel
+does not suppress diagnostics from siblings. It decides grammar only. It does
+not resolve types, decide whether an export is baseline sugar or explicit
+orchestration, infer resource access, or assign target representation.
 
 ### Semantic analysis
 
-`src/sema` is the language authority. Project-global names are collected
+`compiler/semantics` is the language authority from parsed syntax through one
+verified, optimized logical IR module. It has no target, profile, binding, or
+physical-execution branch. Project-global names are collected
 before local interfaces or bodies, while each source file receives only its
 own and directly imported declarations. Its order matters:
 
 1. normalize and validate structured documentation;
-2. collect type names, resolve fields, and reject layout-invalid cycles/tails;
-3. collect function signatures and roles;
-4. lower helpers and indexed stages to Kernel IR;
-5. infer buffer mutability from effects;
-6. reject helper recursion and verify Kernel IR;
-7. lower each exported function, including any terminal view, to a Flow IR
+2. collect type and constant names;
+3. resolve fields and reject layout-invalid cycles/tails;
+4. collect function signatures and roles;
+5. evaluate each referenced constant with ordinary Tach expression typing;
+6. lower helpers and indexed stages to Kernel IR;
+7. infer buffer mutability from effects;
+8. reject helper recursion and verify Kernel IR;
+9. lower each exported function, including any terminal view, to a Flow IR
    public program; and
-8. verify the complete Flow IR module.
+10. verify the complete Flow IR module.
 
 Parsing, type-field resolution, signature checking, function lowering, and
 program lowering use bounded goroutines. Results occupy canonical input slots
@@ -176,10 +189,13 @@ are byte-for-byte regression-tested; the entire suite also runs under the Go
 race detector.
 
 Lowering happens during checking because concrete choices are coupled to
-meaning. A literal needs a resolved type before it becomes a constant; a
-buffer projection becomes a typed place; local rebinding becomes structured
-SSA results; a `run` buffer becomes a resource/version edge; and a program
-shape becomes a checked host-evaluable expression.
+meaning. A source constant needs resolved expression types before it can become
+a canonical scalar/vector value; a buffer projection becomes a typed place;
+local rebinding becomes structured SSA results; a `run` buffer becomes a
+resource/version edge; and a program shape becomes a checked host-evaluable
+expression. Constant evaluation uses this same resolver and then interprets the
+temporary typed Kernel IR, so it cannot drift into a second type or intrinsic
+semantics.
 
 Numeric inference has one expression-local authority here. It resolves all
 operands of an operator or intrinsic together using explicit types, expected
@@ -190,11 +206,18 @@ then lowered to ordinary typed composites.
 Plain and compound assignment enter this same resolver; assignment syntax does
 not carry a second operand-typing algorithm.
 
+Boolean vectors reuse the structural vector type rather than introducing a
+second mask type hierarchy. Semantic lowering gives vector comparisons a
+same-width boolean result, makes eager boolean lane operators ordinary typed
+unary/binary IR, and keeps `all`, `any`, and eager `select` as portable
+intrinsics. Scalar `&&`, `||`, and `?:` still lower through structured `If`, so
+lazy control flow and eager lane choice cannot be confused by either backend.
+
 ## 4. Two target-independent IRs
 
 ### Kernel IR: per-invocation semantics
 
-`src/ir` represents helpers and indexed stages. Its core distinction is:
+`compiler/ir` represents helpers and indexed stages. Its core distinction is:
 
 ```text
 Value<T>       immutable computed data
@@ -211,8 +234,11 @@ variable names do not appear.
 Inference is absent from this IR: each value already has one concrete type.
 `vec(...)` and scalar broadcast require no new operation because semantic
 lowering expresses both with the existing `Composite` instruction.
-Intrinsic signatures live with their Kernel IR kinds and are consumed by both
-semantic lowering and IR verification, so admissible types have one authority.
+Numeric intrinsic signatures live with their Kernel IR kinds and are consumed
+by both semantic lowering and IR verification. Mask reductions and selection
+have their distinct structural verifier rules because their operands are not
+one homogeneous numeric overload. Both paths still converge on the same typed
+`Intrinsic` IR and backend-independent meaning.
 
 `Continue` and `Break` terminators carry the loop values for their exact CFG
 edge, so early transfer remains valid SSA rather than source-level control that
@@ -220,7 +246,7 @@ a backend must rediscover. `fma` remains one target-neutral typed intrinsic.
 
 ### Flow IR: public program semantics
 
-`src/flow` represents host-callable work around indexed stages:
+`compiler/ir/program.go` represents host-callable work around indexed stages:
 
 ```text
 Program
@@ -233,48 +259,50 @@ Program
 ```
 
 An exported indexed function synthesizes one Flow program with one launch-axis
-shape and one dispatch. An exported unindexed function lowers its source
-`const`, `transient`, and `run` declarations directly. A `view<srgb8>` program
-also records the final runtime `vec<float32, 4>` resource version and checked width
-and height shapes. It may have no external resource when it constructs the
-complete frame in a transient.
+shape and one dispatch. An exported unindexed function lowers compiler-known
+`const`, runtime shape/transient `let`, and `run` declarations. A
+`view<srgb8>` program also records the final runtime `vec<float32, 4>` resource
+version and checked width and height shapes. It may have no external resource
+when it constructs the complete frame in a transient.
 
 Resource versions state dataflow explicitly. A mutable dispatch consumes one
 version and produces another. The verifier knows whether an initial or
 transient version is defined and rejects a read before a complete definition.
-Shapes refer to public uint values, runtime lengths, launch axes, constants,
-or checked arithmetic. Views reuse the same shapes; they do not introduce a
-second extent language.
+Shapes refer to public uint values, runtime lengths, launch axes, literal
+constants, or checked arithmetic. Source constants are evaluated before Flow
+construction; a constant used as a shape becomes the corresponding literal
+node. Views reuse the same shapes and do not introduce a second extent
+language.
 
-This layer is why bindings can expose one command for a multi-stage operation
-without encoding a dispatch graph by hand in TypeScript.
+This layer is why the generated package can expose one command for a
+multi-stage operation without encoding a dispatch graph by hand in TypeScript.
 
 ## 5. Verification and analysis
 
-`ir.Verify` checks the complete Kernel IR contract: unique IDs, structured
+`ir.VerifyKernel` checks the complete Kernel IR contract: unique IDs, structured
 availability, exact types, function roles, buffer/place paths, access rights,
 control results, loop carriers, runtime arrays, intrinsics, atomics, barriers,
 workgroup memory, and returns.
 
-`src/ir/uniformity.go` derives whether values and control are uniform within a
-workgroup. Constants and plain stage values are uniform; coordinates, mutable
-loads, and atomic results are varying. The verifier rejects barriers nested
-under varying control.
+`compiler/ir/kernel_uniformity.go` derives whether values and control are
+uniform within a workgroup. Constants and plain stage values are uniform;
+coordinates, mutable loads, and atomic results are varying. The verifier
+rejects barriers nested under varying control.
 
-`flow.Verify` first verifies its Kernel IR, then checks public program names,
+`ir.Verify` first verifies its Kernel IR, then checks public program names,
 parameters, resources, dense IDs, version chains, shape DAGs, stage references,
 argument types, resource non-aliasing, definition-before-read, and final
 versions. For a view it additionally proves the format, source element type,
 exact final defined version, and width/height shapes.
 
-Verification is a production boundary. Semantic analysis, optimization,
-backend lowering, emission, and binding generation do not accept malformed IR
+Verification is a production boundary. Semantic resolution, optimization,
+backend planning, emission, and metadata generation do not accept malformed IR
 as a recoverable variant.
 
 ## 6. Target-neutral optimization
 
-`src/opt.OptimizeLogical` currently optimizes the module's Kernel IR and then
-re-verifies the Flow module. `OptimizeKernel` applies, per function:
+The optimizer inside `compiler/semantics` transforms the module's Kernel IR and then
+re-verifies the Flow module. It applies, per function:
 
 1. common value/place elimination;
 2. loop-invariant code motion;
@@ -292,22 +320,24 @@ synchronization, atomics, early exits, competing touches, or internally
 defined places. Zero-trip behavior remains unchanged.
 
 Flow IR currently has no rewrite pipeline beyond construction-time shape
-interning and verification. Dispatch planning occurs per target. In
-particular, no pass fuses distinct Flow dispatches. Terminal view projection
-may be folded into the final dispatch under a separate exact proof because it
-is target representation of the view, not inter-stage fusion.
+interning and verification. Dispatch planning occurs independently inside each
+backend. In particular, no pass fuses distinct Flow dispatches. A backend may
+fold terminal view projection into the final dispatch under a separate exact
+proof because that is physical representation of the view, not inter-stage
+fusion.
 
-## 7. Target executable planning
+## 7. Independent backend planning
 
-`src/backend.Lower` clones the optimized logical module for one target profile
-and creates an `Executable` containing:
+`compiler/wgsl` and `compiler/spirv` each accept the same verified, optimized
+`ir.Module`. Neither accepts a shared executable object, asks semantics for a
+target profile, or imports the other backend. Each clones the logical module
+and privately creates:
 
-- a target-private Kernel IR module;
-- one `PhysicalKernel` per program dispatch;
-- one `ProgramPlan` per public program; and
-- target identity and limits.
+- a backend-owned Kernel IR module;
+- one physical kernel per surviving program dispatch; and
+- one execution plan per public program.
 
-For every dispatch, planning:
+For every dispatch, each backend:
 
 1. clones its logical stage;
 2. optionally internalizes safe command repetition;
@@ -315,13 +345,17 @@ For every dispatch, planning:
 4. assigns a private `_tach_kN` entry;
 5. chooses or verifies a portable workgroup;
 6. assigns dense storage bindings;
-7. builds the shared ABI parameter block;
+7. builds its parameter block through the canonical ABI layout;
 8. lowers logical coordinate requirements; and
-9. applies coordinate optimization and optional terminal-view lowering.
+9. applies coordinate optimization and optional terminal-view lowering; and
+10. validates the completed private plan.
 
-The target module also contains cloned helpers. Physical stage clones can
-differ because program arguments, repeat mode, parameter pruning, or later
-target passes can differ even when their source stage is shared.
+Each backend module also contains cloned helpers. Physical stage clones can
+differ because program arguments, repeat mode, parameter pruning, view
+representation, or later backend work can differ even when their logical stage
+is shared. The two planners currently use the same conservative IR analyses for
+workgroups, repeat safety, transient lifetimes, and view fusibility. Sharing
+those semantic proofs does not share physical-plan state or backend policy.
 
 The current one-kernel-per-dispatch policy is deliberately simple and
 deterministic. The implementation carries a `DECISION` comment: deduplication
@@ -332,18 +366,18 @@ shader-size or pipeline evidence.
 
 A one-dispatch plan may move `repeat` inside each invocation when the stage has
 no loop or synchronization and every buffer access is exactly the current 1D
-coordinate. Planning adds a repeat value parameter and wraps the stage body in
-a Kernel IR loop. The public result remains equivalent because invocations do
-not communicate across repetitions.
+coordinate. Each backend independently adds a repeat value parameter and wraps
+its stage clone in a Kernel IR loop. The public result remains equivalent
+because invocations do not communicate across repetitions.
 
 Other plans retain program repetition. The internalized case removes repeat
 dispatch overhead while preserving the proved Flow semantics.
 
 ### Transients and barriers
 
-Transient planning computes first/last dispatch use and greedily assigns an
-allocation color not overlapping an earlier live range. The runtime allocates
-one capacity per color.
+Each backend computes first/last dispatch use and greedily assigns an
+allocation color not overlapping an earlier live range. The selected runtime
+allocates one capacity per color from its backend plan.
 
 SPIR-V plans insert barrier steps between adjacent dispatches when the first
 writes a resource touched by the second, plus an optional barrier between
@@ -352,85 +386,90 @@ pass and relies on WebGPU's pass execution model.
 
 ### Terminal views
 
-Every view plan records its checked extent, output allocation color and
-binding, terminal projection step, and whether projection was fused. Planning
-folds conversion into the final stage only when a transient is written
+Every backend view plan records its checked extent, output allocation color and
+binding, terminal projection step, and whether projection was fused. That
+backend folds conversion into the final stage only when a transient is written
 completely at the exact current 1D coordinate, the domain equals the transient
 length and `width * height`, and no earlier use requires the result. The
 transient and standalone projection then disappear.
 
-All other valid views receive one target-owned projection kernel that reads
-the final float pixel resource. Both targets first lower each pixel to one
+All other valid views receive one backend-owned projection kernel that reads
+the final float pixel resource. Both backends lower each pixel to one
 packed RGBA8 `uint32` word: IEC sRGB on RGB, clamp-only alpha, then
 `uint32(channel * 255 + 0.5)` with R, G, B, A in low-to-high bytes. WGSL
 unpacks that word with `unpack4x8unorm` into an `rgba8unorm` storage texture so
-`present` can write a 2D image. SPIR-V stores the word in packed scratch. View commands cannot
-use repeat; repeating a display recipe has no useful externally visible
-intermediate result and complicates the terminal resource contract.
+`present` can write a 2D image. SPIR-V stores the word in packed scratch. View
+commands cannot use repeat; repeating a display recipe has no useful
+externally visible intermediate result and complicates the terminal resource
+contract.
 
 ## 8. Coordinate lowering
 
-`src/backend/coordinates.go` begins with each named logical index mapped to a
-global coordinate. It then recognizes exact workgroup-local expressions:
+Portable coordinate analysis in `compiler/ir/coordinates.go` begins with each
+named logical index mapped to a global coordinate. Each backend applies that
+analysis to its private function clone and recognizes exact workgroup-local
+expressions:
 
 ```text
 coordinate % matchingWorkgroupDimension
 localX + localY * width + localZ * width * height
 ```
 
-These can become target local-coordinate or local-linear inputs. Unused target
+These can become backend local-coordinate or local-linear inputs. Unused
 inputs and now-dead arithmetic disappear. If an expression is not an exact
 match, it remains ordinary arithmetic over the global logical coordinate.
 
-Provider builtin names exist only in target lowering and emission, never in
+Provider builtin names exist only in backend lowering and emission, never in
 source, Flow IR, or logical Kernel IR.
 
 ## 9. Layout and parameter ABI
 
-`src/layout` computes the canonical host-visible representation: scalar/vector
-size and alignment, 16-byte struct alignment, field offsets, nested extents,
-array strides, runtime tails, and checked 32-bit sizes. SPIR-V Workgroup and
-Input `Aligned` operands use logical pointee alignment instead of this floor.
+`compiler/foundation` computes the canonical host-visible representation alongside
+the type model it lays out: scalar/vector size and alignment, 16-byte struct
+alignment, field offsets, nested extents, array strides, runtime tails, and
+checked 32-bit sizes. SPIR-V Workgroup and Input `Aligned` operands use logical
+pointee alignment instead of this floor.
 
-`src/abi` owns private entry names and immutable value blocks. It flattens each
-remaining physical-stage value parameter into numeric leaves, replacing bool
-leaves with physical `uint32`, then applies the same layout engine. Storage
-bindings precede the optional parameter block in group/set `0`.
+`compiler/ir/host.go` owns private entry names and immutable value blocks. It
+flattens each remaining physical-stage value parameter into numeric leaves,
+replacing bool leaves with physical `uint32`, then applies the foundation
+layout. Storage bindings precede the optional parameter block in group/set `0`.
 
-The plan drives:
-
-- WGSL storage wrappers and uniform blocks;
-- SPIR-V offsets, strides, descriptors, and physical aggregate types;
-- generated target metadata;
-- TypeScript buffer codecs and parameter packing; and
-- the Tach-owned Vulkan runtime.
-
-No target independently recalculates ABI offsets.
+Each backend applies this one layout algorithm when building its own parameter
+blocks and metadata. The resulting offsets drive its shader representation and
+runtime packing, while the common public-resource layout drives TypeScript
+buffer codecs. Backends independently request layouts; they do not carry a
+shared physical plan or recalculate offsets with private rules.
 
 Binary16 follows this same path: the logical type remains `float16`, canonical
 host layout assigns 2-byte scalar storage and vector-derived alignment, and
-metadata carries `f16`/exact `f16Bits`. The TypeScript codec uses
+metadata carries `f16` layouts. The TypeScript codec uses
 `Float16Array` and little-endian `DataView` binary16 operations rather than
 widening the storage contract. The only provider alignment wrinkle is a scalar
 `float16[]` whose logical byte extent is not divisible by four, either directly
 or after a struct prefix. WebGPU/Vulkan transfers need four-byte capacity and
 WebGPU buffer bindings need a four-byte size. Drivers pad physical capacity,
-while target planning injects the metadata-derived logical length and
-runtime-tail path for source `.length`. Both lowerings consume that exact value,
-so physical padding cannot become a phantom logical element.
+while each backend injects the metadata-derived logical length and runtime-tail
+path for source `.length`. Both lowerings consume that exact value, so physical
+padding cannot become a phantom logical element.
 
 ## 10. WGSL backend
 
-`src/wgsl` receives a verified Web `Executable` and:
+`compiler/wgsl` receives the verified, optimized backend-agnostic `ir.Module`
+and, without another compiler module's execution plan:
 
-1. indexes physical and helper function coordinate requirements;
-2. emits structs, resources, parameter blocks, helpers, and private entries;
-3. maps structured Kernel IR directly to structured WGSL, including the
+1. clones and specializes physical stages and constructs the Web execution
+   plan;
+2. chooses bindings, parameter blocks, transient colors, repeat behavior,
+   coordinate requirements, and storage-texture views;
+3. verifies and serializes its private runtime metadata;
+4. emits structs, resources, parameter blocks, helpers, and private entries;
+5. maps structured Kernel IR directly to structured WGSL, including the
    shared view-pack helper, carrier assignments before `break`/`continue`, and
    the WGSL `fma` builtin;
-4. stores a fused or standalone view by unpacking the packed word with
+6. stores a fused or standalone view by unpacking the packed word with
    `unpack4x8unorm` into an `rgba8unorm` storage texture; and
-5. reparses the exact generated WGSL subset with its in-tree validator.
+7. reparses the exact generated WGSL subset with its in-tree validator.
 
 Fixed resources use aligned wrappers. A direct runtime array uses a
 natural-alignment wrapper; a runtime-tail struct is the storage root in WGSL
@@ -450,9 +489,12 @@ projects emit neither the directive nor the requirement.
 
 ## 11. SPIR-V backend
 
-`src/spirv` emits SPIR-V 1.6 for the Vulkan 1.3 floor with Logical addressing,
-Shader plus VulkanMemoryModel capabilities, the Vulkan memory model, and
-GLSL.std.450 math where required. It owns result IDs,
+`compiler/spirv` receives the same verified, optimized backend-agnostic
+`ir.Module`, independently constructs and validates its Vulkan execution plan,
+then emits SPIR-V 1.6 for the Vulkan 1.3 floor with Logical addressing, Shader
+plus VulkanMemoryModel capabilities, the Vulkan memory model, and GLSL.std.450
+math where required. It owns physical kernels, descriptors, transients,
+barriers, runtime metadata, result IDs,
 logical/physical types,
 interface variables, decorations, structured CFG construction, phi nodes,
 access chains, atomics, barriers, and extended instructions.
@@ -460,15 +502,20 @@ access chains, atomics, barriers, and extended instructions.
 Early loop transfers become edges to the structured continuation or merge
 block and contribute their carried values to that block's `OpPhi` nodes.
 `fma` becomes GLSL.std.450 `Fma`; neither mapping changes its target-neutral
-source type contract.
+source type contract. Numeric `min`, `max`, and `clamp` use ordered comparisons
+plus `OpSelect`, rather than GLSL extended bounds whose NaN and signed-zero
+choices differ from Tach's comparison-shaped rule. Strong compare-exchange
+maps directly to `OpAtomicCompareExchange`; WGSL lowering instead retries
+`atomicCompareExchangeWeak` when its comparison matched but the weak operation
+reported no exchange.
 
 Host-visible StorageBuffer/uniform aggregates use decorated physical types.
 SSA, helpers, and Workgroup memory use logical undecorated types. Field-wise
 conversion prevents padding and physical bool words from entering value
 semantics.
 
-For views, planning rewrites a proven terminal store, or adds a projection
-entry, through the same pack sequence used by WGSL. SPIR-V stores that packed
+For views, the SPIR-V planner rewrites a proven terminal store, or adds its own
+projection entry, through the same portable pack sequence. SPIR-V stores that packed
 `uint32` for the native runtime without importing browser texture semantics
 into logical IR.
 
@@ -495,12 +542,15 @@ phi edges, structured merges, memory operations, atomics, barriers,
 intrinsics, and used interfaces. `spirv-val` and Vulkan provide external
 checks.
 
-## 12. Bindings and documentation
+## 12. Host metadata, package generation, and documentation
 
-`src/bindings.Generate` consumes the optimized project-wide `flow.Module` and
-both executable plans. It creates schema-2 metadata with public programs,
-public view flags, buffer/texture binding kinds, and both target plans,
-including each terminal view step and extent.
+`compiler/driver` owns the common host boundary. From the optimized
+project-wide `ir.Module`, it describes public programs, public resources,
+views, types, and canonical host layouts. The WGSL and SPIR-V lowerers each
+return already validated private runtime-plan JSON. The driver validates those
+payloads as JSON and embeds them unchanged beneath `targets.web` and
+`targets.spirv`; it neither knows their Go plan types nor reconstructs backend
+facts.
 
 Runtime metadata and the project description currently both use version `2`,
 but they are distinct closed protocols. Runtime metadata is embedded in
@@ -526,14 +576,15 @@ Documentation follows a deliberately acyclic path:
 @docs source
   -> semantic Documentation model
   -> target-neutral JSON description from Go
-  -> Markdown rendering and TypeScript syntax in tach-ts
+  -> Markdown rendering and TypeScript syntax in tach
 ```
 
 The Go compiler's schema-2 project description groups canonical kernels by
 module and describes Tach types, function roles, coordinates, buffers, access,
 returns, documentation, project identity, and JavaScript-package identity
-without importing or spelling TypeScript. `tach-ts` owns JSDoc/Markdown presentation,
-the generated usage sample, module-document filenames, and npm metadata.
+without importing or spelling TypeScript. `tach` owns JSDoc/Markdown
+presentation, the generated usage sample, module-document filenames, and npm
+metadata.
 
 Diagnostics cross the native/TypeScript boundary as one schema-1 JSON envelope
 on the private compiler's stderr. This keeps stdout reserved for project and
@@ -565,7 +616,7 @@ commits through the same boundary.
 
 ## 13. Unified runtime and host drivers
 
-The runtime in `tach-ts/src` has one `Session` and two ownership forms:
+The runtime in `tach/src` has one `Session` and two ownership forms:
 
 ```text
 tach(callback)       scoped: wait and close on exit
@@ -624,18 +675,19 @@ and all their GPU objects still close independently.
 |---|---|
 | project discovery | Is the nearest manifest strict and every source at one canonical module/kernel identity? |
 | import graphs | Do targets exist, remain directly scoped, and form kernel and module DAGs? |
-| lexer/parser | Is source spelling and grammar valid? |
+| parser | Is source spelling and grammar valid? |
 | semantic analysis | Do declarations and expressions have valid Tach meaning? |
 | Kernel IR verifier | Are per-invocation values, places, control, and effects sound? |
 | Flow verifier | Are programs, shapes, resources, versions, dispatches, and terminal views sound? |
-| optimizer post-verify | Did rewrites preserve both IR contracts? |
-| backend verifier | Are physical kernels and target plans internally consistent? |
+| semantics post-verify | Did rewrites preserve both IR contracts? |
+| WGSL plan verifier | Are Web physical kernels, bindings, transients, and views internally consistent? |
+| SPIR-V plan verifier | Are Vulkan physical kernels, descriptors, barriers, transients, and views internally consistent? |
 | WGSL validator | Did Tach serialize its supported WGSL shape correctly? |
 | SPIR-V validator | Is the binary structurally, semantically, and ABI valid? |
 | generated validator | Do metadata, view contracts, JS, declarations, and plans agree? |
 | output transaction | Is the staged inventory complete, confined to this project's `build`, and replaceable as one unit? |
 | browser harness | Does Chromium WebGPU compile and execute generated modules? |
-| native harness | Do `spirv-val` and Vulkan execute target plans correctly? |
+| native harness | Do `spirv-val` and Vulkan execute the SPIR-V backend plan correctly? |
 
 Each catches faults at the earliest owner; external harnesses challenge the
 compiler's assumptions against real implementations.
@@ -643,49 +695,50 @@ compiler's assumptions against real implementations.
 ## 15. Package responsibilities and dependencies
 
 ```text
-src/source       spans and ordered diagnostics
-src/lexer        tokens and preserved line-comment trivia
-src/ast          source-shaped declarations and imports
-src/parser       recovering grammar
-src/types        logical types and domain predicates
-src/ir           Kernel IR, verification, access, uniformity, use counts
-src/flow         Flow IR, resource versions, shapes, verification
-src/sema         language checking and both IR lowerings
-src/opt          target-neutral Kernel IR optimization
-src/layout       canonical host-visible layout
-src/abi          private names and parameter blocks
-src/backend      target executable planning, coordinate lowering, target profile
-src/wgsl         WGSL emission and validation
-src/spirv        SPIR-V emission, decoding, validation, and summaries
-src/bindings     target metadata and target-neutral project descriptions
-src/compiler     project discovery, DAGs, formatting, pipeline, native staging
-main.go          private native machine-operation dispatcher
-tach-ts/src      public API, shared session, WebGPU/Vulkan drivers,
-                 compiler orchestration, output transaction, and docs
-native           Tach-owned Vulkan 1.3 FFI implementation
+compiler/foundation      locations, diagnostics, types, constants, host layout
+compiler/parser          tokens, comments, recovering grammar, syntax tree
+compiler/ir              Kernel/Flow IR, verification, analyses, ABI helpers
+compiler/semantics       language checking, both logical IRs, optimization
+compiler/wgsl            complete Web planning, metadata, emission, validation
+compiler/spirv           complete Vulkan planning, metadata, emission,
+                         decoding, and validation
+compiler/driver          project discovery, DAGs, formatting, common metadata,
+                         descriptions, orchestration, and artifact staging
+compiler/main.go         compiler command dispatcher
+compiler/native-bindings Tach-owned Vulkan 1.3 FFI build source
+tach/src                 public API, shared session, WebGPU/Vulkan drivers,
+                         compiler orchestration, output transaction, and docs
 ```
 
-The dependency graph points from primitive semantics toward orchestration.
-The front end never imports a backend; Go never imports the TypeScript renderer;
-the runtime never reverse-engineers a shader. `go list ./...` resolves the
-complete repository package graph as part of the cycle check.
+The Go dependency graph points from primitive semantics toward orchestration:
+foundation is the root; IR depends on foundation; parser depends on
+foundation; semantics depends on foundation, parser, and IR; each backend
+depends only on foundation and IR; driver alone joins the frontend and both
+backends; `main` depends on driver and foundation diagnostics. The front end
+never imports a backend, the backends never import driver or each other, Go
+never imports the TypeScript renderer, and the runtime never reverse-engineers
+a shader. `go list ./...`
+resolves the complete compiler graph as part of the cycle check. The
+build-tagged `native-bindings` package is an independent host leaf over its C
+Vulkan implementation; it imports no compiler package.
 
 ## 16. Test architecture
 
 Tests mirror ownership:
 
-- lexer, parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
-  binding, and emitter tests cover local contracts and rejection cases;
+- parser, semantics, Kernel IR, Flow IR, layout, backend-plan, metadata, and
+  emitter tests cover local contracts and rejection cases;
 - compiler tests check strict manifests, one-tier discovery, import visibility,
   both DAGs, global names, error recovery, formatter transactions, exact unified
   artifact sets, wide one/many-worker determinism, complete multi-file error
   aggregation, all four function forms, documentation descriptions, and all
   maintained projects in canonical format;
-- bounded fuzz properties challenge lexer progress and spans, parser recovery
+- bounded fuzz properties challenge token progress and spans, parser recovery
   determinism, source-facing semantic failures, and formatter token
   preservation, reparsing, and idempotence;
-- binding tests corrupt each runtime-plan seam, while TypeScript compiler tests
-  challenge exact package shape and build/docs transaction rollback;
+- backend metadata tests corrupt each private runtime-plan seam, while
+  TypeScript compiler tests challenge exact package shape and build/docs
+  transaction rollback;
 - SPIR-V mutation tests corrupt valid modules and require rejection;
 - `browser-test` builds the example project once and checks every generated
   endpoint through its exact generated WGSL in WebGPU, including fused and
@@ -694,12 +747,12 @@ Tests mirror ownership:
   nearest-loop early exits and skips, FP16/FP32 `fma`, Float16
   math/storage/parameters, an odd direct f16 array, and
   a prefixed f16 runtime tail;
-- `deno-test` independently builds the same example project, validates its
+- `native-test` independently builds the same example project, validates its
   SPIR-V for Vulkan 1.3, and runs every exported program through Deno/Vulkan,
   including fused/fallback offscreen projection, the same swatch pair,
   owner-neutral recipes, repeated logical sessions, and the same loop,
   contextual inference, multiply-add, and Float16 seams;
-- `showcase-ts` builds eight workload kernels plus one shared color file and
+- `showcase` builds eight workload kernels plus one shared color file and
   runs eleven host-neutral rendering, mathematical, and physics workloads
   through both WebGPU and Vulkan, including matched FP32/FP16 matrix,
   data-dependent complex recurrence, and arithmetic-dense oscillator pairs;
@@ -721,7 +774,7 @@ Before adding a feature, find its first real owner:
 3. New per-invocation portable meaning: extend Kernel IR, verification,
    effects, optimization, and both emitters.
 4. New public dispatch, resource, or terminal-result meaning: extend Flow IR,
-   verification, target plans, metadata, and both runtimes.
+   verification, backend plans, metadata, and both runtimes.
 5. Target representation improvement: keep it in backend planning/emission.
 6. Byte, binding, launch, name, or lifetime change: update the single ABI
    owner and every generated/native consumer together.

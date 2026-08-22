@@ -130,16 +130,32 @@ owned by `data/particles`, it must import `data/particles` even when another
 import already depends on that file. `export` never changes Tach visibility;
 it controls only generated JS/TypeScript exposure.
 
-All top-level type and function names share one project-global namespace and
-must be unique even across unrelated modules. Declaration order within a file
-is irrelevant: types and functions may refer to later visible declarations.
-Recursive value types and recursive call graphs are rejected.
+All top-level constant, type, and function names share one project-global
+namespace and must be unique even across unrelated modules. Declaration order
+within a file is irrelevant: module constants, types, and functions may refer
+to later visible declarations of the appropriate kind. Recursive value types,
+constant graphs, and call graphs are rejected.
 
 Both dependency views must be acyclic. The kernel graph has one node per file.
 The stricter module graph collapses files by directory, preventing two modules
 from depending on each other in opposite directions even when the individual
 file edges do not form a cycle. This gives the compiler deterministic,
 parallelizable dependency branches without changing source visibility.
+
+Module constants are Tach-only compile-time values:
+
+```tach
+const tileWidth: uint32 = 16;
+const tileArea = tileWidth * tileWidth;
+const up: vec<float32, 3> = normalize(vec(0.0, 2.0, 0.0));
+```
+
+They use the same direct-import visibility as types and functions. Their order
+within a file does not matter, but their dependency graph must be acyclic.
+They are neither exported nor emitted into the generated JavaScript,
+TypeScript declarations, runtime metadata, WGSL, or SPIR-V as named objects.
+The compiler substitutes their evaluated scalar or vector values wherever
+they are used. Section 9 defines the complete constant algebra.
 
 There are three fundamental function roles, plus one spelling that covers
 the common case:
@@ -212,8 +228,8 @@ function multiply[i](
   scratch: buffer<float32[]>,
   factor: float32,
 ) {
-  if (i < input.length && i < scratch.length) {
-    scratch[i] = input[i] * factor;
+  if (i < scratch.length) {
+    scratch[i] = i < input.length ? input[i] * factor : 0.0;
   }
 }
 
@@ -234,16 +250,18 @@ export function transform(
   factor: float32,
   bias: float32,
 ) {
-  const scratch = transient<float32>(count);
+  let scratch = transient<float32>(count);
   run multiply(input, scratch, factor) over count;
   run addBias(scratch, output, bias) over count;
 }
 ```
 
-Program declarations do not execute per invocation and have no ordinary
-statements, mutable locals, loops, or `@workgroup`. Apart from the required
-final return of a declared view, they contain no returns. They describe a
-checked dispatch graph; indexed stages contain the actual per-invocation code.
+Program declarations do not execute per invocation and have no branches,
+loops, assignment statements, or `@workgroup`. Their bodies contain
+compile-time `const` declarations, runtime shape or transient `let`
+declarations, `run` statements, and, when the result is `view<srgb8>`, the
+required final `return view(...)`. They describe a checked dispatch graph;
+indexed stages contain the actual per-invocation code.
 
 Every struct type is generated into the TypeScript API. An unexported indexed
 stage is Tach-internal; an exported indexed stage and an exported unindexed
@@ -260,8 +278,8 @@ statement:
 ```tach
 function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint32) {
   if (i < pixels.length) {
-    const x = i % width;
-    const y = i / width;
+    let x = i % width;
+    let y = i / width;
     pixels[i] = vec(
       float32(x) / float32(width),
       float32(y) / float32(height),
@@ -272,7 +290,7 @@ function paint[i](pixels: buffer<vec<float32, 4>[]>, width: uint32, height: uint
 }
 
 export function gradient(width: uint32, height: uint32): view<srgb8> {
-  const pixels = transient<vec<float32, 4>>(width * height);
+  let pixels = transient<vec<float32, 4>>(width * height);
   run paint(pixels, width, height) over pixels.length;
   return view(pixels, width, height);
 }
@@ -343,6 +361,9 @@ Each optional clause may occur once per referenced member. Names are unquoted
 identifiers and must resolve in that declaration; unknown and duplicate names
 are compile errors. A void helper, indexed stage, or ordinary public program
 cannot use `returns`; a `view<srgb8>` program can and should describe its view.
+Constants do not accept `@docs`: they are compiler inputs, not generated API
+members. Use a precise name and an adjacent `//` comment when the value needs
+implementation context.
 
 Documentation on a public program describes its host API. Documentation on a
 private stage describes the internal indexed operation. An exported indexed
@@ -373,7 +394,7 @@ kernels keep a bounds check.
 
 ```tach
 export function volume[x, y, z](out: buffer<uint32[]>) {
-  const index = x + y * 64 + z * 64 * 64;
+  let index = x + y * 64 + z * 64 * 64;
   if (index < out.length) {
     out[index] = x + y + z;
   }
@@ -413,17 +434,17 @@ shape:
 ```tach
 @workgroup(16, 16)
 export function tiled[x, y](out: buffer<uint32[]>, width: uint32) {
-  const index = y * width + x;
+  let index = y * width + x;
   if (index < out.length) {
     out[index] = x + y;
   }
 }
 ```
 
-The attribute accepts one through `rank` positive integer literals; omitted
-axes are `1`. Portable limits are `x <= 256`, `y <= 256`, `z <= 64`, and at
-most 256 invocations per workgroup. A stage using shared memory or a barrier
-must state an explicit workgroup.
+The attribute accepts one through `rank` positive compile-time `uint32`
+expressions; omitted axes are `1`. Portable limits are `x <= 256`, `y <= 256`,
+`z <= 64`, and at most 256 invocations per workgroup. A stage using shared
+memory or a barrier must state an explicit workgroup.
 
 ## 5. Program shapes and transient storage
 
@@ -438,7 +459,7 @@ A `run` domain is one size for a 1D stage or a bracketed list for 2D/3D:
 
 ```tach
 function fill[x, y](out: buffer<uint32[]>, width: uint32) {
-  const index = y * width + x;
+  let index = y * width + x;
   if (index < out.length) {
     out[index] = x + y;
   }
@@ -454,7 +475,7 @@ A checked shape is a `uint32` expression composed from:
 - a `uint32` literal;
 - a public `uint32` parameter or nested struct field;
 - `.length` on a public runtime array or runtime-array field;
-- a preceding shape `const`;
+- a preceding runtime shape `let`;
 - `+`, `-`, `*`, `/`, and `%`; or
 - `min(a, b)`, `max(a, b)`, and `ceilDiv(a, b)`.
 
@@ -462,8 +483,10 @@ Shape arithmetic is evaluated by the host runtime with checked `uint32`
 results. Underflow, overflow, division by zero, and a zero dispatch dimension
 are runtime errors.
 
-Program `const` declarations either name shapes or allocate transient storage.
-The same shapes also define view width and height:
+Program `let` declarations name runtime shapes or allocate transient storage.
+A `const` in the same body is still a Tach-only scalar or vector known during
+compilation; it cannot depend on a program parameter, buffer length, or earlier
+runtime `let`. The same runtime shapes also define view width and height:
 
 ```tach
 function write[i](scratch: buffer<float32[]>) {
@@ -479,9 +502,9 @@ function read[i](scratch: buffer<float32[]>, output: buffer<float32[]>) {
 }
 
 export function roundTrip(output: buffer<float32[]>, count: uint32) {
-  const blocks = ceilDiv(count, 256);
-  const rounded = blocks * 256;
-  const scratch = transient<float32>(rounded);
+  let blocks = ceilDiv(count, 256);
+  let rounded = blocks * 256;
+  let scratch = transient<float32>(rounded);
   run write(scratch) over rounded;
   run read(scratch, output) over count;
 }
@@ -489,21 +512,23 @@ export function roundTrip(output: buffer<float32[]>, count: uint32) {
 
 `transient<T>(length)` yields a program-local `buffer<T[]>`. `T` must have a
 fixed, host-shareable, non-atomic footprint. A transient has no host argument
-or readback handle. The compiler proves that every read is preceded by a
-defining dispatch and assigns non-overlapping lifetimes to reusable scratch
-allocations.
+or readback handle. The language checker proves that every read is preceded by
+a defining dispatch. Each backend independently maps the proven non-overlapping
+lifetimes onto reusable scratch allocations.
 
 Stage buffer arguments in `run` must directly name a public buffer or
 transient. The same resource cannot fill two buffer formals of one stage. A
-value argument may be a matching public value or nested field, a supported
-literal, or a checked shape when the formal is `uint32`.
+value argument may be a matching public value or nested field, a compile-time
+scalar/vector expression, or a checked shape when the formal is `uint32`.
+Compile-time arguments specialize the physical stage and never become runtime
+parameter-block fields.
 
 Every `run` contributes one ordered physical dispatch to the program plan.
 For a view program, the final `return view(...)` records a terminal projection
 after those dispatches. When the final dispatch completely writes one
-transient pixel per output pixel, target planning can fold projection into
-that dispatch. Otherwise it appends a target-owned projection kernel. This
-changes physical work, not source meaning.
+transient pixel per output pixel, each backend can fold projection into that
+dispatch. Otherwise it appends its own projection kernel. This changes
+physical work and representation, not source meaning.
 
 ## 6. Data types
 
@@ -526,22 +551,24 @@ stages, buffers, structs, locals, or expressions other than the final
 `return view(...)`. `srgb8` is the sole format and is likewise not an ordinary
 source type.
 
-`vec<T, N>` is the sole vector type syntax. `T` is one numeric scalar and `N`
-is exactly `2`, `3`, or `4`:
+`vec<T, N>` is the sole vector type syntax. `T` is one scalar and `N` is
+exactly `2`, `3`, or `4`:
 
 ```text
 vec<float16, 2>  vec<float16, 3>  vec<float16, 4>
 vec<float32, 2>  vec<float32, 3>  vec<float32, 4>
 vec<int32, 2>    vec<int32, 3>    vec<int32, 4>
 vec<uint32, 2>   vec<uint32, 3>   vec<uint32, 4>
+vec<bool, 2>     vec<bool, 3>     vec<bool, 4>
 ```
 
-`vec(...)` is the sole vector value constructor. It flattens numeric scalar
-and vector arguments and must receive exactly two, three, or four total lanes:
+`vec(...)` is the sole vector value constructor. It flattens scalar and vector
+arguments of one element type and must receive exactly two, three, or four
+total lanes:
 
 ```tach
 function vectorValue(): vec<float32, 4> {
-  const joined: vec<float32, 4> = vec(vec(1, 2), 3, 4);
+  let joined: vec<float32, 4> = vec(vec(1, 2), 3, 4);
   return joined + 0.5;
 }
 ```
@@ -551,7 +578,7 @@ argument:
 
 ```tach
 function inferredVectors(direction: vec<float32, 3>): vec<float32, 4> {
-  const moved = direction + vec(1, 2, 3); // vec<float32, 3> from addition
+  let moved = direction + vec(1, 2, 3); // vec<float32, 3> from addition
   return vec(moved, 1); // vec<float32, 4> from the result
 }
 ```
@@ -562,6 +589,12 @@ typed value and has no one-argument splat form. Repeat a scalar explicitly or
 rely on documented scalar/vector operator and intrinsic broadcast. To change
 a vector's element type, convert its scalar lanes explicitly and rebuild it
 with `vec(...)`.
+
+Boolean vectors are masks: computational values produced by vector comparison
+or `vec(true, false, ...)`. They may be constants, locals, helper parameters,
+and helper results, including fields of value-only structs. They deliberately
+have no host, buffer-backed, or shared-memory representation. Keep persistent
+flags as a documented integer encoding and derive a mask after loading them.
 
 Swizzles use `x`, `y`, `z`, and `w`. One lane yields a scalar; several lanes
 yield a vector. `value[index]` dynamically selects one lane.
@@ -591,8 +624,9 @@ constructed, passed, or returned as a whole value.
 Backend-required padding never contributes another logical element, including
 for a scalar `float16[]` after a fixed struct prefix.
 
-`T[N]` is a positive-literal fixed array. Fixed arrays currently belong to
-shared memory, not host values or buffers.
+`T[N]` is a fixed array whose length is a positive compile-time `uint32`
+expression. Fixed arrays currently belong to shared memory, not host values or
+buffers.
 
 `atomic<int32>` and `atomic<uint32>` are synchronized integer objects. They
 may occur in host buffers or shared memory and are accessed only by atomic
@@ -622,12 +656,12 @@ Numbers use ordinary spelling:
 
 ```tach
 function literalValue(): float32 {
-  const decimal = 42;
-  const separated = 1_000_000;
-  const hexadecimal = 0xff00_ff00;
-  const binary = 0b1010_0001;
-  const fraction = 1.25;
-  const exponent = 6.022e2;
+  let decimal = 42;
+  let separated = 1_000_000;
+  let hexadecimal = 0xff00_ff00;
+  let binary = 0b1010_0001;
+  let fraction = 1.25;
+  let exponent = 6.022e2;
   return float32(decimal + separated + hexadecimal + binary) + fraction + exponent;
 }
 ```
@@ -650,7 +684,12 @@ intended. General implicit conversions do not exist.
 
 ## 9. Variables, expressions, and assignment
 
-`const` is immutable; `let` may be rebound. Either may carry a type annotation:
+Tach has one runtime local declaration, `let`, and one compile-time declaration,
+`const`. They are different execution categories, not mutable and immutable
+spellings for the same runtime value.
+
+`let` evaluates where the surrounding function runs and may be reassigned. It
+may carry a type annotation:
 
 ```tach
 function sumFour(values: vec<float32, 4>): float32 {
@@ -662,24 +701,86 @@ function sumFour(values: vec<float32, 4>): float32 {
 }
 ```
 
-Names cannot shadow another active name. Branch-local names do not escape
-their branch. A `for` initializer is scoped to its loop. Rebinding a `let`
-does not promise memory; the compiler represents locals as immutable values
-carried through structured control.
+Writing `let fixed = 4;` still declares a runtime local, even though an
+optimizer may later fold it. Tach has no second runtime-immutability keyword.
+Function parameters and coordinates cannot be assigned. Names cannot shadow
+another active local name. Branch-local names do not escape their branch. A
+`for` initializer is always a `let` scoped to its loop. Rebinding a `let` does
+not promise memory; the compiler represents locals as values carried through
+structured control.
+
+`const` evaluates completely in the compiler and may produce only a scalar or
+vector, including a boolean mask:
+
+```tach
+const tileWidth: uint32 = 16; // module scope; visible through direct imports
+
+@workgroup(tileWidth)
+export function tiled[i](out: buffer<uint32[]>) {
+  const tileArea = tileWidth * tileWidth; // lexical; earlier constants only
+  const tint = normalize(vec(3.0, 4.0, 0.0));
+  let scratch: shared<uint32[tileArea]>;
+  let lane = i % tileArea;
+  scratch[lane] = i;
+  workgroupBarrier();
+  if (i < out.length) {
+    out[i] = uint32(tint.x * float32(scratch[lane]));
+  }
+}
+```
+
+A module constant may refer to visible module constants in any declaration
+order. Imported constants require the file's direct import, exactly like an
+imported type or helper. A lexical constant may refer to module constants and
+earlier constants in its active lexical scope; it cannot refer forward. Cycles
+are errors and report the complete dependency chain.
+
+The constant algebra deliberately reuses Tach's ordinary expression typing:
+
+- literals and constant identifiers;
+- `!`, unary `-`, and `~`;
+- arithmetic, comparisons, short-circuit logic, bitwise operations, and shifts;
+- the lazy `condition ? then : else` expression;
+- numeric scalar conversions;
+- `vec(...)`, vector indexing, and swizzles; and
+- pure value intrinsics: numeric math, `fma`, vector geometry, `all`, `any`,
+  and `select`.
+
+Struct literals, runtime arrays, buffers, parameters, coordinates, `let`
+bindings, transient allocation, barriers, atomics, and user-function calls are
+not constant expressions. This is not a macro or general compile-time
+programming language: it has no loops, declarations inside expressions,
+conditional compilation, or host-configurable specialization.
+
+Evaluation uses the declared or inferred Tach type at every operation. Integer
+addition, subtraction, multiplication, negation, and bitwise operations use
+32-bit wrapping semantics; shifts use the low five count bits. Integer division
+or remainder by zero and signed `-2147483648 / -1` are errors. Float16 and
+Float32 operations round back to their type; a result that is NaN, infinite, or
+outside that type's finite range is an error. Conversions obey section 8,
+including low-32-bit preservation between integer types. A conditional or
+short-circuit expression evaluates only its selected branch.
+
+The evaluated value is substituted at each use. A constant used for
+`@workgroup`, a shared fixed-array length, a loop bound, ordinary math, or a
+`run` value argument therefore has one meaning. A constant passed through a
+program specializes that physical stage before backend lowering; it is absent
+from the generated TypeScript signature and runtime parameter block. An unused
+module constant or local constant is reported by the ordinary warning pass.
 
 Calls, member access, and indexing compose left to right. Calls are direct;
 Tach has no function values or methods.
 
 | Family | Operators and operands |
 |---|---|
-| unary | `!` bool; `-` signed numeric; `~` integer scalar/vector |
+| unary | `!` bool or boolean vector; `-` signed numeric; `~` integer scalar/vector |
 | add/subtract | `+ -` matching numeric values; scalar/vector broadcast |
 | multiply | `*` matching numeric values or scalar/vector broadcast |
 | divide | `/` matching numeric values; scalar/vector broadcast |
 | remainder | `%` matching numeric scalars |
-| comparison | `== != < <= > >=` matching numeric scalars, yielding bool |
+| comparison | `== != < <= > >=` matching numeric scalars/vectors; vectors yield `vec<bool, N>`; equality also accepts booleans |
 | logic | `&& ||` bool with short-circuiting |
-| bitwise | `& \| ^` matching integers; scalar/vector broadcast |
+| eager lane logic / bitwise | `& \| ^` matching booleans or integers; scalar/vector broadcast |
 | shifts | `<< >>` integer scalar/vector with unsigned scalar or lane-wise counts |
 
 Unsigned negation is invalid. Every shift masks its count to the low five bits;
@@ -714,7 +815,8 @@ addressable when its base is.
 ## 10. Control flow
 
 `if`, `while`, and `for` headers require parentheses. Conditions are `bool`.
-Both branches of a conditional expression have one concrete type.
+Both branches of a conditional expression have one concrete type. A condition
+is always scalar `bool`; reduce a mask with `all` or `any` first.
 
 ```tach
 function accumulated(count: uint32): uint32 {
@@ -758,6 +860,20 @@ A helper returns its declared type. A void helper or indexed stage may use
 
 Intrinsic names are reserved free functions.
 
+Boolean-mask intrinsics are:
+
+| Function | Input | Result |
+|---|---|---|
+| `all(mask)` | `vec<bool, N>` | `bool`; true only when every lane is true |
+| `any(mask)` | `vec<bool, N>` | `bool`; true when at least one lane is true |
+| `select(mask, whenTrue, whenFalse)` | `vec<bool, N>` plus matching numeric or boolean values | an `N`-lane vector chosen independently per lane |
+
+`select` broadcasts scalar arms to the mask width. Unlike `condition ? a : b`,
+it is eager: both arms are evaluated before selection. Use it for safe
+component-wise computation, not to guard an invalid buffer access, division,
+or other operation that must not execute. `&&` and `||` remain lazy scalar
+logic; `&`, `|`, and `^` are eager and component-wise on masks.
+
 These preserve their `float16` or `float32` scalar/vector type:
 
 ```text
@@ -780,8 +896,19 @@ backend or device may execute it as a fused instruction or as separate
 multiply and add operations; Tach promises the portable operation, not one
 physical instruction or one universal intermediate-rounding rule.
 
-`min`, `max`, and `clamp` accept integer scalars/vectors. Their floating forms
-remain unavailable until Tach defines one portable NaN and signed-zero policy.
+`min`, `max`, and `clamp` accept every numeric scalar/vector type and broadcast
+scalar arguments to a shared vector width. Their exact portable definitions
+are:
+
+```text
+min(a, b)         = b if b < a, otherwise a
+max(a, b)         = b if a < b, otherwise a
+clamp(x, low, hi) = min(max(x, low), hi)
+```
+
+These definitions settle the awkward floating cases without backend guesses:
+an unordered comparison is false, equal values preserve the first operand
+(including its signed zero), and inverted clamp limits produce `hi`.
 
 | Function | Input | Result |
 |---|---|---|
@@ -815,7 +942,7 @@ whiteboard for that team. It is zero before your code runs:
 @workgroup(64)
 export function reduce[i](out: buffer<uint32[]>) {
   let partial: shared<uint32[64]>;
-  const lane = i % 64;
+  let lane = i % 64;
 
   partial[lane] = i;
   workgroupBarrier();
@@ -840,6 +967,13 @@ Atomic operations receive an addressable atomic place:
 | `atomicMin`, `atomicMax` | ordered update | previous value |
 | `atomicAnd`, `atomicOr`, `atomicXor` | bitwise update | previous value |
 | `atomicExchange` | replacement | previous value |
+| `atomicCompareExchange` | replace only when the old value equals `expected` | previous value |
+
+`atomicCompareExchange(place, expected, replacement)` is strong: returning
+`expected` means the replacement occurred, while any other result proves the
+place held that returned value. WGSL's weak primitive is retried internally,
+so source code never handles spurious failure or a backend-specific result
+structure.
 
 Atomics on a public buffer are visible to every run on the device. Atomics
 on shared memory are visible only inside this team. Updates are relaxed:
@@ -877,7 +1011,8 @@ runtime values.
 
 The value domains are:
 
-- constructible: scalars, vectors, and fixed-footprint structs;
+- constructible: scalars, vectors (including boolean masks), and
+  fixed-footprint structs;
 - host-shareable: numeric scalars/vectors, atomics, compatible structs, and
   runtime arrays/tails; and
 - workgroup-storable: numeric scalars/vectors, atomics, fixed arrays, and
@@ -894,7 +1029,9 @@ The grammar below summarizes syntax; semantic restrictions above still apply.
 ```text
 module          := [docs-attribute ";"] {import-decl} {declaration}
 import-decl     := "import" STRING ";"
-declaration     := {attribute} (type-decl | function-decl)
+declaration     := const-decl | {attribute} (type-decl | function-decl)
+
+const-decl      := "const" IDENT [":" type] "=" expression ";"
 
 type-decl       := "type" IDENT "=" "{" fields "}" [";"]
 fields          := field {field-separator field} [field-separator]
@@ -907,16 +1044,18 @@ indices         := "[" IDENT {"," IDENT} "]"
 parameters      := "(" [parameter {"," parameter} [","]] ")"
 parameter       := IDENT ":" type
 
-attribute       := "@" "workgroup" "(" NUMBER {"," NUMBER} ")"
+attribute       := "@" "workgroup" "(" expression {"," expression} ")"
                  | docs-attribute
 docs-attribute  := "@" "docs" "(" docs-clause {"," docs-clause} [","] ")"
 docs-clause     := IDENT "(" [IDENT ","] STRING ")"
 
-type            := (IDENT | "vec" "<" type "," NUMBER ">")
-                   ["[" [NUMBER] "]"]
+type            := IDENT ["<" type-arguments ">"]
+                   ["[" [expression] "]"]
+type-arguments  := type {"," type} [","] | type "," NUMBER
 
 block           := "{" {statement} "}"
-statement       := variable-decl ";"
+statement       := const-decl
+                 | let-decl ";"
                  | shared-decl ";"
                  | run-statement ";"
                  | simple-statement ";"
@@ -924,7 +1063,7 @@ statement       := variable-decl ";"
                  | "break" ";" | "continue" ";"
                  | return-statement ";"
 
-variable-decl   := ("const" | "let") IDENT [":" type] "=" expression
+let-decl        := "let" IDENT [":" type] "=" expression
 shared-decl     := "let" IDENT ":" "shared" "<" type ">"
 run-statement   := "run" IDENT arguments "over" domain
 domain          := expression | "[" expression {"," expression} "]"

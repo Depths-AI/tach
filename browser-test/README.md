@@ -1,6 +1,6 @@
 # Tach browser correctness harness
 
-This private workspace asks a product question: do the seventeen public
+This private workspace asks a product question: do the eighteen public
 programs in `examples/` work from the published `@depths/tach` API in
 real Chrome WebGPU? It is not a unit-test framework. A Deno script
 builds the example project, serves one page, launches Chromium, and
@@ -25,7 +25,7 @@ creates pipelines, and executes the same recipe facade used by Deno/Vulkan.
 
 ## What it proves
 
-The seventeen canonical programs cover the language a TypeScript app will
+The eighteen canonical programs cover the language a TypeScript app will
 actually call. In everyday terms:
 
 - workers sharing a counter;
@@ -34,6 +34,8 @@ actually call. In everyday terms:
 - scalar FP32 and component-wise vector FP16 `fma` execution;
 - operand-order-independent literal inference, inferred `vec` composition,
   result-context FP16 geometry, and scalar/vector intrinsic broadcast;
+- boolean-vector construction and comparison, eager lane logic, scalar
+  broadcast selection, `all`/`any` reduction, and exact numeric mask output;
 - binary16 storage, parameters, arithmetic, readback through `Float16Array`,
   and exact `.length` for both direct and struct-tail padding cases;
 - a type imported from another file;
@@ -56,7 +58,7 @@ on one 128 x 72 canvas. Session serialization preserves call order;
 completion-backed presentation prevents unbounded GPU queueing. The final
 canvas is captured as PNG and must be non-empty. Together with the two swatch
 frames and the initial gradient fallback, success reports 35 displayed frames
-and seventeen public programs.
+and eighteen public programs.
 
 This distinguishes three contracts that are easy to conflate:
 
@@ -73,7 +75,7 @@ the local page, and polls one promise through the DevTools Protocol. It has no
 browser-test framework or bundler dependency. Set `CHROME_BIN` only when the
 browser is outside the standard platform locations.
 
-The runner requires exactly seventeen programs, 35 presented frames, and a
+The runner requires exactly eighteen programs, 35 presented frames, and a
 non-trivial PNG. It prints the selected adapter and those counts, then closes
 Chrome, aborts the server, and removes its temporary profile even after
 failure. Process status and assertion diagnostics are the test contract; the

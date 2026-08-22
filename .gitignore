@@ -4,7 +4,7 @@
 /.env
 *.test
 /spirv-test/test-report.md
-/native/tach-vulkan.*
-/tach-ts/native/
+/compiler/native-bindings/tach-vulkan.*
+/tach/native/
 /browser-test/generated/
-/deno-test/generated/
+/native-test/generated/

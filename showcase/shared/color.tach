@@ -1,0 +1,14 @@
+@docs(
+  title("Color utilities"),
+  summary("Shares color helpers across both rendering workloads."),
+);
+
+const displayLuminance: vec<float32, 3> = vec(0.21, 0.72, 0.07);
+@docs(
+  summary("Clamps a scalar to zero through one."),
+  param(value, "Value to clamp."),
+  returns("The clamped value."),
+)
+function saturate(value: float32): float32 {
+  return clamp(value, 0.0, 1.0);
+}

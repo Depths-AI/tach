@@ -1,0 +1,339 @@
+@docs(
+  title("Arbitrary mesh rendering"),
+  summary("Renders heterogeneous smooth indexed geometry through a compute-only visibility and material pipeline."),
+);
+
+import "shared/color";
+@docs(
+  summary("Viewport, camera, and lighting parameters."),
+  field(width, "Output width in pixels."),
+  field(height, "Output height in pixels."),
+  field(time, "Continuous camera and lighting time."),
+)
+type MeshParams = {
+  width: uint32,
+  height: uint32,
+  time: float32,
+};
+
+@docs(
+  summary("Evaluates a signed screen-space edge function."),
+  param(a, "First edge endpoint."),
+  param(b, "Second edge endpoint."),
+  param(point, "Pixel center under test."),
+  returns("Signed twice-area relative to the edge."),
+)
+function edge(a: vec<float32, 2>, b: vec<float32, 2>, point: vec<float32, 2>): float32 {
+  return (point.x - a.x) * (b.y - a.y) - (point.y - a.y) * (b.x - a.x);
+}
+
+@docs(
+  summary("Chooses a spatially detailed base color for one material family."),
+  param(material, "Interpolated material identifier."),
+  param(world, "Interpolated world position."),
+  returns("Linear base color."),
+)
+function materialColor(material: float32, world: vec<float32, 3>): vec<float32, 3> {
+  let grain = 0.5 + 0.5 * sin(world.x * 7.1 + world.y * 4.3 + world.z * 5.7);
+  if (material < 0.5) {
+    let terrain = 0.5 + 0.5 * sin(world.x * 1.8) * cos(world.z * 1.4);
+    return vec(0.10 + terrain * 0.10, 0.20 + terrain * 0.20, 0.07 + grain * 0.05);
+  }
+  if (material < 1.5) {
+    return vec(0.32 + grain * 0.48, 0.12 + grain * 0.22, 0.035 + grain * 0.08);
+  }
+  if (material < 2.5) {
+    return vec(0.04 + grain * 0.10, 0.24 + grain * 0.40, 0.34 + (1.0 - grain) * 0.52);
+  }
+  if (material < 3.5) {
+    return vec(0.34 + grain * 0.42, 0.035 + grain * 0.10, 0.16 + (1.0 - grain) * 0.32);
+  }
+  if (material < 4.5) {
+    return vec(0.15 + grain * 0.18, 0.30 + grain * 0.46, 0.08 + grain * 0.14);
+  }
+  return vec(0.28 + grain * 0.32, 0.22 + grain * 0.30, 0.38 + (1.0 - grain) * 0.34);
+}
+
+@docs(
+  summary("Computes one attenuated Lambertian point-light contribution."),
+  param(world, "Shaded world position."),
+  param(normal, "Unit surface normal."),
+  param(position, "Point-light position."),
+  param(color, "Point-light color."),
+  param(power, "Point-light intensity."),
+  returns("RGB irradiance contribution."),
+)
+function pointLight(
+  world: vec<float32, 3>,
+  normal: vec<float32, 3>,
+  position: vec<float32, 3>,
+  color: vec<float32, 3>,
+  power: float32,
+): vec<float32, 3> {
+  let offset = position - world;
+  let distanceSquared = dot(offset, offset) + 0.05;
+  let direction = offset * rsqrt(distanceSquared);
+  let cosineRaw = dot(normal, direction);
+  let cosine = cosineRaw > 0.0 ? cosineRaw : 0.0;
+  return color * (cosine * power / (1.0 + distanceSquared * 0.10));
+}
+
+@docs(
+  summary("Projects arbitrary world vertices while retaining reciprocal depth for perspective-correct reconstruction."),
+  coordinate(i, "Vertex index."),
+  param(vertices, "World XYZ and material identifier per vertex."),
+  param(screen, "Projected XY, normalized depth, and reciprocal view depth."),
+  param(params, "Viewport and camera time."),
+)
+function transform[i](
+  vertices: buffer<vec<float32, 4>[]>,
+  screen: buffer<vec<float32, 4>[]>,
+  params: MeshParams,
+) {
+  let vertex = vertices[i];
+  let camera = vec(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
+  let view = vertex.xyz - camera;
+  let inverseDepth = 1.0 / view.z;
+  screen[i] = vec(
+    (view.x * inverseDepth * 0.90 + 0.5) * float32(params.width),
+    (0.53 - view.y * inverseDepth * 1.48) * float32(params.height),
+    saturate((view.z - 5.0) / 42.0),
+    inverseDepth,
+  );
+}
+
+@docs(
+  summary("Clears packed depth and primitive ownership."),
+  coordinate(i, "Pixel index."),
+  param(visibility, "Atomic depth and triangle ownership image."),
+)
+function clear[i](visibility: buffer<atomic<uint32>[]>) {
+  if (i < visibility.length) {
+    atomicStore(visibility[i], 0xffff_ffff);
+  }
+}
+
+@docs(
+  summary("Rasterizes one indexed triangle and atomically resolves visible fragments."),
+  coordinate(triangle, "Triangle index."),
+  param(screen, "Projected vertices."),
+  param(indices, "Three vertex indices per triangle."),
+  param(visibility, "Atomic depth and triangle ownership image."),
+  param(coverage, "Covered-fragment count per triangle."),
+  param(params, "Viewport dimensions."),
+)
+function rasterize[triangle](
+  screen: buffer<vec<float32, 4>[]>,
+  indices: buffer<uint32[]>,
+  visibility: buffer<atomic<uint32>[]>,
+  coverage: buffer<uint32[]>,
+  params: MeshParams,
+) {
+  let first = triangle * 3;
+  let covered = 0;
+  if (first + 2 < indices.length && triangle < 0x000f_ffff) {
+    let a = screen[indices[first]];
+    let b = screen[indices[first + 1]];
+    let c = screen[indices[first + 2]];
+    let area = edge(a.xy, b.xy, c.xy);
+    let areaMagnitude = abs(area);
+    if (areaMagnitude > 0.0001) {
+      let minimumX = a.x < b.x
+        ? (a.x < c.x ? a.x : c.x) : (b.x < c.x ? b.x : c.x);
+      let minimumY = a.y < b.y
+        ? (a.y < c.y ? a.y : c.y) : (b.y < c.y ? b.y : c.y);
+      let maximumX = a.x > b.x
+        ? (a.x > c.x ? a.x : c.x) : (b.x > c.x ? b.x : c.x);
+      let maximumY = a.y > b.y
+        ? (a.y > c.y ? a.y : c.y) : (b.y > c.y ? b.y : c.y);
+      let x0 = clamp(int32(floor(minimumX)), 0, int32(params.width) - 1);
+      let y0 = clamp(int32(floor(minimumY)), 0, int32(params.height) - 1);
+      let x1 = clamp(int32(ceil(maximumX)), 0, int32(params.width) - 1);
+      let y1 = clamp(int32(ceil(maximumY)), 0, int32(params.height) - 1);
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          let point = vec(float32(x) + 0.5, float32(y) + 0.5);
+          let wa = edge(b.xy, c.xy, point) / area;
+          let wb = edge(c.xy, a.xy, point) / area;
+          let wc = 1.0 - wa - wb;
+          if (wa >= 0.0 && wb >= 0.0 && wc >= 0.0) {
+            let depth = saturate(wa * a.z + wb * b.z + wc * c.z);
+            atomicMin(
+              visibility[uint32(y) * params.width + uint32(x)],
+              (uint32(depth * 4094.0) << 20) | triangle,
+            );
+            covered++;
+          }
+        }
+      }
+    }
+  }
+  coverage[triangle] = covered;
+}
+
+@docs(
+  summary("Reconstructs perspective-correct surface attributes and evaluates smooth heterogeneous materials."),
+  coordinate(i, "Pixel index."),
+  param(vertices, "World XYZ and material identifier per vertex."),
+  param(normals, "World normal and roughness per vertex."),
+  param(screen, "Projected vertices and reciprocal depths."),
+  param(indices, "Triangle index data."),
+  param(visibility, "Resolved depth and triangle ownership image."),
+  param(hdr, "Linear high-dynamic-range output."),
+  param(params, "Viewport and lighting time."),
+)
+function shade[i](
+  vertices: buffer<vec<float32, 4>[]>,
+  normals: buffer<vec<float32, 4>[]>,
+  screen: buffer<vec<float32, 4>[]>,
+  indices: buffer<uint32[]>,
+  visibility: buffer<atomic<uint32>[]>,
+  hdr: buffer<vec<float32, 4>[]>,
+  params: MeshParams,
+) {
+  let x = i % params.width;
+  let y = i / params.width;
+  let owner = atomicLoad(visibility[i]);
+  let sky = float32(y) / float32(params.height);
+  let color = vec(0.07 + sky * 0.12, 0.13 + sky * 0.19, 0.25 + sky * 0.30);
+  if (owner != 0xffff_ffff) {
+    let triangle = owner & 0x000f_ffff;
+    let first = triangle * 3;
+    let ia = indices[first];
+    let ib = indices[first + 1];
+    let ic = indices[first + 2];
+    let va = vertices[ia];
+    let vb = vertices[ib];
+    let vc = vertices[ic];
+    let na = normals[ia];
+    let nb = normals[ib];
+    let nc = normals[ic];
+    let sa = screen[ia];
+    let sb = screen[ib];
+    let sc = screen[ic];
+    let point = vec(float32(x) + 0.5, float32(y) + 0.5);
+    let area = edge(sa.xy, sb.xy, sc.xy);
+    let screenA = edge(sb.xy, sc.xy, point) / area;
+    let screenB = edge(sc.xy, sa.xy, point) / area;
+    let screenC = 1.0 - screenA - screenB;
+    let reciprocalDepth = screenA * sa.w + screenB * sb.w + screenC * sc.w;
+    // Reciprocal-depth weights restore perspective-correct world attributes.
+    let wa = screenA * sa.w / reciprocalDepth;
+    let wb = screenB * sb.w / reciprocalDepth;
+    let wc = 1.0 - wa - wb;
+    let world = va.xyz * wa + vb.xyz * wb + vc.xyz * wc;
+    let rawNormal = normalize(na.xyz * wa + nb.xyz * wb + nc.xyz * wc);
+    let camera = vec(sin(params.time * 0.17) * 0.35, 2.15, -4.0);
+    let view = normalize(camera - world);
+    let facing = dot(rawNormal, view);
+    let normal = facing >= 0.0 ? rawNormal : -rawNormal;
+    let material = va.w * wa + vb.w * wb + vc.w * wc;
+    let roughness = saturate(na.w * wa + nb.w * wb + nc.w * wc);
+    let occlusion = 0.0;
+    let depthCode = owner >> 20;
+    if (x > 0) {
+      let neighbor = atomicLoad(visibility[i - 1]);
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
+    }
+    if (x + 1 < params.width) {
+      let neighbor = atomicLoad(visibility[i + 1]);
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
+    }
+    if (y > 0) {
+      let neighbor = atomicLoad(visibility[i - params.width]);
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
+    }
+    if (y + 1 < params.height) {
+      let neighbor = atomicLoad(visibility[i + params.width]);
+      if (neighbor != 0xffff_ffff && (neighbor >> 20) + 16 < depthCode) {
+        occlusion += 0.14;
+      }
+    }
+    let sun = normalize(vec(-0.48, 0.80, -0.35));
+    let diffuseRaw = dot(normal, sun);
+    let diffuse = diffuseRaw > 0.0 ? diffuseRaw : 0.0;
+    let specularRaw = dot(normal, normalize(sun + view));
+    let specular = pow(specularRaw > 0.0
+      ? specularRaw : 0.0, 8.0 + (1.0 - roughness) * 72.0);
+    let local = pointLight(
+      world,
+      normal,
+      vec(-6.0, 6.0, 8.0),
+      vec(1.0, 0.22, 0.08),
+      13.0,
+    ) + pointLight(world, normal, vec(6.0, 4.0, 13.0), vec(0.08, 0.35, 1.0), 15.0)
+      + pointLight(world, normal, vec(0.0, 7.0, 22.0), vec(0.34, 1.0, 0.44), 17.0);
+    let base = materialColor(material, world);
+    let lit = base * ((0.16 + diffuse * 1.08) * (1.0 - occlusion)) + local
+      + vec(1.0, 0.86, 0.68) * specular * (0.25 + (1.0 - roughness) * 0.70);
+    let fog = saturate((world.z - 16.0) / 28.0);
+    color = lit * (1.0 - fog * 0.58) + vec(0.13, 0.20, 0.31) * fog * 0.58;
+  }
+  hdr[i] = vec(color, 1.0);
+}
+
+@docs(
+  summary("Applies neighborhood bloom, tone mapping, and vignette."),
+  coordinate(i, "Pixel index."),
+  param(hdr, "Linear lit frame."),
+  param(frame, "Linear display frame."),
+  param(params, "Frame dimensions."),
+)
+function meshPost[i](
+  hdr: buffer<vec<float32, 4>[]>,
+  frame: buffer<vec<float32, 4>[]>,
+  params: MeshParams,
+) {
+  if (i < frame.length) {
+    let x = i % params.width;
+    let y = i / params.width;
+    let center = hdr[i].xyz;
+    let left = hdr[x > 0 ? i - 1 : i].xyz;
+    let right = hdr[x + 1 < params.width ? i + 1 : i].xyz;
+    let up = hdr[y > 0 ? i - params.width : i].xyz;
+    let down = hdr[y + 1 < params.height ? i + params.width : i].xyz;
+    let bloom = (left + right + up + down) * 0.055;
+    let bloomLuminance = dot(bloom, displayLuminance);
+    let color = center + bloom * (bloomLuminance > 0.34 ? 0.50 : 0.07);
+    color = color / (color + 1.0);
+    let nx = float32(x) / float32(params.width) * 2.0 - 1.0;
+    let ny = float32(y) / float32(params.height) * 2.0 - 1.0;
+    frame[i] = vec(color * saturate(1.08 - (nx * nx + ny * ny) * 0.20), 1.0);
+  }
+}
+
+@docs(
+  summary("Renders one complete frame of arbitrary smooth indexed geometry."),
+  param(vertices, "World XYZ and material identifier per vertex."),
+  param(normals, "World normal and roughness per vertex."),
+  param(indices, "Three vertex indices per triangle."),
+  param(visibility, "Atomic depth and triangle ownership storage."),
+  param(coverage, "Covered-fragment count per triangle."),
+  param(params, "Viewport, camera, and lighting parameters."),
+  returns("The complete sRGB display view."),
+)
+export function meshWorld(
+  vertices: buffer<vec<float32, 4>[]>,
+  normals: buffer<vec<float32, 4>[]>,
+  indices: buffer<uint32[]>,
+  visibility: buffer<atomic<uint32>[]>,
+  coverage: buffer<uint32[]>,
+  params: MeshParams,
+): view<srgb8> {
+  let count = params.width * params.height;
+  let screen = transient<vec<float32, 4>>(vertices.length);
+  let hdr = transient<vec<float32, 4>>(count);
+  let frame = transient<vec<float32, 4>>(count);
+  run transform(vertices, screen, params) over vertices.length;
+  run clear(visibility) over visibility.length;
+  run rasterize(screen, indices, visibility, coverage, params) over indices.length / 3;
+  run shade(vertices, normals, screen, indices, visibility, hdr, params) over count;
+  run meshPost(hdr, frame, params) over count;
+  return view(frame, params.width, params.height);
+}

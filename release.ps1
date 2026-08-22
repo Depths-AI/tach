@@ -93,15 +93,15 @@ function Get-Sha256([string]$Path) {
 }
 
 function Assert-VersionCoherence {
-  $package = Get-Content -LiteralPath (Join-Path $root "tach-ts\package.json") -Raw |
+  $package = Get-Content -LiteralPath (Join-Path $root "tach\package.json") -Raw |
     ConvertFrom-Json
   if ($package.version -ne $packageVersion) {
-    throw "tach-ts package version is $($package.version), expected $packageVersion"
+    throw "tach package version is $($package.version), expected $packageVersion"
   }
   foreach ($path in @(
     "browser-test\package.json",
-    "deno-test\package.json",
-    "showcase-ts\package.json"
+    "native-test\package.json",
+    "showcase\package.json"
   )) {
     $consumer = Get-Content -LiteralPath (Join-Path $root $path) -Raw |
       ConvertFrom-Json
@@ -114,9 +114,9 @@ function Assert-VersionCoherence {
   if ($extension.version -ne $packageVersion) {
     throw "VS Code extension version is $($extension.version), expected $packageVersion"
   }
-  $main = Get-Content -LiteralPath (Join-Path $root "main.go") -Raw
+  $main = Get-Content -LiteralPath (Join-Path $root "compiler\main.go") -Raw
   if ($main -notmatch "var version = `"$([regex]::Escape($packageVersion))`"") {
-    throw "main.go fallback version does not match $packageVersion"
+    throw "compiler/main.go fallback version does not match $packageVersion"
   }
 }
 
@@ -282,6 +282,8 @@ function New-ReleaseStage {
 
     $hostCompiler = Join-Path $workDir "tach.exe"
     Invoke-Checked "go" @(
+      "-C",
+      "compiler",
       "build",
       "-trimpath",
       "-ldflags=-s -w -X main.version=$packageVersion",
@@ -301,6 +303,8 @@ function New-ReleaseStage {
         $env:GOARCH = $target.Arch
         Write-Host "Building $($target.OS)/$($target.Arch)"
         Invoke-Checked "go" @(
+          "-C",
+          "compiler",
           "build",
           "-trimpath",
           "-ldflags=-s -w -X main.version=$packageVersion",
@@ -319,11 +323,11 @@ function New-ReleaseStage {
     $packageNative = Join-Path $packageDir "native"
     New-Item -ItemType Directory -Path $packageNative | Out-Null
     foreach ($file in @("package.json", "README.md")) {
-      Copy-Item -LiteralPath (Join-Path $root "tach-ts\$file") -Destination $packageDir
+      Copy-Item -LiteralPath (Join-Path $root "tach\$file") -Destination $packageDir
     }
     Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $root "tach-ts\dist") -Destination $packageDir -Recurse
-    $windowsRuntime = Join-Path $root "tach-ts\native\$($runtimeFiles[0])"
+    Copy-Item -LiteralPath (Join-Path $root "tach\dist") -Destination $packageDir -Recurse
+    $windowsRuntime = Join-Path $root "tach\native\$($runtimeFiles[0])"
     if (-not (Test-Path -LiteralPath $windowsRuntime -PathType Leaf)) {
       throw "native validation did not produce $windowsRuntime"
     }
@@ -345,6 +349,8 @@ function New-ReleaseStage {
       $env:CC = "zig cc -target x86_64-linux-gnu"
       $env:CGO_CFLAGS = "-I$($env:VULKAN_SDK.Replace('\', '/'))/Include"
       Invoke-Checked "go" @(
+        "-C",
+        "compiler",
         "build",
         "-tags",
         "tachvulkan",
@@ -352,7 +358,7 @@ function New-ReleaseStage {
         "-trimpath",
         "-o",
         $linuxRuntime,
-        "./native"
+        "./native-bindings"
       )
     } finally {
       $env:GOOS = $savedOS

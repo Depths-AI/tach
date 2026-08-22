@@ -3,6 +3,8 @@
   summary("Demonstrates workgroup memory, barriers, and atomic updates to shared GPU state."),
 );
 
+const accumulationWidth: uint32 = 8 * 8;
+const accumulationSlots = accumulationWidth;
 @docs(
   summary("Global counters updated atomically by the kernel."),
   field(total, "Number of lanes that observed an untouched workgroup slot."),
@@ -12,23 +14,26 @@ type Counters = {
 };
 
 @docs(
-  summary("Counts the first atomic update performed by each workgroup lane."),
+  summary("Counts workgroup contributions with atomic addition and strong compare-exchange."),
   coordinate(i, "Global invocation index."),
   param(counters, "Global counter state updated by all workgroups."),
 )
-@workgroup(64)
+@workgroup(accumulationWidth)
 export function accumulate[i](counters: buffer<Counters>) {
-  let scratch: shared<atomic<uint32>[64]>;
-  const lane = i % 64;
+  let scratch: shared<atomic<uint32>[accumulationSlots]>;
+  let lane = i % accumulationWidth;
   // Establish the explicit initialization before any lane uses shared state.
   if (lane == 0) {
     atomicStore(scratch[0], 0);
   }
   workgroupBarrier();
-  const previous = atomicAdd(scratch[lane], 1);
-  // Only the first update to a lane contributes to the global total.
+  let previous = atomicAdd(scratch[lane], 1);
+  // Strong compare-exchange claims the zero state; every later winner adds one.
   if (previous == 0) {
-    atomicAdd(counters.total, 1);
+    let observed = atomicCompareExchange(counters.total, 0, 1);
+    if (observed != 0) {
+      atomicAdd(counters.total, 1);
+    }
   }
   bufferBarrier();
 }

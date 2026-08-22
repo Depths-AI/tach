@@ -31,7 +31,7 @@ export function selectiveScan[start](
 ) {
   let total = 0.0;
   for (let i = start; i < params.count && i < input.length; i += params.stride) {
-    const value = input[i];
+    let value = input[i];
     if (value == 0.0) {
       continue;
     }
@@ -78,7 +78,7 @@ function contextualHalfDot(): float16 {
 )
 export function contextualMath[i](output: buffer<vec<float32, 4>[]>, scale: float32) {
   if (i < output.length) {
-    const direction = normalize(vec(float32(i) + 1, 2, 3));
+    let direction = normalize(vec(float32(i) + 1, 2, 3));
     let transformed = fma(direction, scale, vec(1, 2, 3));
     transformed += sin(1);
     output[i] = vec(transformed, sin(1) + pow(2, 3) + float32(contextualHalfDot()));
