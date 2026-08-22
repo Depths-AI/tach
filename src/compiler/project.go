@@ -17,7 +17,7 @@ import (
 	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 )
 
 type manifest struct {
@@ -352,7 +352,7 @@ func (p *project) validate(diagnostics *foundation.Diagnostics) {
 					}
 				}
 			}
-			if sema.ReservedName(name) {
+			if semantics.ReservedName(name) {
 				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "name", Span: declaration.GetSpan(), Message: fmt.Sprintf("declaration name %q is reserved by Tach", name)})
 			}
 			if exported {

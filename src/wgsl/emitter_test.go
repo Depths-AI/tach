@@ -5,22 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"tach/src/ir"
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 	"tach/src/wgsl"
 )
 
-func emit(m *ir.Module) (string, error) {
-	if err := opt.Optimize(m); err != nil {
-		return "", err
-	}
-	executable, err := wgsl.Lower(m)
+func emit(files ...*parser.File) (string, error) {
+	result, err := semantics.Build(files, 0)
 	if err != nil {
 		return "", err
 	}
-	return wgsl.Emit(executable)
+	return wgsl.Emit(result.Web)
 }
 
 func TestParticlesWGSL(t *testing.T) {
@@ -37,11 +32,7 @@ func TestParticlesWGSL(t *testing.T) {
 		module.Path = "simulation/" + name
 		modules = append(modules, module)
 	}
-	m, _, err := sema.CheckAndLowerProject(modules)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(modules...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,11 +73,7 @@ export function clearSeries[i](data: buffer<Series>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,11 +96,7 @@ export function half[i](values: buffer<vec<float16, 2>[]>, factor: float16) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,11 +130,7 @@ export function control[i](out: buffer<float32[]>, limit: uint32) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,11 +158,7 @@ export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, state: buffer
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +192,7 @@ export function masks[i](out: buffer<vec<float32, 4>[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,11 +222,7 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,11 +249,7 @@ export function image(pixels: buffer<vec<float32, 4>[]>, width: uint32, height: 
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,11 +270,7 @@ export function coordinates[x, y](out: buffer<uint32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := emit(m)
+	out, err := emit(a)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,10 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"tach/src/ir"
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 	"tach/src/spirv"
 )
 
@@ -20,23 +18,18 @@ func emitSource(t *testing.T, name, source string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	result, err := semantics.Build([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	opt.Optimize(m)
-	executable, err := spirv.Lower(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin, err := spirv.Emit(executable)
+	bin, err := spirv.Emit(result.SPIRV)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return bin
 }
 
-func particleModule(t *testing.T) *ir.Module {
+func particleProgram(t *testing.T) *semantics.Result {
 	t.Helper()
 	var modules []*parser.File
 	for _, name := range []string{"types", "particles"} {
@@ -51,21 +44,16 @@ func particleModule(t *testing.T) *ir.Module {
 		module.Path = "simulation/" + name
 		modules = append(modules, module)
 	}
-	module, _, err := sema.CheckAndLowerProject(modules)
+	result, err := semantics.Build(modules, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return module
+	return result
 }
 
 func TestParticlesSPIRV(t *testing.T) {
-	m := particleModule(t)
-	opt.Optimize(m)
-	executable, err := spirv.Lower(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin, err := spirv.Emit(executable)
+	result := particleProgram(t)
+	bin, err := spirv.Emit(result.SPIRV)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,15 +386,8 @@ export function structMemory[i](out: buffer<uint32>) {
 }
 
 func TestHostResourceAggregatesKeepExplicitLayout(t *testing.T) {
-	logical := particleModule(t)
-	if err := opt.Optimize(logical); err != nil {
-		t.Fatal(err)
-	}
-	executable, err := spirv.Lower(logical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin, err := spirv.Emit(executable)
+	result := particleProgram(t)
+	bin, err := spirv.Emit(result.SPIRV)
 	if err != nil {
 		t.Fatal(err)
 	}

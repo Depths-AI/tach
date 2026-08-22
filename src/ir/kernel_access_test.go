@@ -6,7 +6,7 @@ import (
 
 	"tach/src/ir"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 )
 
 func stage(t *testing.T, body string, indices ...string) *ir.Function {
@@ -23,11 +23,11 @@ func stage(t *testing.T, body string, indices ...string) *ir.Function {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	result, err := semantics.Describe([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m.Kernel.Function("access")
+	return result.Module.Kernel.Function("access")
 }
 
 func TestAccessSummaryRecognizesIdentityOffsetAndOpaque(t *testing.T) {

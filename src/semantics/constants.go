@@ -1,4 +1,4 @@
-package sema
+package semantics
 
 import (
 	"errors"
@@ -16,7 +16,7 @@ type runtimeConstantDependency struct{ error }
 
 func (e *runtimeConstantDependency) Unwrap() error { return e.error }
 
-func (c *Checker) tryConstant(expression parser.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, bool, error) {
+func (c *analyzer) tryConstant(expression parser.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, bool, error) {
 	value, err := c.evaluateConstant(expression, expected, environment)
 	var runtime *runtimeConstantDependency
 	if errors.As(err, &runtime) {
@@ -25,7 +25,7 @@ func (c *Checker) tryConstant(expression parser.Expr, expected *foundation.Type,
 	return value, err == nil, err
 }
 
-func (c *Checker) collectConstants() error {
+func (c *analyzer) collectConstants() error {
 	for _, declaration := range c.syntax.Decls {
 		item, ok := declaration.(*parser.ConstDecl)
 		if !ok {
@@ -59,7 +59,7 @@ func (c *Checker) collectConstants() error {
 	return nil
 }
 
-func (c *Checker) resolveConstant(name string, reference foundation.Span) (*foundation.ConstantValue, error) {
+func (c *analyzer) resolveConstant(name string, reference foundation.Span) (*foundation.ConstantValue, error) {
 	definition := c.consts[name]
 	if definition == nil || !c.visible(name, reference.File) {
 		return nil, diag(reference, "unknown constant %q", name)
@@ -102,7 +102,7 @@ func (c *Checker) resolveConstant(name string, reference foundation.Span) (*foun
 	return definition.value, nil
 }
 
-func (c *Checker) evaluateConstantBinding(typeExpression parser.TypeExpr, expression parser.Expr, environment env) (*foundation.ConstantValue, error) {
+func (c *analyzer) evaluateConstantBinding(typeExpression parser.TypeExpr, expression parser.Expr, environment env) (*foundation.ConstantValue, error) {
 	var expected *foundation.Type
 	var err error
 	if typeExpression != nil {
@@ -117,7 +117,7 @@ func (c *Checker) evaluateConstantBinding(typeExpression parser.TypeExpr, expres
 	return c.evaluateConstant(expression, expected, environment)
 }
 
-func (c *Checker) evaluateConstant(expression parser.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, error) {
+func (c *analyzer) evaluateConstant(expression parser.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, error) {
 	block := &ir.Block{}
 	builder := &fnBuilder{
 		fn:       &ir.Function{Kind: ir.Helper, Return: foundation.VoidType, Body: block},

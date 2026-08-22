@@ -1,15 +1,12 @@
-package backend_test
+package semantics
 
 import (
 	"strings"
 	"testing"
 
-	"tach/src/backend"
 	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
 )
 
 func packsDisplayPixel(function *ir.Function) bool {
@@ -52,20 +49,20 @@ func runtimeU32(t *foundation.Type) bool {
 	return t != nil && t.Kind == foundation.RuntimeArrayKind && t.Elem == foundation.Uint32Type
 }
 
-func lower(t *testing.T, source string, profile backend.Profile) *backend.Executable {
+func plan(t *testing.T, source string, profile profile) *Executable {
 	t.Helper()
-	a, err := parser.Parse("backend.tach", source)
+	a, err := parser.Parse("executable.tach", source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	m, err := analyze(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Optimize(m); err != nil {
+	if err := optimize(m); err != nil {
 		t.Fatal(err)
 	}
-	executable, err := backend.Lower(m, profile)
+	executable, err := lower(m, profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,9 +70,9 @@ func lower(t *testing.T, source string, profile backend.Profile) *backend.Execut
 }
 
 func TestPlannerInternalizesSafeRepeatAndPrunesDeadValues(t *testing.T) {
-	executable := lower(t, `export function scale[i](data: buffer<float32[]>, used: float32, unused: float32) { data[i] *= used; }`, backend.WebProfile)
+	executable := plan(t, `export function scale[i](data: buffer<float32[]>, used: float32, unused: float32) { data[i] *= used; }`, webProfile)
 	plan := executable.Programs[0]
-	if plan.Repeat != backend.RepeatInvocationLoop || len(plan.Steps) != 1 || plan.Steps[0].Parameters[len(plan.Steps[0].Parameters)-1].Kind != ir.ValueFromRepeat {
+	if plan.Repeat != RepeatInvocationLoop || len(plan.Steps) != 1 || plan.Steps[0].Parameters[len(plan.Steps[0].Parameters)-1].Kind != ir.ValueFromRepeat {
 		t.Fatalf("plan = %#v", plan)
 	}
 	kernel := executable.PhysicalKernels[0]
@@ -93,7 +90,7 @@ type HalfSeries = { offset: float16, values: float16[] };
 export function inspect[i](data: buffer<HalfSeries>, out: buffer<uint32[]>) {
   if (i < out.length) { out[i] = data.values.length; }
 }`
-	web := lower(t, source, backend.WebProfile)
+	web := plan(t, source, webProfile)
 	kernel := web.PhysicalKernels[0]
 	if got := kernel.Bindings[0].MinimumByteSize; got != 4 {
 		t.Fatalf("runtime-tail minimum byte size = %d, want 4", got)
@@ -116,25 +113,25 @@ export function inspect[i](data: buffer<HalfSeries>, out: buffer<uint32[]>) {
 	if argument.Kind != ir.ValueFromShape || shape == nil || len(shape.Path) != 1 || shape.Path[0] != "values" {
 		t.Fatalf("logical length source = %#v; shape = %#v", argument, shape)
 	}
-	spirv := lower(t, source, backend.SPIRVProfile)
+	spirv := plan(t, source, spirvProfile)
 	if len(spirv.PhysicalKernels[0].LogicalLengths) != 1 {
 		t.Fatalf("SPIR-V logical lengths = %#v, want Float16 tail", spirv.PhysicalKernels[0].LogicalLengths)
 	}
 }
 
 func TestSPIRVPlanKeepsCrossInvocationRepeatAndBarrier(t *testing.T) {
-	executable := lower(t, `
+	executable := plan(t, `
 function first[i](data: buffer<uint32[]>) { data[i] += uint32(1); }
 function second[i](data: buffer<uint32[]>) { data[i] += data[i + uint32(1)]; }
-export function graph(data: buffer<uint32[]>) { let count = data.length; run first(data) over count; run second(data) over count; }`, backend.SPIRVProfile)
+export function graph(data: buffer<uint32[]>) { let count = data.length; run first(data) over count; run second(data) over count; }`, spirvProfile)
 	plan := executable.Programs[0]
-	if plan.Repeat != backend.RepeatProgram || len(plan.Steps) != 3 || plan.Steps[1].Kind != backend.BarrierStepKind || len(plan.RepeatBarrier) == 0 {
+	if plan.Repeat != RepeatProgram || len(plan.Steps) != 3 || plan.Steps[1].Kind != BarrierStepKind || len(plan.RepeatBarrier) == 0 {
 		t.Fatalf("plan = %#v", plan)
 	}
 }
 
-func TestDispatchConstantsSpecializeBeforeBackendLowering(t *testing.T) {
-	executable := lower(t, `
+func TestDispatchConstantsSpecializeBeforeExecutablePlanning(t *testing.T) {
+	executable := plan(t, `
 const factor: float16 = 0.5;
 const adjustment: vec<float16, 2> = vec(0.25, 0.75);
 function half[i](values: buffer<float16[]>, scale: float16, bias: vec<float16, 2>, unused: uint32) {
@@ -144,7 +141,7 @@ export function halve(values: buffer<float16[]>) {
   const localFactor = factor;
   const localAdjustment = adjustment;
   run half(values, localFactor, localAdjustment, 99) over values.length;
-}`, backend.WebProfile)
+}`, webProfile)
 	kernel := executable.PhysicalKernels[0]
 	for _, parameter := range kernel.Function.Params {
 		if foundation.Contains(parameter.Type, foundation.Float16Kind) {
@@ -175,9 +172,9 @@ export function image(width: uint32, height: uint32): view<srgb8> {
   run paint(pixels) over pixels.length;
   return view(pixels, width, height);
 }`
-	web := lower(t, source, backend.WebProfile)
-	spirv := lower(t, source, backend.SPIRVProfile)
-	for _, executable := range []*backend.Executable{web, spirv} {
+	web := plan(t, source, webProfile)
+	spirv := plan(t, source, spirvProfile)
+	for _, executable := range []*Executable{web, spirv} {
 		plan := executable.Programs[0]
 		if plan.View == nil || !plan.View.Fused || len(executable.PhysicalKernels) != 1 || len(plan.Steps) != 0 || len(plan.Transients) != 0 || plan.View.Step.Kernel != 0 || executable.Logical.Programs[0].Shape(plan.View.Width).Op != ir.ShapeParameter || executable.Logical.Programs[0].Shape(plan.View.Height).Op != ir.ShapeParameter {
 			t.Fatalf("view plan = %#v; kernels = %#v", plan.View, executable.PhysicalKernels)
@@ -205,27 +202,27 @@ export function image(pixels: buffer<vec<float32, 4>[]>, width: uint32, height: 
   run paint(pixels) over width * height;
   return view(pixels, width, height);
 }`
-	for _, profile := range []backend.Profile{backend.WebProfile, backend.SPIRVProfile} {
-		executable := lower(t, source, profile)
+	for _, profile := range []profile{webProfile, spirvProfile} {
+		executable := plan(t, source, profile)
 		plan := executable.Programs[0]
 		projection := executable.PhysicalKernels[plan.View.Step.Kernel]
-		if plan.View == nil || plan.View.Fused || len(plan.Steps) != 1 || len(executable.PhysicalKernels) != 2 || !projection.Projection || len(plan.View.Step.Resources) != 1 || plan.View.Step.Resources[0].Kind != backend.ExternalSource {
+		if plan.View == nil || plan.View.Fused || len(plan.Steps) != 1 || len(executable.PhysicalKernels) != 2 || !projection.Projection || len(plan.View.Step.Resources) != 1 || plan.View.Step.Resources[0].Kind != ExternalSource {
 			t.Fatalf("%s view plan = %#v; kernels = %#v", profile.Target, plan.View, executable.PhysicalKernels)
 		}
-		if !packsDisplayPixel(projection.Function) || !runtimeU32(projection.Bindings[1].Type) || projection.Bindings[1].Texture != (profile.Target == backend.Web) {
+		if !packsDisplayPixel(projection.Function) || !runtimeU32(projection.Bindings[1].Type) || projection.Bindings[1].Texture != (profile.Target == Web) {
 			t.Fatalf("%s projection = %#v", profile.Target, projection)
 		}
 	}
 }
 
 func TestConstantExtentViewStillFuses(t *testing.T) {
-	executable := lower(t, `
+	executable := plan(t, `
 function paint[i](pixels: buffer<vec<float32, 4>[]>) { pixels[i] = vec(0.1, 0.2, 0.3, 1.0); }
 export function image(): view<srgb8> {
   let pixels = transient<vec<float32, 4>>(4);
   run paint(pixels) over pixels.length;
   return view(pixels, 2, 2);
-}`, backend.SPIRVProfile)
+}`, spirvProfile)
 	if view := executable.Programs[0].View; view == nil || !view.Fused {
 		t.Fatalf("view plan = %#v", view)
 	}

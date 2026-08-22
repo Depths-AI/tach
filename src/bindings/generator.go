@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"tach/src/backend"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/semantics"
 )
 
 type Artifacts struct {
@@ -163,11 +163,14 @@ type HostLayoutField struct {
 	Type   *HostLayout `json:"type"`
 }
 
-func Generate(logical *ir.Module, web, spirv *backend.Executable) (*Artifacts, error) {
-	if err := ir.Verify(logical); err != nil {
+func Generate(program *semantics.Result) (*Artifacts, error) {
+	if program == nil || program.Module == nil || program.Web == nil || program.SPIRV == nil {
+		return nil, fmt.Errorf("incomplete semantic program")
+	}
+	if err := ir.Verify(program.Module); err != nil {
 		return nil, err
 	}
-	metadata, err := buildMetadata(logical, web, spirv)
+	metadata, err := buildMetadata(program.Module, program.Web, program.SPIRV)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +182,7 @@ func Generate(logical *ir.Module, web, spirv *backend.Executable) (*Artifacts, e
 	return &Artifacts{Metadata: metadata, MetadataJSON: metadataJSON}, nil
 }
 
-func buildMetadata(logical *ir.Module, web, spirv *backend.Executable) (*Metadata, error) {
+func buildMetadata(logical *ir.Module, web, spirv *semantics.Executable) (*Metadata, error) {
 	metadata := &Metadata{Schema: 2, Types: []TypeMetadata{}, Programs: []PublicProgramMeta{}}
 	for _, t := range logical.Kernel.Structs {
 		item := TypeMetadata{Name: t.Name, Fields: []FieldMeta{}}
@@ -267,15 +270,15 @@ func externalResource(resource ir.Resource) (ExternalResourceMeta, error) {
 	return out, err
 }
 
-func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
-	if err := backend.Verify(executable); err != nil {
+func targetMetadata(executable *semantics.Executable) (*TargetPlanMeta, error) {
+	if err := semantics.Verify(executable); err != nil {
 		return nil, err
 	}
 	target := &TargetPlanMeta{Kernels: []PhysicalKernelMeta{}, Programs: []ProgramPlanMeta{}}
-	target.Features = backend.RequiredFeatures(executable)
-	if executable.Target == backend.SPIRV {
-		target.Vulkan = backend.VulkanVersion
-		target.SPIRV = backend.SPIRVVersion
+	target.Features = semantics.RequiredFeatures(executable)
+	if executable.Target == semantics.SPIRV {
+		target.Vulkan = semantics.VulkanVersion
+		target.SPIRV = semantics.SPIRVVersion
 	}
 	for _, kernel := range executable.PhysicalKernels {
 		item := PhysicalKernelMeta{EntryPoint: kernel.Entry, WorkgroupSize: kernel.Workgroup, Bindings: []BindingMeta{}}
@@ -305,7 +308,7 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 	for _, plan := range executable.Programs {
 		program := executable.Logical.Programs[plan.Program]
 		item := ProgramPlanMeta{Program: plan.Program, Transients: []TransientMeta{}, Steps: []StepMeta{}, Repeat: "program"}
-		if plan.Repeat == backend.RepeatInvocationLoop {
+		if plan.Repeat == semantics.RepeatInvocationLoop {
 			item.Repeat = "invocation-loop"
 		}
 		for _, transient := range plan.Transients {
@@ -347,8 +350,8 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 	return target, nil
 }
 
-func stepMetadata(program *ir.Program, kernels []backend.PhysicalKernel, step backend.Step) (StepMeta, error) {
-	if step.Kind == backend.BarrierStepKind {
+func stepMetadata(program *ir.Program, kernels []semantics.PhysicalKernel, step semantics.Step) (StepMeta, error) {
+	if step.Kind == semantics.BarrierStepKind {
 		return barrierMetadata(step.Barrier), nil
 	}
 	out := StepMeta{Kind: "dispatch", Kernel: step.Kernel, Domain: []ShapeExpression{}, Resources: []ResourceSourceMeta{}, Parameters: []ValueSource{}}
@@ -361,7 +364,7 @@ func stepMetadata(program *ir.Program, kernels []backend.PhysicalKernel, step ba
 	}
 	for _, resource := range step.Resources {
 		kind := "external"
-		if resource.Kind == backend.TransientSource {
+		if resource.Kind == semantics.TransientSource {
 			kind = "transient"
 		}
 		out.Resources = append(out.Resources, ResourceSourceMeta{Binding: resource.Binding, Kind: kind, Resource: resource.Resource})
@@ -382,11 +385,11 @@ func stepMetadata(program *ir.Program, kernels []backend.PhysicalKernel, step ba
 	return out, nil
 }
 
-func barrierMetadata(resources []backend.BarrierResource) StepMeta {
+func barrierMetadata(resources []semantics.BarrierResource) StepMeta {
 	out := StepMeta{Kind: "barrier", Resources: []ResourceSourceMeta{}}
 	for _, resource := range resources {
 		kind := "external"
-		if resource.Kind == backend.TransientSource {
+		if resource.Kind == semantics.TransientSource {
 			kind = "transient"
 		}
 		out.Resources = append(out.Resources, ResourceSourceMeta{Kind: kind, Resource: resource.Resource})
@@ -460,11 +463,11 @@ func ValidateMetadata(metadata *Metadata) error {
 	if metadata.Targets.Web == nil || metadata.Targets.SPIRV == nil {
 		return fmt.Errorf("metadata must contain web and SPIR-V target plans")
 	}
-	if metadata.Targets.Web.Vulkan != "" || metadata.Targets.Web.SPIRV != "" || !validFeatures(metadata.Targets.Web.Features, backend.ShaderF16) {
+	if metadata.Targets.Web.Vulkan != "" || metadata.Targets.Web.SPIRV != "" || !validFeatures(metadata.Targets.Web.Features, semantics.ShaderF16) {
 		return fmt.Errorf("web target contains a Vulkan profile")
 	}
 	spv := metadata.Targets.SPIRV
-	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || !validFeatures(spv.Features, backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory, backend.VulkanMemoryModel, backend.ShaderFloat16, backend.StorageBuffer16BitAccess, backend.UniformAndStorage16BitAccess) || len(spv.Features) < 3 || spv.Features[0] != backend.Synchronization2 || spv.Features[1] != backend.ZeroInitializeWorkgroupMemory || spv.Features[2] != backend.VulkanMemoryModel || len(spv.Features) > 3 && spv.Features[3] != backend.ShaderFloat16 {
+	if spv.Vulkan != semantics.VulkanVersion || spv.SPIRV != semantics.SPIRVVersion || !validFeatures(spv.Features, semantics.Synchronization2, semantics.ZeroInitializeWorkgroupMemory, semantics.VulkanMemoryModel, semantics.ShaderFloat16, semantics.StorageBuffer16BitAccess, semantics.UniformAndStorage16BitAccess) || len(spv.Features) < 3 || spv.Features[0] != semantics.Synchronization2 || spv.Features[1] != semantics.ZeroInitializeWorkgroupMemory || spv.Features[2] != semantics.VulkanMemoryModel || len(spv.Features) > 3 && spv.Features[3] != semantics.ShaderFloat16 {
 		return fmt.Errorf("SPIR-V target profile is invalid")
 	}
 	if (len(metadata.Targets.Web.Features) > 0) != (len(spv.Features) > 3) {

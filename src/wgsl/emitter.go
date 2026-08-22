@@ -4,23 +4,19 @@ import (
 	"fmt"
 	"strings"
 
-	"tach/src/backend"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/semantics"
 )
 
 type program struct {
-	executable *backend.Executable
+	executable *semantics.Executable
 	source     *ir.KernelModule
-	functions  map[*ir.Function]*backend.Coordinates
-	kernels    map[*ir.Function]*backend.PhysicalKernel
+	functions  map[*ir.Function]*semantics.Coordinates
+	kernels    map[*ir.Function]*semantics.PhysicalKernel
 }
 
-func Lower(logical *ir.Module) (*backend.Executable, error) {
-	return backend.Lower(logical, backend.WebProfile)
-}
-
-func lower(executable *backend.Executable) (*program, error) {
+func lower(executable *semantics.Executable) (*program, error) {
 	functions, kernels, err := executable.IndexFunctions()
 	if err != nil {
 		return nil, err
@@ -28,7 +24,7 @@ func lower(executable *backend.Executable) (*program, error) {
 	return &program{executable: executable, source: executable.KernelModule, functions: functions, kernels: kernels}, nil
 }
 
-func needs(f *backend.Coordinates, space backend.CoordinateSpace) bool {
+func needs(f *semantics.Coordinates, space semantics.CoordinateSpace) bool {
 	for id, coordinate := range f.Values {
 		if coordinate.Space == space && f.Uses[id] > 0 {
 			return true
@@ -37,15 +33,15 @@ func needs(f *backend.Coordinates, space backend.CoordinateSpace) bool {
 	return false
 }
 
-func expression(f *backend.Coordinates, id ir.ValueID) (string, bool) {
+func expression(f *semantics.Coordinates, id ir.ValueID) (string, bool) {
 	coordinate, ok := f.Values[id]
 	if !ok {
 		return "", false
 	}
 	name, suffix := "_tach_global_index", "."+[]string{"x", "y", "z"}[coordinate.Dimension]
-	if coordinate.Space == backend.Local {
+	if coordinate.Space == semantics.Local {
 		name = "_tach_local_index"
-	} else if coordinate.Space == backend.LocalLinear {
+	} else if coordinate.Space == semantics.LocalLinear {
 		name, suffix = "_tach_local_linear", ""
 	}
 	return name + suffix, true
@@ -72,8 +68,8 @@ type emitter struct {
 	kernelIndex map[*ir.Function]int
 }
 
-func Emit(executable *backend.Executable) (string, error) {
-	if err := backend.Verify(executable); err != nil {
+func Emit(executable *semantics.Executable) (string, error) {
+	if err := semantics.Verify(executable); err != nil {
 		return "", err
 	}
 	p, err := lower(executable)
@@ -148,7 +144,7 @@ func Emit(executable *backend.Executable) (string, error) {
 	return out, nil
 }
 
-func viewTexture(physical *backend.PhysicalKernel, buffer int) bool {
+func viewTexture(physical *semantics.PhysicalKernel, buffer int) bool {
 	return physical != nil && buffer >= 0 && buffer < len(physical.Bindings) && physical.Bindings[buffer].Texture
 }
 
@@ -281,13 +277,13 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	var params []string
 	if f.Kind == ir.Stage {
 		lowered := e.p.functions[f]
-		if needs(lowered, backend.Global) {
+		if needs(lowered, semantics.Global) {
 			params = append(params, "@builtin(global_invocation_id) _tach_global_index: vec3<u32>")
 		}
-		if needs(lowered, backend.Local) {
+		if needs(lowered, semantics.Local) {
 			params = append(params, "@builtin(local_invocation_id) _tach_local_index: vec3<u32>")
 		}
-		if needs(lowered, backend.LocalLinear) {
+		if needs(lowered, semantics.LocalLinear) {
 			params = append(params, "@builtin(local_invocation_index) _tach_local_linear: u32")
 		}
 	} else {
@@ -374,7 +370,7 @@ type placeExpr struct {
 type fnState struct {
 	e       *emitter
 	f       *ir.Function
-	lowered *backend.Coordinates
+	lowered *semantics.Coordinates
 	values  map[ir.ValueID]*foundation.Type
 	places  map[ir.PlaceID]placeExpr
 	loops   []*ir.Loop

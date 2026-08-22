@@ -1,4 +1,4 @@
-package sema
+package semantics
 
 import (
 	"strings"

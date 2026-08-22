@@ -1,4 +1,4 @@
-package opt
+package semantics
 
 import (
 	"fmt"
@@ -8,17 +8,17 @@ import (
 	"tach/src/ir"
 )
 
-func Optimize(module *ir.Module) error {
+func optimize(module *ir.Module) error {
 	if module == nil {
 		return fmt.Errorf("nil logical module")
 	}
-	if err := OptimizeKernel(module.Kernel); err != nil {
+	if err := optimizeKernel(module.Kernel); err != nil {
 		return err
 	}
 	return ir.Verify(module)
 }
 
-func OptimizeKernel(m *ir.KernelModule) error {
+func optimizeKernel(m *ir.KernelModule) error {
 	if err := ir.VerifyKernel(m); err != nil {
 		return fmt.Errorf("pre-optimization IR verification: %w", err)
 	}

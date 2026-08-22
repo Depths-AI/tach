@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"tach/src/backend"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/semantics"
 )
 
 type inputKind uint8
@@ -22,17 +22,13 @@ const (
 )
 
 type program struct {
-	executable *backend.Executable
+	executable *semantics.Executable
 	source     *ir.KernelModule
-	functions  map[*ir.Function]*backend.Coordinates
-	kernels    map[*ir.Function]*backend.PhysicalKernel
+	functions  map[*ir.Function]*semantics.Coordinates
+	kernels    map[*ir.Function]*semantics.PhysicalKernel
 }
 
-func Lower(logical *ir.Module) (*backend.Executable, error) {
-	return backend.Lower(logical, backend.SPIRVProfile)
-}
-
-func lower(executable *backend.Executable) (*program, error) {
+func lower(executable *semantics.Executable) (*program, error) {
 	functions, kernels, err := executable.IndexFunctions()
 	if err != nil {
 		return nil, err
@@ -40,32 +36,32 @@ func lower(executable *backend.Executable) (*program, error) {
 	return &program{executable: executable, source: executable.KernelModule, functions: functions, kernels: kernels}, nil
 }
 
-func inputs(_ *ir.Function, coordinates *backend.Coordinates) map[inputKind]bool {
+func inputs(_ *ir.Function, coordinates *semantics.Coordinates) map[inputKind]bool {
 	used := map[inputKind]bool{}
 	for id, coordinate := range coordinates.Values {
 		if coordinates.Uses[id] == 0 {
 			continue
 		}
 		switch coordinate.Space {
-		case backend.Global:
+		case semantics.Global:
 			used[inputGlobalIndex] = true
-		case backend.Local:
+		case semantics.Local:
 			used[inputLocalIndex] = true
-		case backend.LocalLinear:
+		case semantics.LocalLinear:
 			used[inputLocalLinear] = true
 		}
 	}
 	return used
 }
 
-func coordinate(f *backend.Coordinates, id ir.ValueID) (inputKind, uint32) {
+func coordinate(f *semantics.Coordinates, id ir.ValueID) (inputKind, uint32) {
 	coordinate := f.Values[id]
 	switch coordinate.Space {
-	case backend.Global:
+	case semantics.Global:
 		return inputGlobalIndex, uint32(coordinate.Dimension)
-	case backend.Local:
+	case semantics.Local:
 		return inputLocalIndex, uint32(coordinate.Dimension)
-	case backend.LocalLinear:
+	case semantics.LocalLinear:
 		return inputLocalLinear, 0
 	}
 	panic("unknown lowered coordinate space")
@@ -73,8 +69,8 @@ func coordinate(f *backend.Coordinates, id ir.ValueID) (inputKind, uint32) {
 
 // Emit lowers verified Tach IR to a SPIR-V 1.6 compute module and immediately
 // parses and validates the produced binary with Tach's own SPIR-V validator.
-func Emit(executable *backend.Executable) ([]byte, error) {
-	if err := backend.Verify(executable); err != nil {
+func Emit(executable *semantics.Executable) ([]byte, error) {
+	if err := semantics.Verify(executable); err != nil {
 		return nil, fmt.Errorf("executable verification: %w", err)
 	}
 	p, err := lower(executable)
@@ -184,12 +180,12 @@ func (b *builder) build() error {
 	emit(&b.capabilities, OpCapability, CapabilityShader)
 	if ir.UsesKind(b.m, foundation.Float16Kind) {
 		emit(&b.capabilities, OpCapability, CapabilityFloat16)
-		features := backend.RequiredFeatures(b.p.executable)
+		features := semantics.RequiredFeatures(b.p.executable)
 		for _, feature := range features {
 			switch feature {
-			case backend.StorageBuffer16BitAccess:
+			case semantics.StorageBuffer16BitAccess:
 				emit(&b.capabilities, OpCapability, CapabilityStorageBuffer16BitAccess)
-			case backend.UniformAndStorage16BitAccess:
+			case semantics.UniformAndStorage16BitAccess:
 				emit(&b.capabilities, OpCapability, CapabilityUniformAndStorage16BitAccess)
 			}
 		}

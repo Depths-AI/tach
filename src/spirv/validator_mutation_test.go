@@ -6,9 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 )
 
 func compileSourceForMutation(t *testing.T, source string) []byte {
@@ -17,16 +16,11 @@ func compileSourceForMutation(t *testing.T, source string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	result, err := semantics.Build([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	opt.Optimize(m)
-	executable, err := Lower(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin, err := Emit(executable)
+	bin, err := Emit(result.SPIRV)
 	if err != nil {
 		t.Fatal(err)
 	}

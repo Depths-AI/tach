@@ -1,4 +1,4 @@
-package backend
+package semantics
 
 import (
 	"strconv"
@@ -27,7 +27,7 @@ type Coordinates struct {
 	Uses     map[ir.ValueID]int
 }
 
-func LowerCoordinates(f *ir.Function) (*Coordinates, error) {
+func lowerCoordinates(f *ir.Function) (*Coordinates, error) {
 	uses, _, err := ir.UseCounts(f)
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func LowerCoordinates(f *ir.Function) (*Coordinates, error) {
 	return coordinates, nil
 }
 
-func OptimizeCoordinates(f *ir.Function, workgroup [3]uint32, coordinates *Coordinates) {
+func optimizeCoordinates(f *ir.Function, workgroup [3]uint32, coordinates *Coordinates) {
 	// Coefficients use uint32 arithmetic, matching Core exactly. The row-major
 	// [1, size.x, size.x*size.y] form is the portable local-linear coordinate.
 	want := [3]uint32{}

@@ -1,4 +1,4 @@
-package sema
+package semantics
 
 import (
 	"tach/src/foundation"
@@ -14,7 +14,7 @@ type programSymbol struct {
 	parameter int
 }
 
-func (c *Checker) lowerPrograms() error {
+func (c *analyzer) lowerPrograms() error {
 	var diagnostics foundation.Diagnostics
 	var declarations []*parser.FunctionDecl
 	for _, declaration := range c.syntax.Decls {
@@ -47,7 +47,7 @@ func (c *Checker) lowerPrograms() error {
 	return nil
 }
 
-func (c *Checker) lowerIndexedProgram(declaration *parser.FunctionDecl) (*ir.Program, error) {
+func (c *analyzer) lowerIndexedProgram(declaration *parser.FunctionDecl) (*ir.Program, error) {
 	stage := c.kernel.Function(declaration.Name)
 	program := &ir.Program{Name: declaration.Name, Span: declaration.Span, Indexed: true, Rank: len(stage.Indices)}
 	symbols, current, err := c.addProgramParameters(program, declaration)
@@ -72,7 +72,7 @@ func (c *Checker) lowerIndexedProgram(declaration *parser.FunctionDecl) (*ir.Pro
 	return program, nil
 }
 
-func (c *Checker) lowerProgram(declaration *parser.FunctionDecl) (*ir.Program, error) {
+func (c *analyzer) lowerProgram(declaration *parser.FunctionDecl) (*ir.Program, error) {
 	if len(declaration.Attrs) > 0 {
 		return nil, diag(declaration.Span, "attributes are invalid on public program %s", declaration.Name)
 	}
@@ -213,7 +213,7 @@ func programEnvironment(symbols map[string]programSymbol) env {
 	return environment
 }
 
-func (c *Checker) lowerView(program *ir.Program, expression parser.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) (*ir.View, error) {
+func (c *analyzer) lowerView(program *ir.Program, expression parser.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) (*ir.View, error) {
 	call, ok := expression.(*parser.CallExpr)
 	name, named := callName(call)
 	if !ok || !named || name != "view" || len(call.Args) != 3 {
@@ -247,7 +247,7 @@ func callName(call *parser.CallExpr) (string, bool) {
 	return identifierName(identifier), ok
 }
 
-func (c *Checker) addProgramParameters(program *ir.Program, declaration *parser.FunctionDecl) (map[string]programSymbol, map[ir.ResourceID]ir.VersionID, error) {
+func (c *analyzer) addProgramParameters(program *ir.Program, declaration *parser.FunctionDecl) (map[string]programSymbol, map[ir.ResourceID]ir.VersionID, error) {
 	symbols := map[string]programSymbol{}
 	current := map[ir.ResourceID]ir.VersionID{}
 	for position, parameter := range declaration.Params {
@@ -267,7 +267,7 @@ func (c *Checker) addProgramParameters(program *ir.Program, declaration *parser.
 	return symbols, current, nil
 }
 
-func (c *Checker) bindStageArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, params []parser.Param, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
+func (c *analyzer) bindStageArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, params []parser.Param, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
 	args := make([]parser.Expr, len(params))
 	for i, parameter := range params {
 		args[i] = &parser.IdentExpr{Name: parameter.Name, Span: parameter.Span}
@@ -275,7 +275,7 @@ func (c *Checker) bindStageArguments(program *ir.Program, dispatch *ir.Dispatch,
 	return c.bindRunArguments(program, dispatch, stage, args, symbols, current)
 }
 
-func (c *Checker) bindRunArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, args []parser.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
+func (c *analyzer) bindRunArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, args []parser.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
 	seen := map[ir.ResourceID]bool{}
 	for sourcePosition, formal := range stage.SourceParams {
 		argument := args[sourcePosition]
@@ -312,7 +312,7 @@ func identifierName(identifier *parser.IdentExpr) string {
 	return identifier.Name
 }
 
-func (c *Checker) finishDispatch(program *ir.Program, dispatch *ir.Dispatch, id ir.DispatchID, current map[ir.ResourceID]ir.VersionID) error {
+func (c *analyzer) finishDispatch(program *ir.Program, dispatch *ir.Dispatch, id ir.DispatchID, current map[ir.ResourceID]ir.VersionID) error {
 	stage := c.kernel.Function(dispatch.Stage)
 	summary := ir.AnalyzeAccess(stage)
 	for i := range dispatch.Buffers {
@@ -338,7 +338,7 @@ func finishResources(program *ir.Program, current map[ir.ResourceID]ir.VersionID
 	}
 }
 
-func (c *Checker) lowerProgramValue(program *ir.Program, expression parser.Expr, want *foundation.Type, symbols map[string]programSymbol) (ir.ValueArgument, error) {
+func (c *analyzer) lowerProgramValue(program *ir.Program, expression parser.Expr, want *foundation.Type, symbols map[string]programSymbol) (ir.ValueArgument, error) {
 	if identifier, ok := expression.(*parser.IdentExpr); ok {
 		symbol, exists := symbols[identifier.Name]
 		if exists && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(symbol.type_, want) {
@@ -365,7 +365,7 @@ func (c *Checker) lowerProgramValue(program *ir.Program, expression parser.Expr,
 	return ir.ValueArgument{}, diag(expression.GetSpan(), "program argument is not a supported %s value source", want)
 }
 
-func (c *Checker) lowerShape(program *ir.Program, expression parser.Expr, symbols map[string]programSymbol) (ir.ShapeID, error) {
+func (c *analyzer) lowerShape(program *ir.Program, expression parser.Expr, symbols map[string]programSymbol) (ir.ShapeID, error) {
 	if value, constant, err := c.tryConstant(expression, foundation.Uint32Type, programEnvironment(symbols)); err != nil {
 		return 0, err
 	} else if constant {

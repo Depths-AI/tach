@@ -1,13 +1,11 @@
-package opt_test
+package semantics
 
 import (
 	"strings"
 	"testing"
 
 	"tach/src/ir"
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
 )
 
 func optimized(t *testing.T, name, source string) *ir.KernelModule {
@@ -16,11 +14,11 @@ func optimized(t *testing.T, name, source string) *ir.KernelModule {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	m, err := analyze(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
+	if err := optimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
 	return m.Kernel
@@ -36,7 +34,7 @@ export function dead[i](out: buffer<float32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	m, err := analyze(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +42,7 @@ export function dead[i](out: buffer<float32[]>) {
 	if !strings.Contains(before, "intrinsic sin") || !strings.Contains(before, "intrinsic cos") {
 		t.Fatal("test setup produced no dead intrinsic tree")
 	}
-	if err := opt.OptimizeKernel(m.Kernel); err != nil {
+	if err := optimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
 	after := ir.DumpKernel(m.Kernel)

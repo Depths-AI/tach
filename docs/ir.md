@@ -454,11 +454,12 @@ Vulkan 1.3 feature.
 - barrier uniformity.
 
 Semantic lowering verifies before Flow construction. The optimizer verifies
-before and after its pipeline. Backend and binding boundaries verify again.
+before and after its pipeline. Executable-planning and binding boundaries
+verify again.
 
 ## 10. Target-independent Kernel optimization
 
-`opt.OptimizeKernel` runs:
+The Kernel optimizer in `src/semantics` runs:
 
 ```text
 verify

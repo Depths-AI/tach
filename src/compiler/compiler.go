@@ -9,21 +9,19 @@ import (
 	"os"
 	"path/filepath"
 
-	"tach/src/backend"
 	"tach/src/bindings"
 	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 	"tach/src/spirv"
 	"tach/src/wgsl"
 )
 
 type Result struct {
 	Module          *ir.Module
-	Web             *backend.Executable
-	SPIRVExecutable *backend.Executable
+	Web             *semantics.Executable
+	SPIRVExecutable *semantics.Executable
 	WGSL            string
 	CompressedWGSL  []byte
 	SPIRV           []byte
@@ -128,24 +126,22 @@ func compile(cwd string, build bool, workers int) (*Result, error) {
 	for i := range project.Kernels {
 		modules[i] = project.Kernels[i].Syntax
 	}
-	logical, documentation, err := sema.CheckAndLowerProject(modules, workers)
+	var analyzed *semantics.Result
+	if build {
+		analyzed, err = semantics.Build(modules, workers)
+	} else {
+		analyzed, err = semantics.Describe(modules, workers)
+	}
 	if err != nil {
 		return nil, project.semanticError(err)
 	}
 	for i := range project.Kernels {
-		project.Kernels[i].Documentation = documentation[i]
+		project.Kernels[i].Documentation = analyzed.Documentation[i]
 	}
+	logical := analyzed.Module
+	result := &Result{Module: logical, Web: analyzed.Web, SPIRVExecutable: analyzed.SPIRV, Diagnostics: warnings(project, logical)}
 	if build {
-		if err := opt.Optimize(logical); err != nil {
-			return nil, fmt.Errorf("IR optimization: %w", err)
-		}
-	}
-	result := &Result{Module: logical, Diagnostics: warnings(project, logical)}
-	if build {
-		result.Web, err = wgsl.Lower(logical)
-		if err == nil {
-			result.WGSL, err = wgsl.Emit(result.Web)
-		}
+		result.WGSL, err = wgsl.Emit(result.Web)
 		if err != nil {
 			return nil, fmt.Errorf("web backend: %w", err)
 		}
@@ -153,14 +149,11 @@ func compile(cwd string, build bool, workers int) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("WGSL compression: %w", err)
 		}
-		result.SPIRVExecutable, err = spirv.Lower(logical)
-		if err == nil {
-			result.SPIRV, err = spirv.Emit(result.SPIRVExecutable)
-		}
+		result.SPIRV, err = spirv.Emit(result.SPIRVExecutable)
 		if err != nil {
 			return nil, fmt.Errorf("SPIR-V backend: %w", err)
 		}
-		generated, err := bindings.Generate(logical, result.Web, result.SPIRVExecutable)
+		generated, err := bindings.Generate(analyzed)
 		if err != nil {
 			return nil, fmt.Errorf("bindings: %w", err)
 		}

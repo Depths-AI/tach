@@ -7,7 +7,7 @@ import (
 
 	"tach/src/ir"
 	"tach/src/parser"
-	"tach/src/sema"
+	"tach/src/semantics"
 )
 
 func logical(t *testing.T) *ir.Module {
@@ -16,11 +16,11 @@ func logical(t *testing.T) *ir.Module {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	result, err := semantics.Describe([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m
+	return result.Module
 }
 
 func viewLogical(t *testing.T) *ir.Module {
@@ -37,11 +37,11 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	result, err := semantics.Describe([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m
+	return result.Module
 }
 
 func TestCloneIsIndependentAndDumpIsDeterministic(t *testing.T) {
@@ -100,10 +100,11 @@ export function filled(out: buffer<float32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := sema.CheckAndLower(a)
+	result, err := semantics.Describe([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	m := result.Module
 	constant := m.Programs[0].Dispatches[0].Values[0].Constant
 	clone := ir.Clone(m)
 	clone.Programs[0].Dispatches[0].Values[0].Constant.Bits[0] = math.Float32bits(8)

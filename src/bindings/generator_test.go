@@ -4,12 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"tach/src/backend"
-	"tach/src/opt"
 	"tach/src/parser"
-	"tach/src/sema"
-	"tach/src/spirv"
-	"tach/src/wgsl"
+	"tach/src/semantics"
 )
 
 func generateSource(t *testing.T, source string) (*Artifacts, *Metadata) {
@@ -18,22 +14,11 @@ func generateSource(t *testing.T, source string) (*Artifacts, *Metadata) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logical, err := sema.CheckAndLower(a)
+	result, err := semantics.Build([]*parser.File{a}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.Optimize(logical); err != nil {
-		t.Fatal(err)
-	}
-	web, err := wgsl.Lower(logical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	spv, err := spirv.Lower(logical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	artifacts, err := Generate(logical, web, spv)
+	artifacts, err := Generate(result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,17 +55,17 @@ func TestGenerateCompleteRuntimeMetadata(t *testing.T) {
 		t.Fatalf("entry = %q", got)
 	}
 	spv := metadata.Targets.SPIRV
-	if spv.Vulkan != backend.VulkanVersion || spv.SPIRV != backend.SPIRVVersion || len(spv.Features) != 3 {
+	if spv.Vulkan != semantics.VulkanVersion || spv.SPIRV != semantics.SPIRVVersion || len(spv.Features) != 3 {
 		t.Fatalf("SPIR-V profile = %#v", spv)
 	}
 }
 
 func TestGenerateFloat16Contract(t *testing.T) {
 	_, metadata := generateSource(t, `export function half[i](values: buffer<vec<float16, 3>[]>, factor: float16) { if (i < values.length) { values[i] *= factor; } }`)
-	if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != backend.ShaderF16 {
+	if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != semantics.ShaderF16 {
 		t.Fatalf("web features = %v", got)
 	}
-	want := []string{backend.Synchronization2, backend.ZeroInitializeWorkgroupMemory, backend.VulkanMemoryModel, backend.ShaderFloat16, backend.StorageBuffer16BitAccess, backend.UniformAndStorage16BitAccess}
+	want := []string{semantics.Synchronization2, semantics.ZeroInitializeWorkgroupMemory, semantics.VulkanMemoryModel, semantics.ShaderFloat16, semantics.StorageBuffer16BitAccess, semantics.UniformAndStorage16BitAccess}
 	if got := metadata.Targets.SPIRV.Features; len(got) != len(want) {
 		t.Fatalf("SPIR-V features = %v, want %v", got, want)
 	} else {
@@ -105,13 +90,13 @@ func TestFloat16FeaturesMatchInterfacesExactly(t *testing.T) {
 		name, source string
 		extra        []string
 	}{
-		{"computation", `export function half[i](out: buffer<uint32[]>) { let value: float16 = 1.0; if (i < out.length) { out[i] = uint32(value); } }`, []string{backend.ShaderFloat16}},
-		{"storage", `export function half[i](out: buffer<float16[]>) { if (i < out.length) { out[i] = 1.0; } }`, []string{backend.ShaderFloat16, backend.StorageBuffer16BitAccess}},
-		{"uniform", `export function half[i](out: buffer<uint32[]>, value: float16) { if (i < out.length) { out[i] = uint32(value); } }`, []string{backend.ShaderFloat16, backend.UniformAndStorage16BitAccess}},
+		{"computation", `export function half[i](out: buffer<uint32[]>) { let value: float16 = 1.0; if (i < out.length) { out[i] = uint32(value); } }`, []string{semantics.ShaderFloat16}},
+		{"storage", `export function half[i](out: buffer<float16[]>) { if (i < out.length) { out[i] = 1.0; } }`, []string{semantics.ShaderFloat16, semantics.StorageBuffer16BitAccess}},
+		{"uniform", `export function half[i](out: buffer<uint32[]>, value: float16) { if (i < out.length) { out[i] = uint32(value); } }`, []string{semantics.ShaderFloat16, semantics.UniformAndStorage16BitAccess}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, metadata := generateSource(t, test.source)
-			if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != backend.ShaderF16 {
+			if got := metadata.Targets.Web.Features; len(got) != 1 || got[0] != semantics.ShaderF16 {
 				t.Fatalf("web features = %v", got)
 			}
 			got := metadata.Targets.SPIRV.Features[3:]
@@ -197,9 +182,9 @@ func TestValidateMetadataRejectsCorruptRuntimeSeams(t *testing.T) {
 		"spirv version":  func(m *Metadata) { m.Targets.SPIRV.SPIRV = "1.3" },
 		"feature":        func(m *Metadata) { m.Targets.SPIRV.Features = nil },
 		"optional order": func(m *Metadata) {
-			m.Targets.SPIRV.Features = append(m.Targets.SPIRV.Features, backend.StorageBuffer16BitAccess)
+			m.Targets.SPIRV.Features = append(m.Targets.SPIRV.Features, semantics.StorageBuffer16BitAccess)
 		},
-		"target feature split": func(m *Metadata) { m.Targets.Web.Features = []string{backend.ShaderF16} },
+		"target feature split": func(m *Metadata) { m.Targets.Web.Features = []string{semantics.ShaderF16} },
 		"program count":        func(m *Metadata) { m.Targets.Web.Programs = nil },
 		"program index":        func(m *Metadata) { m.Targets.Web.Programs[0].Program = 1 },
 		"repeat":               func(m *Metadata) { m.Targets.Web.Programs[0].Repeat = "invalid" },

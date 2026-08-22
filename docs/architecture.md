@@ -157,7 +157,8 @@ orchestration, infer resource access, or assign target representation.
 
 ### Semantic analysis
 
-`src/sema` is the language authority. Project-global names are collected
+`src/semantics` is the language authority from parsed syntax through optimized
+logical IR and target executable plans. Project-global names are collected
 before local interfaces or bodies, while each source file receives only its
 own and directly imported declarations. Its order matters:
 
@@ -287,14 +288,14 @@ argument types, resource non-aliasing, definition-before-read, and final
 versions. For a view it additionally proves the format, source element type,
 exact final defined version, and width/height shapes.
 
-Verification is a production boundary. Semantic analysis, optimization,
-backend lowering, emission, and binding generation do not accept malformed IR
-as a recoverable variant.
+Verification is a production boundary. Semantic resolution, optimization,
+executable planning, emission, and binding generation do not accept malformed
+IR as a recoverable variant.
 
 ## 6. Target-neutral optimization
 
-`src/opt.Optimize` currently optimizes the module's Kernel IR and then
-re-verifies the Flow module. `OptimizeKernel` applies, per function:
+The optimizer inside `src/semantics` transforms the module's Kernel IR and then
+re-verifies the Flow module. It applies, per function:
 
 1. common value/place elimination;
 2. loop-invariant code motion;
@@ -319,8 +320,8 @@ is target representation of the view, not inter-stage fusion.
 
 ## 7. Target executable planning
 
-`src/backend.Lower` clones the optimized logical module for one target profile
-and creates an `Executable` containing:
+The executable planner inside `src/semantics` clones the optimized logical
+module for one target profile and creates an `Executable` containing:
 
 - a target-private Kernel IR module;
 - one `PhysicalKernel` per program dispatch;
@@ -390,8 +391,9 @@ intermediate result and complicates the terminal resource contract.
 
 ## 8. Coordinate lowering
 
-`src/backend/coordinates.go` begins with each named logical index mapped to a
-global coordinate. It then recognizes exact workgroup-local expressions:
+The coordinate planner in `src/semantics/coordinates.go` begins with each
+named logical index mapped to a global coordinate. It then recognizes exact
+workgroup-local expressions:
 
 ```text
 coordinate % matchingWorkgroupDimension
@@ -654,8 +656,8 @@ and all their GPU objects still close independently.
 | semantic analysis | Do declarations and expressions have valid Tach meaning? |
 | Kernel IR verifier | Are per-invocation values, places, control, and effects sound? |
 | Flow verifier | Are programs, shapes, resources, versions, dispatches, and terminal views sound? |
-| optimizer post-verify | Did rewrites preserve both IR contracts? |
-| backend verifier | Are physical kernels and target plans internally consistent? |
+| semantics post-verify | Did rewrites preserve both IR contracts? |
+| executable verifier | Are physical kernels and target plans internally consistent? |
 | WGSL validator | Did Tach serialize its supported WGSL shape correctly? |
 | SPIR-V validator | Is the binary structurally, semantically, and ABI valid? |
 | generated validator | Do metadata, view contracts, JS, declarations, and plans agree? |
@@ -672,9 +674,8 @@ compiler's assumptions against real implementations.
 src/foundation   source locations, diagnostics, types, constants, host layout
 src/parser       tokens, comments, recovering grammar, and source-shaped syntax
 src/ir           Kernel and Flow IR, verification, analysis, host parameter plans
-src/sema         language checking and both IR lowerings
-src/opt          target-neutral Kernel IR optimization
-src/backend      target executable planning, coordinate lowering, target profile
+src/semantics    language checking, both IR lowerings, optimization,
+                 executable and coordinate planning, target profiles
 src/wgsl         WGSL emission and validation
 src/spirv        SPIR-V emission, decoding, validation, and summaries
 src/bindings     target metadata and target-neutral project descriptions
@@ -694,8 +695,8 @@ complete repository package graph as part of the cycle check.
 
 Tests mirror ownership:
 
-- parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
-  binding, and emitter tests cover local contracts and rejection cases;
+- parser, semantics, Kernel IR, Flow IR, layout, binding, and emitter tests
+  cover local contracts and rejection cases;
 - compiler tests check strict manifests, one-tier discovery, import visibility,
   both DAGs, global names, error recovery, formatter transactions, exact unified
   artifact sets, wide one/many-worker determinism, complete multi-file error

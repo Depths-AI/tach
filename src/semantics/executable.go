@@ -1,4 +1,4 @@
-package backend
+package semantics
 
 import (
 	"fmt"
@@ -28,7 +28,7 @@ const (
 	srgbHelper                    = "$tach_srgb"
 )
 
-type Profile struct {
+type profile struct {
 	Target             Target
 	MaxWorkgroup       [3]uint32
 	MaxInvocations     uint32
@@ -37,8 +37,8 @@ type Profile struct {
 	MaxSharedBytes     uint32
 }
 
-var WebProfile = Profile{Target: Web, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024}
-var SPIRVProfile = Profile{Target: SPIRV, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024}
+var webProfile = profile{Target: Web, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024}
+var spirvProfile = profile{Target: SPIRV, MaxWorkgroup: [3]uint32{256, 256, 64}, MaxInvocations: 256, MaxStorageBindings: 8, MaxUniformBytes: 16 * 1024, MaxSharedBytes: 16 * 1024}
 
 type StorageBinding struct {
 	Buffer          int
@@ -183,7 +183,7 @@ func (e *Executable) IndexFunctions() (map[*ir.Function]*Coordinates, map[*ir.Fu
 		if coordinates[function] != nil {
 			continue
 		}
-		lowered, err := LowerCoordinates(function)
+		lowered, err := lowerCoordinates(function)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -192,7 +192,7 @@ func (e *Executable) IndexFunctions() (map[*ir.Function]*Coordinates, map[*ir.Fu
 	return coordinates, kernels, nil
 }
 
-func Lower(logical *ir.Module, profile Profile) (*Executable, error) {
+func lower(logical *ir.Module, profile profile) (*Executable, error) {
 	if profile.Target != Web && profile.Target != SPIRV {
 		return nil, fmt.Errorf("invalid target profile %q", profile.Target)
 	}
@@ -274,11 +274,11 @@ func Lower(logical *ir.Module, profile Profile) (*Executable, error) {
 			if err != nil {
 				return nil, err
 			}
-			physical.Coordinates, err = LowerCoordinates(function)
+			physical.Coordinates, err = lowerCoordinates(function)
 			if err != nil {
 				return nil, err
 			}
-			OptimizeCoordinates(function, workgroup, physical.Coordinates)
+			optimizeCoordinates(function, workgroup, physical.Coordinates)
 			executable.KernelModule.Functions = append(executable.KernelModule.Functions, function)
 			executable.PhysicalKernels = append(executable.PhysicalKernels, physical)
 			kernelForDispatch[dispatchIndex] = kernelIndex
@@ -582,7 +582,7 @@ func cloneFunction(function *ir.Function) *ir.Function {
 	return module.Functions[0]
 }
 
-func chooseWorkgroup(function *ir.Function, profile Profile) ([3]uint32, error) {
+func chooseWorkgroup(function *ir.Function, profile profile) ([3]uint32, error) {
 	if function.Workgroup.Explicit {
 		size := function.Workgroup.Size
 		product := uint64(1)
@@ -875,7 +875,7 @@ func projectionKernel(target Target) (PhysicalKernel, error) {
 	if err != nil {
 		return PhysicalKernel{}, err
 	}
-	physical.Coordinates, err = LowerCoordinates(function)
+	physical.Coordinates, err = lowerCoordinates(function)
 	if err != nil {
 		return PhysicalKernel{}, err
 	}

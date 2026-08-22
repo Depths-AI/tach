@@ -1,4 +1,4 @@
-package sema_test
+package semantics
 
 import (
 	"errors"
@@ -10,16 +10,15 @@ import (
 	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/parser"
-	"tach/src/sema"
 )
 
-func lower(t *testing.T, name, source string) *ir.Module {
+func analyzeSource(t *testing.T, name, source string) *ir.Module {
 	t.Helper()
 	parsed, err := parser.Parse(name, source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, err := sema.CheckAndLower(parsed)
+	module, err := analyze(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,13 +31,13 @@ func reject(t *testing.T, name, text, want string) foundation.Diagnostic {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = sema.CheckAndLower(parsed)
+	_, err = analyze(parsed)
 	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("CheckAndLower error = %v, want %q", err, want)
+		t.Fatalf("semantic error = %v, want %q", err, want)
 	}
 	var diagnostics foundation.Diagnostics
 	if !errors.As(err, &diagnostics) || len(diagnostics) != 1 {
-		t.Fatalf("CheckAndLower error = %#v, want one source diagnostic", err)
+		t.Fatalf("semantic error = %#v, want one source diagnostic", err)
 	}
 	return diagnostics[0]
 }
@@ -57,7 +56,7 @@ func TestParticlesEndToIR(t *testing.T) {
 		module.Path = "simulation/" + name
 		modules = append(modules, module)
 	}
-	m, _, err := sema.CheckAndLowerProject(modules)
+	m, _, err := analyzeProject(modules, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +68,33 @@ func TestParticlesEndToIR(t *testing.T) {
 	}
 	if strings.Contains(dump, "builtin") {
 		t.Fatalf("Core IR leaked a backend builtin:\n%s", dump)
+	}
+}
+
+func TestBuildProducesOneOptimizedProgramAndIndependentTargetPlans(t *testing.T) {
+	parsed, err := parser.Parse("build.tach", `
+export function fill[i](out: buffer<uint32[]>) {
+  let dead = sin(2.0);
+  let first = i + 1;
+  let second = i + 1;
+  if (i < out.length) { out[i] = first + second; }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Build([]*parser.File{parsed}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dump := ir.DumpKernel(result.Module.Kernel); strings.Contains(dump, "intrinsic sin") || strings.Count(dump, "const uint32 1") != 1 {
+		t.Fatalf("logical program was not optimized once:\n%s", dump)
+	}
+	if result.Web.Target != Web || result.SPIRV.Target != SPIRV || result.Web.Logical == result.Module || result.SPIRV.Logical == result.Module || result.Web.Logical == result.SPIRV.Logical {
+		t.Fatalf("target plans are missing or share mutable logical IR: %#v", result)
+	}
+	result.Web.Logical.Programs[0].Name = "changed"
+	if result.Module.Programs[0].Name != "fill" || result.SPIRV.Logical.Programs[0].Name != "fill" {
+		t.Fatal("web plan mutation escaped its target")
 	}
 }
 
@@ -85,9 +111,9 @@ export function second[i](
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = sema.CheckAndLower(m)
+	_, err = analyze(m)
 	if err == nil || !strings.Contains(err.Error(), "duplicate parameter") {
-		t.Fatalf("CheckAndLower error = %v, want duplicate parameter diagnostic", err)
+		t.Fatalf("semantic error = %v, want duplicate parameter diagnostic", err)
 	}
 }
 
@@ -99,9 +125,9 @@ export function invisible[i](params: uint32) { }
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = sema.CheckAndLower(m)
+	_, err = analyze(m)
 	if err == nil || !strings.Contains(err.Error(), "requires at least one buffer parameter") {
-		t.Fatalf("CheckAndLower error = %v, want buffer-parameter diagnostic", err)
+		t.Fatalf("semantic error = %v, want buffer-parameter diagnostic", err)
 	}
 }
 
@@ -119,7 +145,7 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, err := sema.CheckAndLower(parsed)
+	module, err := analyze(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +199,7 @@ export function constants[i](out: buffer<vec<float32, 3>[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, _, err := sema.CheckAndLowerProject([]*parser.File{shared, main})
+	module, _, err := analyzeProject([]*parser.File{shared, main}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +216,7 @@ export function constants[i](out: buffer<vec<float32, 3>[]>) {
 }
 
 func TestCompileTimeConstantAlgebraCoversEveryValueKind(t *testing.T) {
-	module := lower(t, "algebra.tach", `
+	module := analyzeSource(t, "algebra.tach", `
 const enabled = !false && 3 < 4;
 const signedResult: int32 = -7 + 2 * 3;
 const maskedShift: uint32 = ((0xff & 0x0f) << 36) | 2;
@@ -274,7 +300,7 @@ func TestCompileTimeConstantErrorsAreSpecific(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sema.CheckAndLower(cycle); err == nil || !strings.Contains(err.Error(), "constant cycle") {
+	if _, err := analyze(cycle); err == nil || !strings.Contains(err.Error(), "constant cycle") {
 		t.Fatalf("constant cycle error = %v", err)
 	}
 	diagnostic := reject(t, "runtime-shape.tach", `export function bad(out: buffer<uint32[]>, count: uint32) { const blocks = ceilDiv(count, 256); }`, "not available in compile-time expressions")
@@ -296,7 +322,7 @@ export function step[i](particles: buffer<Particle[]>) { if (i < particles.lengt
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, err := sema.CheckAndLower(m)
+	module, err := analyze(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +342,7 @@ export function step[i](particles: buffer<Particle[]>) { if (i < particles.lengt
 		if parseErr != nil {
 			t.Fatal(parseErr)
 		}
-		if _, checkErr := sema.CheckAndLower(parsed); checkErr == nil {
+		if _, checkErr := analyze(parsed); checkErr == nil {
 			t.Fatalf("accepted invalid documentation: %s", source)
 		}
 	}
@@ -331,9 +357,9 @@ export function invalid[i](out: buffer<uint32[]>, value: uint32) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = sema.CheckAndLower(m)
+	_, err = analyze(m)
 	if err == nil || !strings.Contains(err.Error(), "cannot assign to immutable value value") {
-		t.Fatalf("CheckAndLower error = %v, want immutable-parameter diagnostic", err)
+		t.Fatalf("semantic error = %v, want immutable-parameter diagnostic", err)
 	}
 }
 
@@ -361,7 +387,7 @@ export function halfMath[i](values: buffer<vec<float16, 4>[]>, factor: float16) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, err := sema.CheckAndLower(parsed)
+	module, err := analyze(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +423,7 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, err := sema.CheckAndLower(parsed)
+	module, err := analyze(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +449,7 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 }
 
 func TestFloatBoundsAndStrongCompareExchangeLowerToCoreIR(t *testing.T) {
-	module := lower(t, "bounds-atomic.tach", `
+	module := analyzeSource(t, "bounds-atomic.tach", `
 const bounded: float32 = clamp(0.5, 2.0, 1.0);
 export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, half: buffer<float16[]>, state: buffer<atomic<uint32>[]>) {
   if (i < values.length && i < half.length && i < state.length) {
@@ -490,7 +516,7 @@ export function inferred[i](out: buffer<vec<float32, 4>[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, err := sema.CheckAndLower(parsed)
+	module, err := analyze(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +545,7 @@ export function inferred[i](out: buffer<vec<float32, 4>[]>) {
 }
 
 func TestBooleanVectorsAndMasksLowerToCoreIR(t *testing.T) {
-	module := lower(t, "masks.tach", `
+	module := analyzeSource(t, "masks.tach", `
 const policy: vec<bool, 4> = vec(true, false, true, true);
 const defaults: vec<float32, 4> = select(policy, vec(1, 2, 3, 4), 0);
 const valid: bool = all((defaults > 0.0) | !policy);
@@ -561,7 +587,7 @@ export function masks[i](out: buffer<vec<float32, 4>[]>) {
 	} {
 		reject(t, "invalid-mask.tach", test.source, test.want)
 	}
-	lower(t, "private-mask.tach", `
+	analyzeSource(t, "private-mask.tach", `
 const enabled: vec<bool, 2> = vec(true, false);
 function apply[i](out: buffer<uint32[]>, mask: vec<bool, 2>) {
   if (i < out.length) { out[i] = any(mask) ? 1 : 0; }
@@ -594,7 +620,7 @@ func TestLoopControlPreservesBarrierUniformity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := sema.CheckAndLower(parsed); err != nil {
+		if _, err := analyze(parsed); err != nil {
 			t.Fatalf("uniform loop transfer rejected: %v", err)
 		}
 	}
@@ -611,7 +637,7 @@ export function invalid[i](out: buffer<uint32[]>) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := sema.CheckAndLower(parsed); err == nil || !strings.Contains(err.Error(), "non-uniform control flow") {
+		if _, err := analyze(parsed); err == nil || !strings.Contains(err.Error(), "non-uniform control flow") {
 			t.Fatalf("varying %s barrier error = %v", keyword, err)
 		}
 	}
@@ -656,7 +682,7 @@ func FuzzSemanticCheckingReturnsSourceDiagnostics(f *testing.F) {
 		if err != nil {
 			return
 		}
-		_, err = sema.CheckAndLower(module)
+		_, err = analyze(module)
 		if err != nil && strings.Contains(err.Error(), "internal ") {
 			t.Fatalf("user source reached an internal verifier diagnostic: %v", err)
 		}
