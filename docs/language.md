@@ -259,9 +259,9 @@ export function transform(
 Program declarations do not execute per invocation and have no branches,
 loops, assignment statements, or `@workgroup`. Their bodies contain
 compile-time `const` declarations, runtime shape or transient `let`
-declarations, `run` statements, and the required final return of a declared
-view. They describe a checked dispatch graph; indexed stages contain the actual
-per-invocation code.
+declarations, `run` statements, and, when the result is `view<srgb8>`, the
+required final `return view(...)`. They describe a checked dispatch graph;
+indexed stages contain the actual per-invocation code.
 
 Every struct type is generated into the TypeScript API. An unexported indexed
 stage is Tach-internal; an exported indexed stage and an exported unindexed
@@ -1049,8 +1049,9 @@ attribute       := "@" "workgroup" "(" expression {"," expression} ")"
 docs-attribute  := "@" "docs" "(" docs-clause {"," docs-clause} [","] ")"
 docs-clause     := IDENT "(" [IDENT ","] STRING ")"
 
-type            := (IDENT | "vec" "<" type "," NUMBER ">")
+type            := IDENT ["<" type-arguments ">"]
                    ["[" [expression] "]"]
+type-arguments  := type {"," type} [","] | type "," NUMBER
 
 block           := "{" {statement} "}"
 statement       := const-decl

@@ -2,6 +2,7 @@ package abi
 
 import (
 	"regexp"
+	"strings"
 	"tach/src/ir"
 	"tach/src/types"
 	"testing"
@@ -37,5 +38,15 @@ func TestPlanParametersOmitsEmptyBlock(t *testing.T) {
 	block, err := PlanParameters(&ir.Function{Kind: ir.Stage}, 0)
 	if err != nil || block != nil {
 		t.Fatalf("block=%+v err=%v", block, err)
+	}
+}
+
+func TestPlanParametersRejectsBooleanMasks(t *testing.T) {
+	mask := types.Vec(types.TBool, 2)
+	for _, value := range []*types.Type{mask, {Kind: types.Struct, Name: "Options", Fields: []types.Field{{Name: "mask", Type: mask}}}} {
+		f := &ir.Function{Name: "stage", Kind: ir.Stage, Params: []ir.Param{{Name: "value", Type: value}}}
+		if _, err := PlanParameters(f, 0); err == nil || !strings.Contains(err.Error(), "cannot cross the host parameter ABI") {
+			t.Fatalf("PlanParameters(%s) error = %v", value, err)
+		}
 	}
 }

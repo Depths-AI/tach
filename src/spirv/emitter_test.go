@@ -216,7 +216,8 @@ func TestBooleanVectorsAndMasksSPIRV(t *testing.T) {
 	bin := emitSource(t, "masks.tach", `
 function choose(value: vec<float32, 4>): vec<float32, 4> {
   let inside = value >= -1.0 & value <= 1.0;
-  let changed = inside ^ vec(false, true, false, true);
+  let identity = select(inside, true, false);
+  let changed = select(identity == inside, identity, identity != inside) ^ vec(false, true, false, true);
   let selected = select(changed | value == 0.0, abs(value), -value);
   return all(inside) || any(!changed) ? selected : vec(0.0, 0.0, 0.0, 0.0);
 }
@@ -234,7 +235,7 @@ export function masks[i](out: buffer<vec<float32, 4>[]>) {
 	for _, instruction := range m.Instructions {
 		counts[instruction.Op]++
 	}
-	for _, op := range []spirv.Op{spirv.OpTypeBool, spirv.OpAny, spirv.OpAll, spirv.OpSelect, spirv.OpLogicalNot, spirv.OpLogicalAnd, spirv.OpLogicalOr, spirv.OpLogicalNotEqual, spirv.OpFOrdGreaterThanEqual, spirv.OpFOrdLessThanEqual} {
+	for _, op := range []spirv.Op{spirv.OpTypeBool, spirv.OpAny, spirv.OpAll, spirv.OpSelect, spirv.OpLogicalNot, spirv.OpLogicalAnd, spirv.OpLogicalOr, spirv.OpLogicalEqual, spirv.OpLogicalNotEqual, spirv.OpFOrdGreaterThanEqual, spirv.OpFOrdLessThanEqual} {
 		if counts[op] == 0 {
 			t.Fatalf("mask SPIR-V missing opcode %d", op)
 		}

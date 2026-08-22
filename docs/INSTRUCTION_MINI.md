@@ -141,7 +141,8 @@ requirements gate Float16. Never hand-pack values. See
 Inference is expression-local and order-independent: explicit type, expected
 context, typed sibling, intrinsic domain, default. Nonnegative
 whole literals default to `uint32`, negative whole literals to `int32`, and
-fractions to `float32`. Scalar constructors convert; binary16 is never inferred.
+fractions to `float32`. Scalar constructors convert; binary16 is never the
+unconstrained default and requires a `float16` context or constructor.
 `vec(...)` takes its element type from context or typed arguments, never
 converts values, and has no splat form.
 

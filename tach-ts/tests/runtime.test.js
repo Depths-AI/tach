@@ -892,7 +892,7 @@ test("Float16 buffers, parameters, and device features stay binary16 end to end"
     const buffer = unsupported.buffer(new Float16Array([1, 1, 1, 1]));
     await assert.rejects(
       unsupported.submit(halves.command(0, [buffer, 1], { size: 1 })),
-      /required feature shader-f16/u,
+      /requires Tach float16.*shader-f16.*use float32/u,
     );
   } finally {
     unsupported.close();

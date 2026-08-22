@@ -207,7 +207,8 @@ func TestBooleanVectorsAndMasksWGSL(t *testing.T) {
 	a, err := parser.Parse("masks.tach", `
 function choose(value: vec<float32, 4>): vec<float32, 4> {
   let inside = value >= -1.0 & value <= 1.0;
-  let changed = inside ^ vec(false, true, false, true);
+  let identity = select(inside, true, false);
+  let changed = select(identity == inside, identity, identity != inside) ^ vec(false, true, false, true);
   let selected = select(changed | value == 0.0, abs(value), -value);
   return all(inside) || any(!changed) ? selected : vec(0.0, 0.0, 0.0, 0.0);
 }
@@ -225,7 +226,7 @@ export function masks[i](out: buffer<vec<float32, 4>[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"vec4<bool>", " & ", " | ", " != ", "all(", "any(", "select("} {
+	for _, want := range []string{"vec4<bool>", " & ", " | ", " == ", " != ", "all(", "any(", "select("} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("mask WGSL missing %q:\n%s", want, out)
 		}

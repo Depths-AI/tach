@@ -436,7 +436,7 @@ class VulkanDriver implements Driver {
     return Promise.reject(
       new TachError(
         "vulkan-unavailable",
-        "Vulkan presentation requires a native surface",
+        "present is browser-only; use gpu.submit(view) for offscreen Vulkan computation in Deno",
         { operation: "present" },
       ),
     );

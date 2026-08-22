@@ -282,7 +282,7 @@ class WebDriver implements Driver {
         if (!this.device.features.has(feature as GPUFeatureName)) {
           throw new TachError(
             "device-request-failed",
-            `GPU does not support required feature ${feature}`,
+            `This command requires Tach float16, but the GPU does not support ${feature}; use float32 or a Float16-capable adapter`,
             { operation: kernel.entryPoint },
           );
         }

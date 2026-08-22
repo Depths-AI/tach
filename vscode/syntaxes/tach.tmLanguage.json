@@ -186,7 +186,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.tach",
-          "match": "\\b(void|bool|int32|uint32|float16|float32|vec|buffer|shared|atomic|transient)\\b"
+          "match": "\\b(void|bool|int32|uint32|float16|float32|vec|buffer|shared|atomic|transient|view|srgb8)\\b"
         },
         {
           "name": "entity.name.type.tach",

@@ -434,7 +434,7 @@ void tv_buffer_destroy(tv_buffer *buffer) {
 tv_module *tv_module_create(tv_context *context, const uint8_t *spirv, size_t length, uint32_t features, uint32_t kernel_count) {
   uint32_t magic = 0, version = 0;
   if (!context || !spirv || length < 20 || length % 4 || !kernel_count) return context ? (set_error(context, "invalid SPIR-V module"), NULL) : NULL;
-  if (features & ~context->optional_features) { set_error(context, "Vulkan device lacks required 16-bit shader or storage features"); return NULL; }
+  if (features & ~context->optional_features) { set_error(context, "Tach float16 requires Vulkan 16-bit shader and storage features; use float32 or a Float16-capable device"); return NULL; }
   memcpy(&magic, spirv, 4); memcpy(&version, spirv + 4, 4);
   if (magic != 0x07230203 || version != 0x00010600) { set_error(context, "SPIR-V module must use version 1.6"); return NULL; }
   tv_module *module = (tv_module *)calloc(1, sizeof(*module));

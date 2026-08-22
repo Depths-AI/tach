@@ -616,9 +616,9 @@ function squaredLength(value: vec<float32, 3>): float32 {
 }
 ```
 
-Helper parameters and returns must be constructible values: booleans, numeric
-scalars, numeric vectors, or fixed-footprint structs recursively made from
-those values. A helper cannot:
+Helper parameters and returns must be constructible values: scalar booleans,
+numeric scalars, numeric or boolean vectors, or fixed-footprint structs
+recursively made from those values. A helper cannot:
 
 - receive or access `buffer<T>`;
 - declare or access `shared<T>`;
@@ -3229,8 +3229,9 @@ docs-attribute  := "@" "docs" "(" docs-clause
                    {"," docs-clause} [","] ")"
 docs-clause     := IDENT "(" [IDENT ","] STRING ")"
 
-type            := (IDENT | "vec" "<" type "," NUMBER ">")
+type            := IDENT ["<" type-arguments ">"]
                    ["[" [expression] "]"]
+type-arguments  := type {"," type} [","] | type "," NUMBER
 
 block           := "{" {statement} "}"
 statement       := const-decl

@@ -388,7 +388,7 @@ func (c *Checker) collectFunctions() error {
 				return err
 			}
 			if x.Exported && !buffer && !types.IsHostParameter(t) {
-				return diag(p.Type.GetSpan(), "public value parameter type %s cannot cross the host parameter ABI", t)
+				return diagHelp(p.Type.GetSpan(), "pass uint32 flags and derive boolean masks after loading them", "public parameter type %s has no host representation", t)
 			}
 			if buffer && !sig.indexed && !x.Exported {
 				return diag(p.Span, "helper parameter %s cannot be a buffer", p.Name)
@@ -469,6 +469,9 @@ func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*types.Type,
 			return nil, err
 		}
 		if !types.IsWorkgroupStorable(e) {
+			if types.Contains(e, types.Bool) {
+				return nil, diagHelp(t.Span, "store uint32 flags and derive boolean masks after loading them", "invalid fixed array element type %s", e)
+			}
 			return nil, diag(t.Span, "invalid fixed array element type %s", e)
 		}
 		scope := newEnv()
@@ -714,6 +717,9 @@ func (c *Checker) parameterType(te ast.TypeExpr, allowBuffer bool) (*types.Type,
 		return nil, false, err
 	}
 	if !types.IsHostShareable(t) {
+		if types.Contains(t, types.Bool) {
+			return nil, false, diagHelp(g.Span, "store uint32 flags and derive boolean masks after loading them", "buffer type %s is not host-shareable", t)
+		}
 		return nil, false, diag(g.Span, "buffer type %s is not host-shareable", t)
 	}
 	if _, err := layout.Of(t); err != nil {
@@ -818,6 +824,9 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 			return err
 		}
 		if !types.IsWorkgroupStorable(ty) {
+			if types.Contains(ty, types.Bool) {
+				return diagHelp(x.Span, "store uint32 flags and derive boolean masks after loading them", "shared variable %s has invalid type %s", x.Name, ty)
+			}
 			return diag(x.Span, "shared variable %s has invalid type %s", x.Name, ty)
 		}
 		idx := len(b.fn.WorkgroupVars)
@@ -1020,7 +1029,7 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(x.Cond.GetSpan(), "if condition is %s, want bool", ct)
+		return boolDiag(x.Cond.GetSpan(), "if condition", ct, "reduce the mask with all(mask) or any(mask)")
 	}
 	names := carriedNames([]*ast.BlockStmt{x.Then, x.Else}, e)
 	thenBlock := &ir.Block{}
@@ -1125,7 +1134,7 @@ func (c *Checker) lowerLoop(b *fnBuilder, e env, cond ast.Expr, body *ast.BlockS
 		return err
 	}
 	if !types.Equal(ct, types.TBool) {
-		return diag(cond.GetSpan(), "loop condition is %s, want bool", ct)
+		return boolDiag(cond.GetSpan(), "loop condition", ct, "reduce the mask with all(mask) or any(mask)")
 	}
 	condBlock.Term = &ir.Yield{Values: []ir.ValueID{cv}}
 	bodyBlock := &ir.Block{}
@@ -1509,7 +1518,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 		return 0, nil, err
 	}
 	if !types.Equal(lt, types.TBool) {
-		return 0, nil, diag(x.Left.GetSpan(), "logical operand is %s, want bool", lt)
+		return 0, nil, boolDiag(x.Left.GetSpan(), "logical operand", lt, "use &, |, or ^ for lane-wise mask logic, or all/any to reduce a mask")
 	}
 	then := &ir.Block{}
 	tb := b.child(then)
@@ -1521,7 +1530,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, err
 		}
 		if !types.Equal(rt, types.TBool) {
-			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
+			return 0, nil, boolDiag(x.Right.GetSpan(), "logical operand", rt, "use &, |, or ^ for lane-wise mask logic, or all/any to reduce a mask")
 		}
 		then.Term = &ir.Yield{Values: []ir.ValueID{rv}}
 		id, _, err := c.lowerExpr(eb, e.clone(), &ast.BoolExpr{Value: false, Span: x.Span}, types.TBool)
@@ -1540,7 +1549,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, err
 		}
 		if !types.Equal(rt, types.TBool) {
-			return 0, nil, diag(x.Right.GetSpan(), "logical operand is %s, want bool", rt)
+			return 0, nil, boolDiag(x.Right.GetSpan(), "logical operand", rt, "use &, |, or ^ for lane-wise mask logic, or all/any to reduce a mask")
 		}
 		els.Term = &ir.Yield{Values: []ir.ValueID{rv}}
 	}
@@ -2104,6 +2113,9 @@ func (c *Checker) lowerMaskIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind 
 		return 0, nil, err
 	}
 	if maskType.Kind != types.Vector || maskType.Elem.Kind != types.Bool {
+		if types.Equal(maskType, types.TBool) {
+			return 0, nil, diagHelp(x.Args[0].GetSpan(), "use condition ? whenTrue : whenFalse for scalar choice; select is lane-wise", "select mask must be vec<bool, N>, got %s", maskType)
+		}
 		return 0, nil, diag(x.Args[0].GetSpan(), "select mask must be vec<bool, N>, got %s", maskType)
 	}
 	arms := make([]detachedExpr, 2)
@@ -2256,7 +2268,7 @@ func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *type
 		return c.lowerIntrinsic(b, e, x, kind, expected)
 	}
 	if b.comptime {
-		var err error = diag(x.Span, "call to %q is not available in compile-time expressions", id.Name)
+		var err error = diagHelp(x.Span, "use let inside a function or program when the binding is computed at runtime", "call to %q is not available in compile-time expressions", id.Name)
 		if id.Name == "ceilDiv" {
 			err = &runtimeConstantDependency{err}
 		}
@@ -2503,6 +2515,17 @@ func vectorComponents(name string, lanes int) ([]int, bool) {
 }
 func diag(span source.Span, f string, a ...any) error {
 	return &source.Diagnostic{Span: span, Message: fmt.Sprintf(f, a...)}
+}
+
+func diagHelp(span source.Span, help, f string, a ...any) error {
+	return &source.Diagnostic{Span: span, Message: fmt.Sprintf(f, a...), Help: help}
+}
+
+func boolDiag(span source.Span, subject string, t *types.Type, maskHelp string) error {
+	if t.Kind != types.Vector || t.Elem.Kind != types.Bool {
+		maskHelp = ""
+	}
+	return diagHelp(span, maskHelp, "%s is %s, want bool", subject, t)
 }
 
 func checkRecursion(m *ir.Module) error {
