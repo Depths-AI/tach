@@ -1,9 +1,9 @@
 package sema
 
 import (
-	"tach/src/ast"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/parser"
 )
 
 type programSymbol struct {
@@ -16,9 +16,9 @@ type programSymbol struct {
 
 func (c *Checker) lowerPrograms() error {
 	var diagnostics foundation.Diagnostics
-	var declarations []*ast.FunctionDecl
-	for _, declaration := range c.ast.Decls {
-		function, ok := declaration.(*ast.FunctionDecl)
+	var declarations []*parser.FunctionDecl
+	for _, declaration := range c.syntax.Decls {
+		function, ok := declaration.(*parser.FunctionDecl)
 		if ok && function.Exported {
 			declarations = append(declarations, function)
 		}
@@ -47,7 +47,7 @@ func (c *Checker) lowerPrograms() error {
 	return nil
 }
 
-func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*ir.Program, error) {
+func (c *Checker) lowerIndexedProgram(declaration *parser.FunctionDecl) (*ir.Program, error) {
 	stage := c.kernel.Function(declaration.Name)
 	program := &ir.Program{Name: declaration.Name, Span: declaration.Span, Indexed: true, Rank: len(stage.Indices)}
 	symbols, current, err := c.addProgramParameters(program, declaration)
@@ -72,7 +72,7 @@ func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*ir.Progra
 	return program, nil
 }
 
-func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*ir.Program, error) {
+func (c *Checker) lowerProgram(declaration *parser.FunctionDecl) (*ir.Program, error) {
 	if len(declaration.Attrs) > 0 {
 		return nil, diag(declaration.Span, "attributes are invalid on public program %s", declaration.Name)
 	}
@@ -86,7 +86,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*ir.Program, erro
 	}
 	for index, statement := range declaration.Body.Stmts {
 		switch x := statement.(type) {
-		case *ast.ConstStmt:
+		case *parser.ConstStmt:
 			if _, exists := symbols[x.Name]; exists {
 				return nil, diag(x.Span, "%q is already defined", x.Name)
 			}
@@ -95,11 +95,11 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*ir.Program, erro
 				return nil, err
 			}
 			symbols[x.Name] = programSymbol{type_: value.Type, constant: value, parameter: -1}
-		case *ast.VarStmt:
+		case *parser.VarStmt:
 			if _, exists := symbols[x.Name]; exists {
 				return nil, diag(x.Span, "%q is already defined", x.Name)
 			}
-			if transient, ok := x.Value.(*ast.TransientExpr); ok {
+			if transient, ok := x.Value.(*parser.TransientExpr); ok {
 				elem, err := c.resolveType(transient.Elem)
 				if err != nil {
 					return nil, err
@@ -142,7 +142,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*ir.Program, erro
 				}
 				symbols[x.Name] = programSymbol{shape: shape, type_: foundation.Uint32Type, parameter: -1}
 			}
-		case *ast.RunStmt:
+		case *parser.RunStmt:
 			sig := c.funcs[x.Stage]
 			if sig != nil && !c.visible(x.Stage, x.Span.File) {
 				sig = nil
@@ -178,7 +178,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*ir.Program, erro
 			if err := c.finishDispatch(program, &program.Dispatches[len(program.Dispatches)-1], id, current); err != nil {
 				return nil, err
 			}
-		case *ast.ReturnStmt:
+		case *parser.ReturnStmt:
 			if c.funcs[declaration.Name].view == 0 {
 				return nil, diag(x.Span, "public program %s does not return a view", declaration.Name)
 			}
@@ -213,13 +213,13 @@ func programEnvironment(symbols map[string]programSymbol) env {
 	return environment
 }
 
-func (c *Checker) lowerView(program *ir.Program, expression ast.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) (*ir.View, error) {
-	call, ok := expression.(*ast.CallExpr)
+func (c *Checker) lowerView(program *ir.Program, expression parser.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) (*ir.View, error) {
+	call, ok := expression.(*parser.CallExpr)
 	name, named := callName(call)
 	if !ok || !named || name != "view" || len(call.Args) != 3 {
 		return nil, diag(expression.GetSpan(), "view return must be view(pixels, width, height)")
 	}
-	identifier, ok := call.Args[0].(*ast.IdentExpr)
+	identifier, ok := call.Args[0].(*parser.IdentExpr)
 	symbol, exists := symbols[identifierName(identifier)]
 	pixel := foundation.VectorOf(foundation.Float32Type, 4)
 	if !ok || !exists || symbol.resource == 0 || symbol.type_.Kind != foundation.RuntimeArrayKind || !foundation.Equal(symbol.type_.Elem, pixel) {
@@ -239,15 +239,15 @@ func (c *Checker) lowerView(program *ir.Program, expression ast.Expr, symbols ma
 	return &ir.View{Source: symbol.resource, Input: current[symbol.resource], Width: width, Height: height, Span: expression.GetSpan()}, nil
 }
 
-func callName(call *ast.CallExpr) (string, bool) {
+func callName(call *parser.CallExpr) (string, bool) {
 	if call == nil {
 		return "", false
 	}
-	identifier, ok := call.Callee.(*ast.IdentExpr)
+	identifier, ok := call.Callee.(*parser.IdentExpr)
 	return identifierName(identifier), ok
 }
 
-func (c *Checker) addProgramParameters(program *ir.Program, declaration *ast.FunctionDecl) (map[string]programSymbol, map[ir.ResourceID]ir.VersionID, error) {
+func (c *Checker) addProgramParameters(program *ir.Program, declaration *parser.FunctionDecl) (map[string]programSymbol, map[ir.ResourceID]ir.VersionID, error) {
 	symbols := map[string]programSymbol{}
 	current := map[ir.ResourceID]ir.VersionID{}
 	for position, parameter := range declaration.Params {
@@ -267,20 +267,20 @@ func (c *Checker) addProgramParameters(program *ir.Program, declaration *ast.Fun
 	return symbols, current, nil
 }
 
-func (c *Checker) bindStageArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, params []ast.Param, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
-	args := make([]ast.Expr, len(params))
+func (c *Checker) bindStageArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, params []parser.Param, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
+	args := make([]parser.Expr, len(params))
 	for i, parameter := range params {
-		args[i] = &ast.IdentExpr{Name: parameter.Name, Span: parameter.Span}
+		args[i] = &parser.IdentExpr{Name: parameter.Name, Span: parameter.Span}
 	}
 	return c.bindRunArguments(program, dispatch, stage, args, symbols, current)
 }
 
-func (c *Checker) bindRunArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, args []ast.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
+func (c *Checker) bindRunArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, args []parser.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
 	seen := map[ir.ResourceID]bool{}
 	for sourcePosition, formal := range stage.SourceParams {
 		argument := args[sourcePosition]
 		if formal.Kind == ir.SourceBuffer {
-			identifier, ok := argument.(*ast.IdentExpr)
+			identifier, ok := argument.(*parser.IdentExpr)
 			symbol, exists := symbols[identifierName(identifier)]
 			if !ok || !exists || symbol.resource == 0 {
 				return diag(argument.GetSpan(), "buffer argument %s must name an external buffer or transient", formal.Name)
@@ -305,7 +305,7 @@ func (c *Checker) bindRunArguments(program *ir.Program, dispatch *ir.Dispatch, s
 	return nil
 }
 
-func identifierName(identifier *ast.IdentExpr) string {
+func identifierName(identifier *parser.IdentExpr) string {
 	if identifier == nil {
 		return ""
 	}
@@ -338,8 +338,8 @@ func finishResources(program *ir.Program, current map[ir.ResourceID]ir.VersionID
 	}
 }
 
-func (c *Checker) lowerProgramValue(program *ir.Program, expression ast.Expr, want *foundation.Type, symbols map[string]programSymbol) (ir.ValueArgument, error) {
-	if identifier, ok := expression.(*ast.IdentExpr); ok {
+func (c *Checker) lowerProgramValue(program *ir.Program, expression parser.Expr, want *foundation.Type, symbols map[string]programSymbol) (ir.ValueArgument, error) {
+	if identifier, ok := expression.(*parser.IdentExpr); ok {
 		symbol, exists := symbols[identifier.Name]
 		if exists && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(symbol.type_, want) {
 			return ir.ValueArgument{Kind: ir.ValueFromParameter, Parameter: symbol.parameter}, nil
@@ -365,14 +365,14 @@ func (c *Checker) lowerProgramValue(program *ir.Program, expression ast.Expr, wa
 	return ir.ValueArgument{}, diag(expression.GetSpan(), "program argument is not a supported %s value source", want)
 }
 
-func (c *Checker) lowerShape(program *ir.Program, expression ast.Expr, symbols map[string]programSymbol) (ir.ShapeID, error) {
+func (c *Checker) lowerShape(program *ir.Program, expression parser.Expr, symbols map[string]programSymbol) (ir.ShapeID, error) {
 	if value, constant, err := c.tryConstant(expression, foundation.Uint32Type, programEnvironment(symbols)); err != nil {
 		return 0, err
 	} else if constant {
 		return program.AddShape(ir.Shape{Op: ir.ShapeConstant, Value: value.Bits[0], Span: expression.GetSpan()}), nil
 	}
 	switch x := expression.(type) {
-	case *ast.IdentExpr:
+	case *parser.IdentExpr:
 		symbol, ok := symbols[x.Name]
 		if !ok {
 			return 0, diag(x.Span, "unknown shape symbol %s", x.Name)
@@ -383,7 +383,7 @@ func (c *Checker) lowerShape(program *ir.Program, expression ast.Expr, symbols m
 		if symbol.parameter >= 0 && symbol.resource == 0 && foundation.Equal(symbol.type_, foundation.Uint32Type) {
 			return program.AddShape(ir.Shape{Op: ir.ShapeParameter, Parameter: symbol.parameter, Span: x.Span}), nil
 		}
-	case *ast.MemberExpr:
+	case *parser.MemberExpr:
 		if x.Name == "length" {
 			if symbol, path, final, ok := programPath(x.Base, symbols); ok && symbol.resource != 0 && final.Kind == foundation.RuntimeArrayKind {
 				if resource := program.Resource(symbol.resource); resource != nil && resource.Kind == ir.TransientResourceKind && len(path) == 0 {
@@ -395,7 +395,7 @@ func (c *Checker) lowerShape(program *ir.Program, expression ast.Expr, symbols m
 		if symbol, path, final, ok := programPath(x, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(final, foundation.Uint32Type) {
 			return program.AddShape(ir.Shape{Op: ir.ShapeParameter, Parameter: symbol.parameter, Path: path, Span: x.Span}), nil
 		}
-	case *ast.BinaryExpr:
+	case *parser.BinaryExpr:
 		op := map[string]ir.ShapeOp{"+": ir.ShapeAdd, "-": ir.ShapeSub, "*": ir.ShapeMul, "/": ir.ShapeDiv, "%": ir.ShapeRem}[x.Op]
 		if op == 0 {
 			break
@@ -409,8 +409,8 @@ func (c *Checker) lowerShape(program *ir.Program, expression ast.Expr, symbols m
 			return 0, err
 		}
 		return program.AddShape(ir.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
-	case *ast.CallExpr:
-		identifier, ok := x.Callee.(*ast.IdentExpr)
+	case *parser.CallExpr:
+		identifier, ok := x.Callee.(*parser.IdentExpr)
 		if !ok || len(x.Args) != 2 {
 			break
 		}
@@ -431,12 +431,12 @@ func (c *Checker) lowerShape(program *ir.Program, expression ast.Expr, symbols m
 	return 0, diag(expression.GetSpan(), "expression is not a checked uint32 shape expression")
 }
 
-func programPath(expression ast.Expr, symbols map[string]programSymbol) (programSymbol, []string, *foundation.Type, bool) {
+func programPath(expression parser.Expr, symbols map[string]programSymbol) (programSymbol, []string, *foundation.Type, bool) {
 	switch x := expression.(type) {
-	case *ast.IdentExpr:
+	case *parser.IdentExpr:
 		symbol, ok := symbols[x.Name]
 		return symbol, nil, symbol.type_, ok
-	case *ast.MemberExpr:
+	case *parser.MemberExpr:
 		symbol, path, parent, ok := programPath(x.Base, symbols)
 		if !ok || parent == nil || parent.Kind != foundation.StructKind {
 			return programSymbol{}, nil, nil, false

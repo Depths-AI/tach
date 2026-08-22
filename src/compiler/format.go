@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"tach/src/lexer"
+	"tach/src/parser"
 )
 
 type formatFile struct{ source, next, backup string }
@@ -103,7 +103,7 @@ func rollbackFormat(files []formatFile, moved int) {
 }
 
 func formatSource(file, text string) (string, error) {
-	tokens, diagnostics := lexer.LexRecover(file, text)
+	tokens, diagnostics := parser.Tokenize(file, text)
 	if len(diagnostics) > 0 {
 		return "", diagnostics
 	}
@@ -112,7 +112,7 @@ func formatSource(file, text string) (string, error) {
 	lineStart, blank := true, false
 	topKind := ""
 	type list struct {
-		close     lexer.Kind
+		close     parser.TokenKind
 		multiline bool
 		indented  bool
 		attribute bool
@@ -150,20 +150,20 @@ func formatSource(file, text string) (string, error) {
 		}
 		line, lineStart = 0, true
 	}
-	operator := func(kind lexer.Kind) bool {
-		return kind >= lexer.Assign && kind <= lexer.ShiftRightEq || kind == lexer.Question
+	operator := func(kind parser.TokenKind) bool {
+		return kind >= parser.Assign && kind <= parser.ShiftRightEq || kind == parser.Question
 	}
 	segmentWidth := func(start int) int {
 		width, depth := 0, 0
 		for _, token := range tokens[start:] {
-			if depth == 0 && width > 0 && (operator(token.Kind) || token.Kind == lexer.Colon || token.Kind == lexer.Comma || token.Kind == lexer.Semicolon) {
+			if depth == 0 && width > 0 && (operator(token.Kind) || token.Kind == parser.Colon || token.Kind == parser.Comma || token.Kind == parser.Semicolon) {
 				break
 			}
 			width += len(token.Text) + 1
 			switch token.Kind {
-			case lexer.LParen, lexer.LBracket, lexer.LBrace:
+			case parser.LParen, parser.LBracket, parser.LBrace:
 				depth++
-			case lexer.RParen, lexer.RBracket, lexer.RBrace:
+			case parser.RParen, parser.RBracket, parser.RBrace:
 				if depth == 0 {
 					return width
 				}
@@ -175,7 +175,7 @@ func formatSource(file, text string) (string, error) {
 	remainderWidth := func(start int) int {
 		width := 0
 		for _, token := range tokens[start:] {
-			if token.Kind == lexer.Semicolon {
+			if token.Kind == parser.Semicolon {
 				break
 			}
 			width += len(token.Text) + 1
@@ -183,11 +183,11 @@ func formatSource(file, text string) (string, error) {
 		return width
 	}
 	// DECISION: a four-column margin covers spacing the lexical estimate omits; remove it if wrapping tracks rendered tail width exactly.
-	var previous lexer.Token
+	var previous parser.Token
 	for i, token := range tokens {
-		if token.Kind == lexer.EOF {
-			for _, trivia := range token.Leading {
-				if previous.Kind != lexer.EOF && trivia.Span.Start.Line == previous.Span.End.Line && !lineStart {
+		if token.Kind == parser.EOF {
+			for _, trivia := range token.LeadingComments {
+				if previous.Kind != parser.EOF && trivia.Span.Start.Line == previous.Span.End.Line && !lineStart {
 					space()
 				} else {
 					newline(false)
@@ -197,8 +197,8 @@ func formatSource(file, text string) (string, error) {
 			}
 			break
 		}
-		for _, trivia := range token.Leading {
-			if previous.Kind != lexer.EOF && trivia.Span.Start.Line == previous.Span.End.Line && !lineStart {
+		for _, trivia := range token.LeadingComments {
+			if previous.Kind != parser.EOF && trivia.Span.Start.Line == previous.Span.End.Line && !lineStart {
 				space()
 				write(strings.TrimSuffix(trivia.Text, "\r"))
 				newline(false)
@@ -208,34 +208,34 @@ func formatSource(file, text string) (string, error) {
 				newline(false)
 			}
 		}
-		next := lexer.Token{Kind: lexer.EOF}
+		next := parser.Token{Kind: parser.EOF}
 		if i+1 < len(tokens) {
 			next = tokens[i+1]
 		}
-		trailingComment := len(next.Leading) > 0 && next.Leading[0].Span.Start.Line == token.Span.End.Line
+		trailingComment := len(next.LeadingComments) > 0 && next.LeadingComments[0].Span.Start.Line == token.Span.End.Line
 		if indent == 0 && lineStart && topKind == "" {
-			if token.Kind == lexer.At {
+			if token.Kind == parser.At {
 				topKind = "docs"
 			} else {
 				topKind = token.Text
 			}
 		}
 		switch token.Kind {
-		case lexer.LBrace:
-			_, comma := listWidth(tokens, i, lexer.RBrace)
+		case parser.LBrace:
+			_, comma := listWidth(tokens, i, parser.RBrace)
 			space()
 			write("{")
 			indent++
-			lists = append(lists, list{close: lexer.RBrace, multiline: comma, indented: true})
+			lists = append(lists, list{close: parser.RBrace, multiline: comma, indented: true})
 			if trailingComment {
 				space()
 			} else {
 				newline(false)
 			}
-		case lexer.RBrace:
+		case parser.RBrace:
 			item := lists[len(lists)-1]
 			lists = lists[:len(lists)-1]
-			if item.multiline && previous.Kind != lexer.Comma && previous.Kind != lexer.LBrace {
+			if item.multiline && previous.Kind != parser.Comma && previous.Kind != parser.LBrace {
 				write(",")
 			}
 			indent--
@@ -243,20 +243,20 @@ func formatSource(file, text string) (string, error) {
 			write("}")
 			if trailingComment {
 				space()
-			} else if next.Kind != lexer.Semicolon && next.Kind != lexer.Comma && next.Text != "else" {
+			} else if next.Kind != parser.Semicolon && next.Kind != parser.Comma && next.Text != "else" {
 				newline(indent == 0)
 			}
-		case lexer.Semicolon:
+		case parser.Semicolon:
 			write(";")
 			if parens > 0 {
 				space()
 			} else if trailingComment {
 				space()
 			} else {
-				newline(indent == 0 && (previous.Kind == lexer.RBrace || topKind == "docs" || topKind == "import" && next.Text != "import"))
+				newline(indent == 0 && (previous.Kind == parser.RBrace || topKind == "docs" || topKind == "import" && next.Text != "import"))
 				topKind = ""
 			}
-		case lexer.Comma:
+		case parser.Comma:
 			if len(lists) > 0 && next.Kind == lists[len(lists)-1].close && !lists[len(lists)-1].multiline {
 				break
 			}
@@ -277,7 +277,7 @@ func formatSource(file, text string) (string, error) {
 			} else {
 				space()
 			}
-		case lexer.Colon:
+		case parser.Colon:
 			if len(questions) > 0 && questions[len(questions)-1] == len(lists) {
 				space()
 				write(":")
@@ -286,27 +286,27 @@ func formatSource(file, text string) (string, error) {
 				write(":")
 			}
 			space()
-		case lexer.Dot:
+		case parser.Dot:
 			write(".")
-		case lexer.LParen:
+		case parser.LParen:
 			if previous.Text == "if" || previous.Text == "while" || previous.Text == "for" || previous.Text == "return" {
 				space()
 			}
 			write("(")
 			parens++
-			width, comma := listWidth(tokens, i, lexer.RParen)
+			width, comma := listWidth(tokens, i, parser.RParen)
 			multiline := comma && line+width > 100
-			attribute := i > 1 && tokens[i-1].Kind == lexer.Ident && tokens[i-2].Kind == lexer.At
-			lists = append(lists, list{close: lexer.RParen, multiline: multiline, indented: multiline, attribute: attribute})
+			attribute := i > 1 && tokens[i-1].Kind == parser.Ident && tokens[i-2].Kind == parser.At
+			lists = append(lists, list{close: parser.RParen, multiline: multiline, indented: multiline, attribute: attribute})
 			if multiline {
 				indent++
 				newline(false)
 			}
-		case lexer.RParen:
+		case parser.RParen:
 			item := lists[len(lists)-1]
 			lists = lists[:len(lists)-1]
 			if item.multiline {
-				if previous.Kind != lexer.Comma && previous.Kind != lexer.LParen {
+				if previous.Kind != parser.Comma && previous.Kind != parser.LParen {
 					write(",")
 				}
 				indent--
@@ -314,38 +314,38 @@ func formatSource(file, text string) (string, error) {
 			}
 			write(")")
 			parens--
-			if item.attribute && next.Kind != lexer.Semicolon && next.Kind != lexer.Comma {
+			if item.attribute && next.Kind != parser.Semicolon && next.Kind != parser.Comma {
 				if trailingComment {
 					space()
 				} else {
 					newline(false)
 				}
 			}
-		case lexer.LBracket:
+		case parser.LBracket:
 			write(token.Text)
-			width, comma := listWidth(tokens, i, lexer.RBracket)
+			width, comma := listWidth(tokens, i, parser.RBracket)
 			multiline := comma && line+width > 100
-			lists = append(lists, list{close: lexer.RBracket, multiline: multiline, indented: multiline})
+			lists = append(lists, list{close: parser.RBracket, multiline: multiline, indented: multiline})
 			if multiline {
 				indent++
 				newline(false)
 			}
-		case lexer.RBracket:
+		case parser.RBracket:
 			item := lists[len(lists)-1]
 			lists = lists[:len(lists)-1]
 			if item.multiline {
-				if previous.Kind != lexer.Comma && previous.Kind != lexer.LBracket {
+				if previous.Kind != parser.Comma && previous.Kind != parser.LBracket {
 					write(",")
 				}
 				indent--
 				newline(false)
 			}
 			write(token.Text)
-		case lexer.Less:
+		case parser.Less:
 			if previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" || previous.Text == "vec" {
 				write("<")
 				generics++
-				lists = append(lists, list{close: lexer.Greater})
+				lists = append(lists, list{close: parser.Greater})
 			} else {
 				if line >= 88 {
 					indent++
@@ -359,7 +359,7 @@ func formatSource(file, text string) (string, error) {
 				write("<")
 				space()
 			}
-		case lexer.Greater:
+		case parser.Greater:
 			if generics > 0 {
 				write(">")
 				generics--
@@ -377,7 +377,7 @@ func formatSource(file, text string) (string, error) {
 				write(">")
 				space()
 			}
-		case lexer.ShiftRight:
+		case parser.ShiftRight:
 			if generics >= 2 {
 				write(">>")
 				generics -= 2
@@ -389,10 +389,10 @@ func formatSource(file, text string) (string, error) {
 			}
 		default:
 			if operator(token.Kind) {
-				if token.Kind == lexer.Question {
+				if token.Kind == parser.Question {
 					questions = append(questions, len(lists))
 				}
-				unary := token.Kind == lexer.Bang || token.Kind == lexer.Tilde || token.Kind == lexer.Minus && (previous.Text == "return" || previous.Text == "over" || !endsExpression(previous.Kind))
+				unary := token.Kind == parser.Bang || token.Kind == parser.Tilde || token.Kind == parser.Minus && (previous.Text == "return" || previous.Text == "over" || !endsExpression(previous.Kind))
 				if unary {
 					if previous.Text == "return" {
 						space()
@@ -400,7 +400,7 @@ func formatSource(file, text string) (string, error) {
 					write(token.Text)
 					break
 				}
-				if (line+segmentWidth(i) > 100 || token.Kind == lexer.Question && line+remainderWidth(i) > 96) && token.Kind != lexer.Assign {
+				if (line+segmentWidth(i) > 100 || token.Kind == parser.Question && line+remainderWidth(i) > 96) && token.Kind != parser.Assign {
 					indent++
 					newline(false)
 					write(token.Text)
@@ -412,11 +412,11 @@ func formatSource(file, text string) (string, error) {
 				write(token.Text)
 				space()
 			} else {
-				if token.Kind == lexer.At && previous.Kind == lexer.RParen {
+				if token.Kind == parser.At && previous.Kind == parser.RParen {
 					space()
 				}
-				word := token.Kind == lexer.Ident || token.Kind == lexer.Number || token.Kind == lexer.String
-				previousWord := previous.Kind == lexer.Ident || previous.Kind == lexer.Number || previous.Kind == lexer.String || previous.Kind == lexer.RParen || previous.Kind == lexer.RBracket
+				word := token.Kind == parser.Ident || token.Kind == parser.Number || token.Kind == parser.String
+				previousWord := previous.Kind == parser.Ident || previous.Kind == parser.Number || previous.Kind == parser.String || previous.Kind == parser.RParen || previous.Kind == parser.RBracket
 				if word && previousWord {
 					space()
 				}
@@ -429,29 +429,29 @@ func formatSource(file, text string) (string, error) {
 	return formatted, nil
 }
 
-func listWidth(tokens []lexer.Token, start int, close lexer.Kind) (int, bool) {
+func listWidth(tokens []parser.Token, start int, close parser.TokenKind) (int, bool) {
 	depth, generics, width, comma := 0, 0, 1, false
 	for index, token := range tokens[start+1:] {
 		switch token.Kind {
-		case lexer.LParen, lexer.LBracket, lexer.LBrace:
+		case parser.LParen, parser.LBracket, parser.LBrace:
 			depth++
-		case lexer.RParen, lexer.RBracket, lexer.RBrace:
+		case parser.RParen, parser.RBracket, parser.RBrace:
 			if depth == 0 && token.Kind == close {
 				return width + 1, comma
 			}
 			depth--
-		case lexer.Less:
+		case parser.Less:
 			previous := tokens[start+index]
-			if previous.Kind == lexer.Ident && (previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" || previous.Text == "vec") {
+			if previous.Kind == parser.Ident && (previous.Text == "buffer" || previous.Text == "shared" || previous.Text == "atomic" || previous.Text == "transient" || previous.Text == "view" || previous.Text == "vec") {
 				generics++
 			}
-		case lexer.Greater:
+		case parser.Greater:
 			if generics > 0 {
 				generics--
 			}
-		case lexer.ShiftRight:
+		case parser.ShiftRight:
 			generics = max(0, generics-2)
-		case lexer.Comma:
+		case parser.Comma:
 			comma = comma || depth == 0 && generics == 0
 		}
 		width += len(token.Text) + 1
@@ -459,6 +459,6 @@ func listWidth(tokens []lexer.Token, start int, close lexer.Kind) (int, bool) {
 	return width, comma
 }
 
-func endsExpression(kind lexer.Kind) bool {
-	return kind == lexer.Ident || kind == lexer.Number || kind == lexer.String || kind == lexer.RParen || kind == lexer.RBracket || kind == lexer.RBrace || kind == lexer.PlusPlus || kind == lexer.MinusMinus
+func endsExpression(kind parser.TokenKind) bool {
+	return kind == parser.Ident || kind == parser.Number || kind == parser.String || kind == parser.RParen || kind == parser.RBracket || kind == parser.RBrace || kind == parser.PlusPlus || kind == parser.MinusMinus
 }

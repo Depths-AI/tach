@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"tach/src/foundation"
-	"tach/src/lexer"
 	"tach/src/parser"
 )
 
@@ -757,13 +756,13 @@ func FuzzFormatterPreservesSyntaxAndStabilizes(f *testing.F) {
 			t.Fatalf("formatter is not idempotent:\n%s\n---\n%s\n%v", formatted, again, err)
 		}
 		preserved := func(source string) []string {
-			tokens, _ := lexer.LexRecover("fuzz.tach", source)
+			tokens, _ := parser.Tokenize("fuzz.tach", source)
 			var values []string
 			for _, token := range tokens {
-				for _, trivia := range token.Leading {
+				for _, trivia := range token.LeadingComments {
 					values = append(values, "comment:"+strings.TrimRight(trivia.Text, " \t\r"))
 				}
-				if token.Kind == lexer.String {
+				if token.Kind == parser.String {
 					values = append(values, "string:"+token.Text)
 				}
 			}
@@ -773,10 +772,10 @@ func FuzzFormatterPreservesSyntaxAndStabilizes(f *testing.F) {
 			t.Fatal("formatter changed string or comment contents")
 		}
 		lexemes := func(source string) []string {
-			tokens, _ := lexer.LexRecover("fuzz.tach", source)
+			tokens, _ := parser.Tokenize("fuzz.tach", source)
 			var values []string
 			for i, token := range tokens[:len(tokens)-1] {
-				if token.Kind == lexer.Comma && (tokens[i+1].Kind == lexer.RParen || tokens[i+1].Kind == lexer.RBracket || tokens[i+1].Kind == lexer.RBrace) {
+				if token.Kind == parser.Comma && (tokens[i+1].Kind == parser.RParen || tokens[i+1].Kind == parser.RBracket || tokens[i+1].Kind == parser.RBrace) {
 					continue
 				}
 				values = append(values, fmt.Sprintf("%d:%s", token.Kind, token.Text))

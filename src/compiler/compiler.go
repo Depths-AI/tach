@@ -9,12 +9,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"tach/src/ast"
 	"tach/src/backend"
 	"tach/src/bindings"
 	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/opt"
+	"tach/src/parser"
 	"tach/src/sema"
 	"tach/src/spirv"
 	"tach/src/wgsl"
@@ -124,9 +124,9 @@ func compile(cwd string, build bool, workers int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	modules := make([]*ast.Module, len(project.Kernels))
+	modules := make([]*parser.File, len(project.Kernels))
 	for i := range project.Kernels {
-		modules[i] = project.Kernels[i].AST
+		modules[i] = project.Kernels[i].Syntax
 	}
 	logical, documentation, err := sema.CheckAndLowerProject(modules, workers)
 	if err != nil {

@@ -7,16 +7,16 @@ import (
 	"strconv"
 	"strings"
 
-	"tach/src/ast"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/parser"
 )
 
 type runtimeConstantDependency struct{ error }
 
 func (e *runtimeConstantDependency) Unwrap() error { return e.error }
 
-func (c *Checker) tryConstant(expression ast.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, bool, error) {
+func (c *Checker) tryConstant(expression parser.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, bool, error) {
 	value, err := c.evaluateConstant(expression, expected, environment)
 	var runtime *runtimeConstantDependency
 	if errors.As(err, &runtime) {
@@ -26,8 +26,8 @@ func (c *Checker) tryConstant(expression ast.Expr, expected *foundation.Type, en
 }
 
 func (c *Checker) collectConstants() error {
-	for _, declaration := range c.ast.Decls {
-		item, ok := declaration.(*ast.ConstDecl)
+	for _, declaration := range c.syntax.Decls {
+		item, ok := declaration.(*parser.ConstDecl)
 		if !ok {
 			continue
 		}
@@ -41,8 +41,8 @@ func (c *Checker) collectConstants() error {
 	}
 	var diagnostics foundation.Diagnostics
 	reported := map[string]bool{}
-	for _, declaration := range c.ast.Decls {
-		item, ok := declaration.(*ast.ConstDecl)
+	for _, declaration := range c.syntax.Decls {
+		item, ok := declaration.(*parser.ConstDecl)
 		if !ok || c.consts[item.Name].state == 3 {
 			continue
 		}
@@ -102,7 +102,7 @@ func (c *Checker) resolveConstant(name string, reference foundation.Span) (*foun
 	return definition.value, nil
 }
 
-func (c *Checker) evaluateConstantBinding(typeExpression ast.TypeExpr, expression ast.Expr, environment env) (*foundation.ConstantValue, error) {
+func (c *Checker) evaluateConstantBinding(typeExpression parser.TypeExpr, expression parser.Expr, environment env) (*foundation.ConstantValue, error) {
 	var expected *foundation.Type
 	var err error
 	if typeExpression != nil {
@@ -117,7 +117,7 @@ func (c *Checker) evaluateConstantBinding(typeExpression ast.TypeExpr, expressio
 	return c.evaluateConstant(expression, expected, environment)
 }
 
-func (c *Checker) evaluateConstant(expression ast.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, error) {
+func (c *Checker) evaluateConstant(expression parser.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, error) {
 	block := &ir.Block{}
 	builder := &fnBuilder{
 		fn:       &ir.Function{Kind: ir.Helper, Return: foundation.VoidType, Body: block},

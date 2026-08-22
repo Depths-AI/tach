@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 
-	"tach/src/ast"
 	"tach/src/bindings"
 	"tach/src/foundation"
 	"tach/src/ir"
@@ -39,7 +38,7 @@ type kernel struct {
 	Identity      string
 	Path          string
 	Source        string
-	AST           *ast.Module
+	Syntax        *parser.File
 	Documentation ir.Documentation
 }
 
@@ -305,12 +304,12 @@ func (p *project) parse(workers int, diagnostics *foundation.Diagnostics) {
 				data, err := os.ReadFile(kernel.Path)
 				if err != nil {
 					results[index] = foundation.Diagnostics{{Kind: "source", Span: fileSpan(kernel.Identity + ".tach"), Message: err.Error()}}
-					kernel.AST = &ast.Module{File: kernel.Identity}
+					kernel.Syntax = &parser.File{Path: kernel.Identity}
 					continue
 				}
 				kernel.Source = string(data)
-				kernel.AST, results[index] = parser.ParseRecover(kernel.Identity+".tach", kernel.Source)
-				kernel.AST.File = kernel.Identity
+				kernel.Syntax, results[index] = parser.ParseRecover(kernel.Identity+".tach", kernel.Source)
+				kernel.Syntax.Path = kernel.Identity
 			}
 		}()
 	}
@@ -331,18 +330,18 @@ func (p *project) validate(diagnostics *foundation.Diagnostics) {
 	for i := range p.Kernels {
 		kernel := &p.Kernels[i]
 		byIdentity[kernel.Identity] = kernel
-		for _, declaration := range kernel.AST.Decls {
+		for _, declaration := range kernel.Syntax.Decls {
 			var name string
 			exported := false
 			validate := ir.ValidateExportName
 			switch item := declaration.(type) {
-			case *ast.TypeDecl:
+			case *parser.TypeDecl:
 				name = item.Name
 				exported = true
 				validate = ir.ValidateExportTypeName
-			case *ast.ConstDecl:
+			case *parser.ConstDecl:
 				name = item.Name
-			case *ast.FunctionDecl:
+			case *parser.FunctionDecl:
 				name = item.Name
 				exported = item.Exported
 				if exported {
@@ -371,8 +370,8 @@ func (p *project) validate(diagnostics *foundation.Diagnostics) {
 	for i := range p.Kernels {
 		kernel := &p.Kernels[i]
 		seen := map[string]bool{}
-		for j := range kernel.AST.Imports {
-			item := &kernel.AST.Imports[j]
+		for j := range kernel.Syntax.Imports {
+			item := &kernel.Syntax.Imports[j]
 			if !validImport(item.Target) {
 				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("invalid import %q; want \"<module>/<kernel>\" without .tach", item.Target)})
 				continue
@@ -420,7 +419,7 @@ func graphDiagnostics(kernels []kernel, modules bool) foundation.Diagnostics {
 		if graph[from] == nil {
 			graph[from] = []graphEdge{}
 		}
-		for _, item := range kernel.AST.Imports {
+		for _, item := range kernel.Syntax.Imports {
 			if !validImport(item.Target) || !known[item.Target] {
 				continue
 			}
@@ -589,11 +588,11 @@ func (p *project) description() bindings.ProjectInput {
 	input := bindings.ProjectInput{Name: p.Manifest.Name, Version: p.Manifest.Version, Package: p.Manifest.JavaScript.Package, Title: p.Manifest.Docs.Title, Summary: p.Manifest.Docs.Summary}
 	for _, kernel := range p.Kernels {
 		item := bindings.KernelInput{Module: kernel.Module, Name: kernel.Name, Identity: kernel.Identity, Documentation: kernel.Documentation}
-		for _, declaration := range kernel.AST.Decls {
+		for _, declaration := range kernel.Syntax.Decls {
 			switch value := declaration.(type) {
-			case *ast.TypeDecl:
+			case *parser.TypeDecl:
 				item.Types = append(item.Types, value.Name)
-			case *ast.FunctionDecl:
+			case *parser.FunctionDecl:
 				item.Functions = append(item.Functions, value.Name)
 			}
 		}

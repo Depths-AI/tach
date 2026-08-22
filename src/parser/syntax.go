@@ -1,11 +1,11 @@
-package ast
+package parser
 
 import "tach/src/foundation"
 
 type Node interface{ GetSpan() foundation.Span }
 
-type Module struct {
-	File    string
+type File struct {
+	Path    string
 	Attrs   []Attribute
 	Imports []Import
 	Decls   []Decl

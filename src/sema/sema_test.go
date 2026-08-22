@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"tach/src/ast"
 	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/parser"
@@ -45,7 +44,7 @@ func reject(t *testing.T, name, text, want string) foundation.Diagnostic {
 }
 
 func TestParticlesEndToIR(t *testing.T) {
-	var modules []*ast.Module
+	var modules []*parser.File
 	for _, name := range []string{"types", "particles"} {
 		src, err := os.ReadFile("../../examples/simulation/" + name + ".tach")
 		if err != nil {
@@ -55,7 +54,7 @@ func TestParticlesEndToIR(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		module.File = "simulation/" + name
+		module.Path = "simulation/" + name
 		modules = append(modules, module)
 	}
 	m, _, err := sema.CheckAndLowerProject(modules)
@@ -174,7 +173,7 @@ export function constants[i](out: buffer<vec<float32, 3>[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module, _, err := sema.CheckAndLowerProject([]*ast.Module{shared, main})
+	module, _, err := sema.CheckAndLowerProject([]*parser.File{shared, main})
 	if err != nil {
 		t.Fatal(err)
 	}

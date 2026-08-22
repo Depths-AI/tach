@@ -4,45 +4,43 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"tach/src/ast"
 	"tach/src/foundation"
-	"tach/src/lexer"
 )
 
 type parser struct {
-	toks        []lexer.Token
+	toks        []Token
 	i           int
 	file        string
 	diagnostics foundation.Diagnostics
 }
 
-func Parse(file, src string) (*ast.Module, error) {
-	m, diagnostics := ParseRecover(file, src)
+func Parse(file, src string) (*File, error) {
+	syntax, diagnostics := ParseRecover(file, src)
 	if len(diagnostics) > 0 {
 		return nil, diagnostics
 	}
-	return m, nil
+	return syntax, nil
 }
 
-func ParseRecover(file, src string) (*ast.Module, foundation.Diagnostics) {
-	toks, diagnostics := lexer.LexRecover(file, src)
+func ParseRecover(file, src string) (*File, foundation.Diagnostics) {
+	toks, diagnostics := Tokenize(file, src)
 	p := &parser{toks: toks, file: file}
-	m, parsed := p.moduleRecover()
-	return m, append(diagnostics, parsed...).Sorted()
+	syntax, parsed := p.parseFile()
+	return syntax, append(diagnostics, parsed...).Sorted()
 }
 
-func (p *parser) moduleRecover() (*ast.Module, foundation.Diagnostics) {
-	m := &ast.Module{File: p.file}
+func (p *parser) parseFile() (*File, foundation.Diagnostics) {
+	file := &File{Path: p.file}
 	var diagnostics foundation.Diagnostics
 	importsDone, declarations := false, false
-	for !p.at(lexer.EOF) {
+	for !p.at(EOF) {
 		start := p.i
 		attrs, err := p.attrs()
-		if err == nil && p.at(lexer.Semicolon) {
-			if len(attrs) == 0 || declarations || len(m.Imports) > 0 || len(m.Attrs) > 0 {
+		if err == nil && p.at(Semicolon) {
+			if len(attrs) == 0 || declarations || len(file.Imports) > 0 || len(file.Attrs) > 0 {
 				err = p.err(p.cur(), "kernel documentation must precede declarations and appear at most once before imports")
 			} else {
-				m.Attrs = attrs
+				file.Attrs = attrs
 				p.take()
 				continue
 			}
@@ -51,16 +49,16 @@ func (p *parser) moduleRecover() (*ast.Module, foundation.Diagnostics) {
 			if declarations || importsDone || len(attrs) > 0 {
 				err = p.err(p.cur(), "imports must be contiguous and precede declarations")
 			} else {
-				var item ast.Import
+				var item Import
 				item, err = p.importDecl()
 				if err == nil {
-					m.Imports = append(m.Imports, item)
+					file.Imports = append(file.Imports, item)
 					continue
 				}
 			}
 		} else if err == nil {
-			importsDone, declarations = len(m.Imports) > 0, true
-			var declaration ast.Decl
+			importsDone, declarations = len(file.Imports) > 0, true
+			var declaration Decl
 			switch {
 			case p.text("type"):
 				declaration, err = p.typeDecl(attrs)
@@ -76,14 +74,14 @@ func (p *parser) moduleRecover() (*ast.Module, foundation.Diagnostics) {
 				err = p.err(p.cur(), "expected import, const, type, function, or export function declaration")
 			}
 			if err == nil {
-				m.Decls = append(m.Decls, declaration)
+				file.Decls = append(file.Decls, declaration)
 				continue
 			}
 		}
 		diagnostics = append(diagnostics, diagnostic(err))
 		p.syncTop(start)
 	}
-	return m, append(diagnostics, p.diagnostics...).Sorted()
+	return file, append(diagnostics, p.diagnostics...).Sorted()
 }
 
 func diagnostic(err error) foundation.Diagnostic {
@@ -96,20 +94,20 @@ func diagnostic(err error) foundation.Diagnostic {
 }
 
 func (p *parser) syncTop(start int) {
-	if p.i == start && !p.at(lexer.EOF) {
+	if p.i == start && !p.at(EOF) {
 		p.take()
 	}
 	depth := 0
-	for !p.at(lexer.EOF) {
+	for !p.at(EOF) {
 		switch p.cur().Kind {
-		case lexer.LBrace, lexer.LParen, lexer.LBracket:
+		case LBrace, LParen, LBracket:
 			depth++
-		case lexer.RBrace, lexer.RParen, lexer.RBracket:
+		case RBrace, RParen, RBracket:
 			if depth > 0 {
 				depth--
 			}
 		}
-		if depth == 0 && (p.at(lexer.At) || p.text("import") || p.text("const") || p.text("type") || p.text("function") || p.text("export")) {
+		if depth == 0 && (p.at(At) || p.text("import") || p.text("const") || p.text("type") || p.text("function") || p.text("export")) {
 			return
 		}
 		p.take()
@@ -117,20 +115,20 @@ func (p *parser) syncTop(start int) {
 }
 
 func (p *parser) syncStatement(start int) {
-	if p.i == start && !p.at(lexer.EOF) {
+	if p.i == start && !p.at(EOF) {
 		p.take()
 	}
 	depth := 0
-	for !p.at(lexer.EOF) {
-		if p.at(lexer.RBrace) && depth == 0 {
+	for !p.at(EOF) {
+		if p.at(RBrace) && depth == 0 {
 			return
 		}
 		switch p.cur().Kind {
-		case lexer.LBrace:
+		case LBrace:
 			depth++
-		case lexer.RBrace:
+		case RBrace:
 			depth--
-		case lexer.Semicolon:
+		case Semicolon:
 			p.take()
 			if depth == 0 {
 				return
@@ -141,99 +139,99 @@ func (p *parser) syncStatement(start int) {
 	}
 }
 
-func (p *parser) importDecl() (ast.Import, error) {
+func (p *parser) importDecl() (Import, error) {
 	start := p.take().Span
-	token, err := p.expect(lexer.String)
+	token, err := p.expect(String)
 	if err != nil {
-		return ast.Import{}, err
+		return Import{}, err
 	}
 	var target string
 	if err := json.Unmarshal([]byte(token.Text), &target); err != nil {
-		return ast.Import{}, p.err(token, "invalid import string: %v", err)
+		return Import{}, p.err(token, "invalid import string: %v", err)
 	}
-	semi, err := p.expect(lexer.Semicolon)
+	semi, err := p.expect(Semicolon)
 	if err != nil {
-		return ast.Import{}, err
+		return Import{}, err
 	}
-	return ast.Import{Target: target, Raw: token.Text, Span: join(start, semi.Span)}, nil
+	return Import{Target: target, Raw: token.Text, Span: join(start, semi.Span)}, nil
 }
-func (p *parser) cur() lexer.Token     { return p.toks[p.i] }
-func (p *parser) at(k lexer.Kind) bool { return p.cur().Kind == k }
-func (p *parser) text(s string) bool   { return p.cur().Kind == lexer.Ident && p.cur().Text == s }
-func (p *parser) take() lexer.Token {
+func (p *parser) cur() Token          { return p.toks[p.i] }
+func (p *parser) at(k TokenKind) bool { return p.cur().Kind == k }
+func (p *parser) text(s string) bool  { return p.cur().Kind == Ident && p.cur().Text == s }
+func (p *parser) take() Token {
 	t := p.cur()
 	if p.i < len(p.toks)-1 {
 		p.i++
 	}
 	return t
 }
-func (p *parser) err(t lexer.Token, f string, a ...any) error {
+func (p *parser) err(t Token, f string, a ...any) error {
 	return &foundation.Diagnostic{Span: t.Span, Message: fmt.Sprintf(f, a...)}
 }
-func (p *parser) expect(k lexer.Kind) (lexer.Token, error) {
+func (p *parser) expect(k TokenKind) (Token, error) {
 	if !p.at(k) {
-		return lexer.Token{}, p.err(p.cur(), "expected %s, found %q", k, p.cur().Text)
+		return Token{}, p.err(p.cur(), "expected %s, found %q", k, p.cur().Text)
 	}
 	return p.take(), nil
 }
-func (p *parser) expectText(s string) (lexer.Token, error) {
+func (p *parser) expectText(s string) (Token, error) {
 	if !p.text(s) {
-		return lexer.Token{}, p.err(p.cur(), "expected %q, found %q", s, p.cur().Text)
+		return Token{}, p.err(p.cur(), "expected %q, found %q", s, p.cur().Text)
 	}
 	return p.take(), nil
 }
 
-func (p *parser) typeGreater() (lexer.Token, error) {
-	if p.at(lexer.Greater) {
+func (p *parser) typeGreater() (Token, error) {
+	if p.at(Greater) {
 		return p.take(), nil
 	}
-	if !p.at(lexer.ShiftRight) {
-		return lexer.Token{}, p.err(p.cur(), "expected >, found %q", p.cur().Text)
+	if !p.at(ShiftRight) {
+		return Token{}, p.err(p.cur(), "expected >, found %q", p.cur().Text)
 	}
 	t := p.cur()
 	first := t
-	first.Kind, first.Text, first.Span.End = lexer.Greater, ">", foundation.Position{Offset: t.Span.Start.Offset + 1, Line: t.Span.Start.Line, Column: t.Span.Start.Column + 1}
-	p.toks[p.i] = lexer.Token{Kind: lexer.Greater, Text: ">", Span: foundation.Span{File: t.Span.File, Start: first.Span.End, End: t.Span.End}}
+	first.Kind, first.Text, first.Span.End = Greater, ">", foundation.Position{Offset: t.Span.Start.Offset + 1, Line: t.Span.Start.Line, Column: t.Span.Start.Column + 1}
+	p.toks[p.i] = Token{Kind: Greater, Text: ">", Span: foundation.Span{File: t.Span.File, Start: first.Span.End, End: t.Span.End}}
 	return first, nil
 }
 
 func join(a, b foundation.Span) foundation.Span { a.End = b.End; return a }
-func assignment(k lexer.Kind) bool {
+func assignment(k TokenKind) bool {
 	switch k {
-	case lexer.Assign, lexer.PlusEq, lexer.MinusEq, lexer.StarEq, lexer.SlashEq, lexer.PercentEq, lexer.AmpEq, lexer.PipeEq, lexer.CaretEq, lexer.ShiftLeftEq, lexer.ShiftRightEq:
+	case Assign, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, AmpEq, PipeEq, CaretEq, ShiftLeftEq, ShiftRightEq:
 		return true
 	}
 	return false
 }
 
-func (p *parser) attrs() ([]ast.Attribute, error) {
-	var out []ast.Attribute
-	for p.at(lexer.At) {
+func (p *parser) attrs() ([]Attribute, error) {
+	var out []Attribute
+	for p.at(At) {
 		start := p.take().Span
-		name, err := p.expect(lexer.Ident)
+		name, err := p.expect(Ident)
 		if err != nil {
 			return nil, err
 		}
-		a := ast.Attribute{Name: name.Text, Span: join(start, name.Span)}
-		if p.at(lexer.LParen) {
+		a := Attribute{Name: name.Text, Span: join(start, name.Span)}
+		if p.at(LParen) {
 			p.take()
-			if !p.at(lexer.RParen) {
+			if !p.at(RParen) {
 				for {
 					e, err := p.expr(0)
 					if err != nil {
 						return nil, err
 					}
 					a.Args = append(a.Args, e)
-					if !p.at(lexer.Comma) {
+					if !p.at(Comma) {
 						break
 					}
 					p.take()
-					if p.at(lexer.RParen) {
+					if p.at(RParen) {
 						break
 					}
 				}
 			}
-			r, err := p.expect(lexer.RParen)
+			r, err := p.expect(RParen)
 			if err != nil {
 				return nil, err
 			}
@@ -243,111 +241,111 @@ func (p *parser) attrs() ([]ast.Attribute, error) {
 	}
 	return out, nil
 }
-func (p *parser) typeDecl(attrs []ast.Attribute) (*ast.TypeDecl, error) {
+func (p *parser) typeDecl(attrs []Attribute) (*TypeDecl, error) {
 	start := p.take().Span
-	name, err := p.expect(lexer.Ident)
+	name, err := p.expect(Ident)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = p.expect(lexer.Assign); err != nil {
+	if _, err = p.expect(Assign); err != nil {
 		return nil, err
 	}
-	if _, err = p.expect(lexer.LBrace); err != nil {
+	if _, err = p.expect(LBrace); err != nil {
 		return nil, err
 	}
-	d := &ast.TypeDecl{Name: name.Text, Attrs: attrs}
-	for !p.at(lexer.RBrace) {
-		fn, err := p.expect(lexer.Ident)
+	d := &TypeDecl{Name: name.Text, Attrs: attrs}
+	for !p.at(RBrace) {
+		fn, err := p.expect(Ident)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(lexer.Colon); err != nil {
+		if _, err = p.expect(Colon); err != nil {
 			return nil, err
 		}
 		ty, err := p.typeExpr()
 		if err != nil {
 			return nil, err
 		}
-		f := ast.Field{Name: fn.Text, Type: ty, Span: join(fn.Span, ty.GetSpan())}
+		f := Field{Name: fn.Text, Type: ty, Span: join(fn.Span, ty.GetSpan())}
 		d.Fields = append(d.Fields, f)
-		if p.at(lexer.Comma) || p.at(lexer.Semicolon) {
+		if p.at(Comma) || p.at(Semicolon) {
 			p.take()
-		} else if !p.at(lexer.RBrace) {
+		} else if !p.at(RBrace) {
 			return nil, p.err(p.cur(), "expected ',' or '}' after field")
 		}
 	}
 	r := p.take()
-	if p.at(lexer.Semicolon) {
+	if p.at(Semicolon) {
 		r = p.take()
 	}
 	d.Span = join(start, r.Span)
 	return d, nil
 }
 
-func (p *parser) constDecl() (*ast.ConstDecl, error) {
+func (p *parser) constDecl() (*ConstDecl, error) {
 	start := p.take().Span
 	name, ty, value, end, err := p.binding()
 	if err != nil {
 		return nil, err
 	}
-	return &ast.ConstDecl{Name: name.Text, Type: ty, Value: value, Span: join(start, end)}, nil
+	return &ConstDecl{Name: name.Text, Type: ty, Value: value, Span: join(start, end)}, nil
 }
 
-func (p *parser) binding() (lexer.Token, ast.TypeExpr, ast.Expr, foundation.Span, error) {
-	name, err := p.expect(lexer.Ident)
+func (p *parser) binding() (Token, TypeExpr, Expr, foundation.Span, error) {
+	name, err := p.expect(Ident)
 	if err != nil {
-		return lexer.Token{}, nil, nil, foundation.Span{}, err
+		return Token{}, nil, nil, foundation.Span{}, err
 	}
-	var ty ast.TypeExpr
-	if p.at(lexer.Colon) {
+	var ty TypeExpr
+	if p.at(Colon) {
 		p.take()
 		ty, err = p.typeExpr()
 		if err != nil {
-			return lexer.Token{}, nil, nil, foundation.Span{}, err
+			return Token{}, nil, nil, foundation.Span{}, err
 		}
 	}
-	if _, err = p.expect(lexer.Assign); err != nil {
-		return lexer.Token{}, nil, nil, foundation.Span{}, err
+	if _, err = p.expect(Assign); err != nil {
+		return Token{}, nil, nil, foundation.Span{}, err
 	}
 	value, err := p.expr(0)
 	if err != nil {
-		return lexer.Token{}, nil, nil, foundation.Span{}, err
+		return Token{}, nil, nil, foundation.Span{}, err
 	}
-	semi, err := p.expect(lexer.Semicolon)
+	semi, err := p.expect(Semicolon)
 	return name, ty, value, semi.Span, err
 }
-func (p *parser) params() ([]ast.Param, error) {
-	if _, err := p.expect(lexer.LParen); err != nil {
+func (p *parser) params() ([]Param, error) {
+	if _, err := p.expect(LParen); err != nil {
 		return nil, err
 	}
-	var out []ast.Param
-	if !p.at(lexer.RParen) {
+	var out []Param
+	if !p.at(RParen) {
 		for {
-			n, err := p.expect(lexer.Ident)
+			n, err := p.expect(Ident)
 			if err != nil {
 				return nil, err
 			}
-			if _, err = p.expect(lexer.Colon); err != nil {
+			if _, err = p.expect(Colon); err != nil {
 				return nil, err
 			}
 			ty, err := p.typeExpr()
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, ast.Param{Name: n.Text, Type: ty, Span: join(n.Span, ty.GetSpan())})
-			if !p.at(lexer.Comma) {
+			out = append(out, Param{Name: n.Text, Type: ty, Span: join(n.Span, ty.GetSpan())})
+			if !p.at(Comma) {
 				break
 			}
 			p.take()
-			if p.at(lexer.RParen) {
+			if p.at(RParen) {
 				break
 			}
 		}
 	}
-	_, err := p.expect(lexer.RParen)
+	_, err := p.expect(RParen)
 	return out, err
 }
-func (p *parser) functionDecl(attrs []ast.Attribute) (*ast.FunctionDecl, error) {
+func (p *parser) functionDecl(attrs []Attribute) (*FunctionDecl, error) {
 	start := p.cur().Span
 	exported := false
 	if p.text("export") {
@@ -359,12 +357,12 @@ func (p *parser) functionDecl(attrs []ast.Attribute) (*ast.FunctionDecl, error) 
 	} else {
 		p.take()
 	}
-	n, err := p.expect(lexer.Ident)
+	n, err := p.expect(Ident)
 	if err != nil {
 		return nil, err
 	}
-	var indices []ast.Index
-	if p.at(lexer.LBracket) {
+	var indices []Index
+	if p.at(LBracket) {
 		indices, err = p.indices()
 		if err != nil {
 			return nil, err
@@ -374,8 +372,8 @@ func (p *parser) functionDecl(attrs []ast.Attribute) (*ast.FunctionDecl, error) 
 	if err != nil {
 		return nil, err
 	}
-	var ret ast.TypeExpr
-	if p.at(lexer.Colon) {
+	var ret TypeExpr
+	if p.at(Colon) {
 		p.take()
 		ret, err = p.typeExpr()
 		if err != nil {
@@ -386,54 +384,54 @@ func (p *parser) functionDecl(attrs []ast.Attribute) (*ast.FunctionDecl, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FunctionDecl{Name: n.Text, Exported: exported, Attrs: attrs, Indices: indices, Params: ps, Return: ret, Body: body, Span: join(start, body.Span)}, nil
+	return &FunctionDecl{Name: n.Text, Exported: exported, Attrs: attrs, Indices: indices, Params: ps, Return: ret, Body: body, Span: join(start, body.Span)}, nil
 }
 
-func (p *parser) indices() ([]ast.Index, error) {
-	open, err := p.expect(lexer.LBracket)
+func (p *parser) indices() ([]Index, error) {
+	open, err := p.expect(LBracket)
 	if err != nil {
 		return nil, err
 	}
-	if p.at(lexer.RBracket) {
+	if p.at(RBracket) {
 		return nil, p.err(open, "indexed function requires 1 to 3 logical indices")
 	}
-	var out []ast.Index
-	for !p.at(lexer.RBracket) {
-		n, err := p.expect(lexer.Ident)
+	var out []Index
+	for !p.at(RBracket) {
+		n, err := p.expect(Ident)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, ast.Index{Name: n.Text, Span: n.Span})
-		if !p.at(lexer.Comma) {
+		out = append(out, Index{Name: n.Text, Span: n.Span})
+		if !p.at(Comma) {
 			break
 		}
 		p.take()
-		if p.at(lexer.RBracket) {
+		if p.at(RBracket) {
 			break
 		}
 	}
-	if _, err := p.expect(lexer.RBracket); err != nil {
+	if _, err := p.expect(RBracket); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
-func (p *parser) typeExpr() (ast.TypeExpr, error) {
-	n, err := p.expect(lexer.Ident)
+func (p *parser) typeExpr() (TypeExpr, error) {
+	n, err := p.expect(Ident)
 	if err != nil {
 		return nil, err
 	}
-	var t ast.TypeExpr = &ast.NamedType{Name: n.Text, Span: n.Span}
-	if p.at(lexer.Less) {
+	var t TypeExpr = &NamedType{Name: n.Text, Span: n.Span}
+	if p.at(Less) {
 		p.take()
 		if n.Text == "vec" {
 			elem, err := p.typeExpr()
 			if err != nil {
 				return nil, err
 			}
-			if _, err = p.expect(lexer.Comma); err != nil {
+			if _, err = p.expect(Comma); err != nil {
 				return nil, err
 			}
-			lanes, err := p.expect(lexer.Number)
+			lanes, err := p.expect(Number)
 			if err != nil {
 				return nil, err
 			}
@@ -441,20 +439,20 @@ func (p *parser) typeExpr() (ast.TypeExpr, error) {
 			if err != nil {
 				return nil, err
 			}
-			t = &ast.VectorType{Elem: elem, Lanes: lanes.Text, Span: join(n.Span, r.Span)}
+			t = &VectorType{Elem: elem, Lanes: lanes.Text, Span: join(n.Span, r.Span)}
 		} else {
-			g := &ast.GenericType{Name: n.Text, Span: n.Span}
+			g := &GenericType{Name: n.Text, Span: n.Span}
 			for {
 				x, err := p.typeExpr()
 				if err != nil {
 					return nil, err
 				}
 				g.Args = append(g.Args, x)
-				if !p.at(lexer.Comma) {
+				if !p.at(Comma) {
 					break
 				}
 				p.take()
-				if p.at(lexer.Greater) {
+				if p.at(Greater) {
 					break
 				}
 			}
@@ -466,34 +464,34 @@ func (p *parser) typeExpr() (ast.TypeExpr, error) {
 			t = g
 		}
 	}
-	if p.at(lexer.LBracket) {
+	if p.at(LBracket) {
 		s := t.GetSpan()
 		p.take()
-		if p.at(lexer.RBracket) {
+		if p.at(RBracket) {
 			r := p.take()
-			t = &ast.RuntimeArrayType{Elem: t, Span: join(s, r.Span)}
+			t = &RuntimeArrayType{Elem: t, Span: join(s, r.Span)}
 		} else {
 			count, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
-			r, err := p.expect(lexer.RBracket)
+			r, err := p.expect(RBracket)
 			if err != nil {
 				return nil, err
 			}
-			t = &ast.FixedArrayType{Elem: t, Count: count, Span: join(s, r.Span)}
+			t = &FixedArrayType{Elem: t, Count: count, Span: join(s, r.Span)}
 		}
 	}
 	return t, nil
 }
-func (p *parser) block() (*ast.BlockStmt, error) {
-	l, err := p.expect(lexer.LBrace)
+func (p *parser) block() (*BlockStmt, error) {
+	l, err := p.expect(LBrace)
 	if err != nil {
 		return nil, err
 	}
-	b := &ast.BlockStmt{}
-	for !p.at(lexer.RBrace) {
-		if p.at(lexer.EOF) {
+	b := &BlockStmt{}
+	for !p.at(RBrace) {
+		if p.at(EOF) {
 			return nil, p.err(p.cur(), "unterminated block")
 		}
 		start := p.i
@@ -509,7 +507,7 @@ func (p *parser) block() (*ast.BlockStmt, error) {
 	b.Span = join(l.Span, r.Span)
 	return b, nil
 }
-func (p *parser) stmt() (ast.Stmt, error) {
+func (p *parser) stmt() (Stmt, error) {
 	switch {
 	case p.text("run"):
 		return p.runStmt()
@@ -519,61 +517,61 @@ func (p *parser) stmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ConstStmt{Name: name.Text, Type: ty, Value: value, Span: join(start.Span, end)}, nil
+		return &ConstStmt{Name: name.Text, Type: ty, Value: value, Span: join(start.Span, end)}, nil
 	case p.text("let"):
 		start := p.take()
-		n, err := p.expect(lexer.Ident)
+		n, err := p.expect(Ident)
 		if err != nil {
 			return nil, err
 		}
-		var ty ast.TypeExpr
-		if p.at(lexer.Colon) {
+		var ty TypeExpr
+		if p.at(Colon) {
 			p.take()
 			ty, err = p.typeExpr()
 			if err != nil {
 				return nil, err
 			}
 		}
-		if !p.at(lexer.Assign) {
-			shared, ok := ty.(*ast.GenericType)
+		if !p.at(Assign) {
+			shared, ok := ty.(*GenericType)
 			if !ok || shared.Name != "shared" || len(shared.Args) != 1 {
 				return nil, p.err(p.cur(), "expected '=' or an uninitialized shared<T> declaration")
 			}
-			semi, err := p.expect(lexer.Semicolon)
+			semi, err := p.expect(Semicolon)
 			if err != nil {
 				return nil, err
 			}
-			return &ast.WorkgroupStmt{Name: n.Text, Type: shared.Args[0], Span: join(start.Span, semi.Span)}, nil
+			return &WorkgroupStmt{Name: n.Text, Type: shared.Args[0], Span: join(start.Span, semi.Span)}, nil
 		}
-		if _, err = p.expect(lexer.Assign); err != nil {
+		if _, err = p.expect(Assign); err != nil {
 			return nil, err
 		}
 		v, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		semi, err := p.expect(lexer.Semicolon)
+		semi, err := p.expect(Semicolon)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.VarStmt{Name: n.Text, Type: ty, Value: v, Span: join(start.Span, semi.Span)}, nil
+		return &VarStmt{Name: n.Text, Type: ty, Value: v, Span: join(start.Span, semi.Span)}, nil
 	case p.text("if"):
 		start := p.take().Span
-		if _, err := p.expect(lexer.LParen); err != nil {
+		if _, err := p.expect(LParen); err != nil {
 			return nil, err
 		}
 		c, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(lexer.RParen); err != nil {
+		if _, err = p.expect(RParen); err != nil {
 			return nil, err
 		}
 		th, err := p.block()
 		if err != nil {
 			return nil, err
 		}
-		var el *ast.BlockStmt
+		var el *BlockStmt
 		end := th.Span
 		if p.text("else") {
 			p.take()
@@ -582,9 +580,9 @@ func (p *parser) stmt() (ast.Stmt, error) {
 				if err != nil {
 					return nil, err
 				}
-				el = &ast.BlockStmt{Stmts: []ast.Stmt{nested}, Span: nested.GetSpan()}
+				el = &BlockStmt{Stmts: []Stmt{nested}, Span: nested.GetSpan()}
 				end = el.Span
-				return &ast.IfStmt{Cond: c, Then: th, Else: el, Span: join(start, end)}, nil
+				return &IfStmt{Cond: c, Then: th, Else: el, Span: join(start, end)}, nil
 			}
 			el, err = p.block()
 			if err != nil {
@@ -592,63 +590,63 @@ func (p *parser) stmt() (ast.Stmt, error) {
 			}
 			end = el.Span
 		}
-		return &ast.IfStmt{Cond: c, Then: th, Else: el, Span: join(start, end)}, nil
+		return &IfStmt{Cond: c, Then: th, Else: el, Span: join(start, end)}, nil
 	case p.text("while"):
 		start := p.take().Span
-		if _, err := p.expect(lexer.LParen); err != nil {
+		if _, err := p.expect(LParen); err != nil {
 			return nil, err
 		}
 		c, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(lexer.RParen); err != nil {
+		if _, err = p.expect(RParen); err != nil {
 			return nil, err
 		}
 		b, err := p.block()
 		if err != nil {
 			return nil, err
 		}
-		return &ast.WhileStmt{Cond: c, Body: b, Span: join(start, b.Span)}, nil
+		return &WhileStmt{Cond: c, Body: b, Span: join(start, b.Span)}, nil
 	case p.text("for"):
 		start := p.take().Span
-		if _, err := p.expect(lexer.LParen); err != nil {
+		if _, err := p.expect(LParen); err != nil {
 			return nil, err
 		}
 		if !p.text("let") {
 			return nil, p.err(p.cur(), "for initializer must be a let declaration")
 		}
 		initStart := p.take()
-		n, err := p.expect(lexer.Ident)
+		n, err := p.expect(Ident)
 		if err != nil {
 			return nil, err
 		}
-		var ty ast.TypeExpr
-		if p.at(lexer.Colon) {
+		var ty TypeExpr
+		if p.at(Colon) {
 			p.take()
 			ty, err = p.typeExpr()
 			if err != nil {
 				return nil, err
 			}
 		}
-		if _, err = p.expect(lexer.Assign); err != nil {
+		if _, err = p.expect(Assign); err != nil {
 			return nil, err
 		}
 		iv, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		semi, err := p.expect(lexer.Semicolon)
+		semi, err := p.expect(Semicolon)
 		if err != nil {
 			return nil, err
 		}
-		init := &ast.VarStmt{Name: n.Text, Type: ty, Value: iv, Span: join(initStart.Span, semi.Span)}
+		init := &VarStmt{Name: n.Text, Type: ty, Value: iv, Span: join(initStart.Span, semi.Span)}
 
 		cond, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(lexer.Semicolon); err != nil {
+		if _, err = p.expect(Semicolon); err != nil {
 			return nil, err
 		}
 
@@ -657,75 +655,75 @@ func (p *parser) stmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		var post ast.Stmt
-		if p.at(lexer.PlusPlus) || p.at(lexer.MinusMinus) {
+		var post Stmt
+		if p.at(PlusPlus) || p.at(MinusMinus) {
 			op := p.take()
 			d := 1
-			if op.Kind == lexer.MinusMinus {
+			if op.Kind == MinusMinus {
 				d = -1
 			}
-			post = &ast.IncStmt{Target: pe, Delta: d, Span: join(postStart, op.Span)}
+			post = &IncStmt{Target: pe, Delta: d, Span: join(postStart, op.Span)}
 		} else if assignment(p.cur().Kind) {
 			op := p.take()
 			pv, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
-			post = &ast.AssignStmt{Target: pe, Op: op.Text, Value: pv, Span: join(postStart, pv.GetSpan())}
+			post = &AssignStmt{Target: pe, Op: op.Text, Value: pv, Span: join(postStart, pv.GetSpan())}
 		} else {
 			return nil, p.err(p.cur(), "for update must be assignment, compound assignment, ++, or --")
 		}
-		if _, err = p.expect(lexer.RParen); err != nil {
+		if _, err = p.expect(RParen); err != nil {
 			return nil, err
 		}
 		body, err := p.block()
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ForStmt{Init: init, Cond: cond, Post: post, Body: body, Span: join(start, body.Span)}, nil
+		return &ForStmt{Init: init, Cond: cond, Post: post, Body: body, Span: join(start, body.Span)}, nil
 	case p.text("break") || p.text("continue"):
 		keyword := p.take()
-		semi, err := p.expect(lexer.Semicolon)
+		semi, err := p.expect(Semicolon)
 		if err != nil {
 			return nil, err
 		}
 		span := join(keyword.Span, semi.Span)
 		if keyword.Text == "break" {
-			return &ast.BreakStmt{Span: span}, nil
+			return &BreakStmt{Span: span}, nil
 		}
-		return &ast.ContinueStmt{Span: span}, nil
+		return &ContinueStmt{Span: span}, nil
 	case p.text("return"):
 		start := p.take().Span
-		var v ast.Expr
+		var v Expr
 		var err error
-		if !p.at(lexer.Semicolon) {
+		if !p.at(Semicolon) {
 			v, err = p.expr(0)
 			if err != nil {
 				return nil, err
 			}
 		}
-		s, err := p.expect(lexer.Semicolon)
+		s, err := p.expect(Semicolon)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ReturnStmt{Value: v, Span: join(start, s.Span)}, nil
+		return &ReturnStmt{Value: v, Span: join(start, s.Span)}, nil
 	}
 	start := p.cur().Span
 	e, err := p.expr(0)
 	if err != nil {
 		return nil, err
 	}
-	if p.at(lexer.PlusPlus) || p.at(lexer.MinusMinus) {
+	if p.at(PlusPlus) || p.at(MinusMinus) {
 		op := p.take()
-		s, err := p.expect(lexer.Semicolon)
+		s, err := p.expect(Semicolon)
 		if err != nil {
 			return nil, err
 		}
 		d := 1
-		if op.Kind == lexer.MinusMinus {
+		if op.Kind == MinusMinus {
 			d = -1
 		}
-		return &ast.IncStmt{Target: e, Delta: d, Span: join(start, s.Span)}, nil
+		return &IncStmt{Target: e, Delta: d, Span: join(start, s.Span)}, nil
 	}
 	if assignment(p.cur().Kind) {
 		op := p.take()
@@ -733,53 +731,53 @@ func (p *parser) stmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		s, err := p.expect(lexer.Semicolon)
+		s, err := p.expect(Semicolon)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.AssignStmt{Target: e, Op: op.Text, Value: v, Span: join(start, s.Span)}, nil
+		return &AssignStmt{Target: e, Op: op.Text, Value: v, Span: join(start, s.Span)}, nil
 	}
-	s, err := p.expect(lexer.Semicolon)
+	s, err := p.expect(Semicolon)
 	if err != nil {
 		return nil, err
 	}
-	return &ast.ExprStmt{Expr: e, Span: join(start, s.Span)}, nil
+	return &ExprStmt{Expr: e, Span: join(start, s.Span)}, nil
 }
 
-func (p *parser) runStmt() (ast.Stmt, error) {
+func (p *parser) runStmt() (Stmt, error) {
 	start := p.take().Span
-	stage, err := p.expect(lexer.Ident)
+	stage, err := p.expect(Ident)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = p.expect(lexer.LParen); err != nil {
+	if _, err = p.expect(LParen); err != nil {
 		return nil, err
 	}
-	var args []ast.Expr
-	if !p.at(lexer.RParen) {
+	var args []Expr
+	if !p.at(RParen) {
 		for {
 			a, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
 			args = append(args, a)
-			if !p.at(lexer.Comma) {
+			if !p.at(Comma) {
 				break
 			}
 			p.take()
-			if p.at(lexer.RParen) {
+			if p.at(RParen) {
 				break
 			}
 		}
 	}
-	if _, err = p.expect(lexer.RParen); err != nil {
+	if _, err = p.expect(RParen); err != nil {
 		return nil, err
 	}
 	if _, err = p.expectText("over"); err != nil {
 		return nil, err
 	}
-	domain := ast.Domain{}
-	if p.at(lexer.LBracket) {
+	domain := Domain{}
+	if p.at(LBracket) {
 		left := p.take().Span
 		for {
 			axis, err := p.expr(0)
@@ -787,15 +785,15 @@ func (p *parser) runStmt() (ast.Stmt, error) {
 				return nil, err
 			}
 			domain.Axes = append(domain.Axes, axis)
-			if !p.at(lexer.Comma) {
+			if !p.at(Comma) {
 				break
 			}
 			p.take()
-			if p.at(lexer.RBracket) {
+			if p.at(RBracket) {
 				break
 			}
 		}
-		right, err := p.expect(lexer.RBracket)
+		right, err := p.expect(RBracket)
 		if err != nil {
 			return nil, err
 		}
@@ -805,38 +803,38 @@ func (p *parser) runStmt() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		domain.Axes = []ast.Expr{axis}
+		domain.Axes = []Expr{axis}
 		domain.Span = axis.GetSpan()
 	}
-	semi, err := p.expect(lexer.Semicolon)
+	semi, err := p.expect(Semicolon)
 	if err != nil {
 		return nil, err
 	}
-	return &ast.RunStmt{Stage: stage.Text, Args: args, Domain: domain, Span: join(start, semi.Span)}, nil
+	return &RunStmt{Stage: stage.Text, Args: args, Domain: domain, Span: join(start, semi.Span)}, nil
 }
 
-var prec = map[lexer.Kind]int{
-	lexer.OrOr:       1,
-	lexer.AndAnd:     2,
-	lexer.Pipe:       3,
-	lexer.Caret:      4,
-	lexer.Amp:        5,
-	lexer.EqEq:       6,
-	lexer.NotEq:      6,
-	lexer.Less:       7,
-	lexer.LessEq:     7,
-	lexer.Greater:    7,
-	lexer.GreaterEq:  7,
-	lexer.ShiftLeft:  8,
-	lexer.ShiftRight: 8,
-	lexer.Plus:       9,
-	lexer.Minus:      9,
-	lexer.Star:       10,
-	lexer.Slash:      10,
-	lexer.Percent:    10,
+var prec = map[TokenKind]int{
+	OrOr:       1,
+	AndAnd:     2,
+	Pipe:       3,
+	Caret:      4,
+	Amp:        5,
+	EqEq:       6,
+	NotEq:      6,
+	Less:       7,
+	LessEq:     7,
+	Greater:    7,
+	GreaterEq:  7,
+	ShiftLeft:  8,
+	ShiftRight: 8,
+	Plus:       9,
+	Minus:      9,
+	Star:       10,
+	Slash:      10,
+	Percent:    10,
 }
 
-func (p *parser) expr(min int) (ast.Expr, error) {
+func (p *parser) expr(min int) (Expr, error) {
 	x, err := p.prefix()
 	if err != nil {
 		return nil, err
@@ -851,169 +849,169 @@ func (p *parser) expr(min int) (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		x = &ast.BinaryExpr{Op: op.Text, Left: x, Right: r, Span: join(x.GetSpan(), r.GetSpan())}
+		x = &BinaryExpr{Op: op.Text, Left: x, Right: r, Span: join(x.GetSpan(), r.GetSpan())}
 	}
-	if min == 0 && p.at(lexer.Question) {
+	if min == 0 && p.at(Question) {
 		p.take()
 		thenExpr, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := p.expect(lexer.Colon); err != nil {
+		if _, err := p.expect(Colon); err != nil {
 			return nil, err
 		}
 		elseExpr, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		x = &ast.ConditionalExpr{Cond: x, Then: thenExpr, Else: elseExpr, Span: join(x.GetSpan(), elseExpr.GetSpan())}
+		x = &ConditionalExpr{Cond: x, Then: thenExpr, Else: elseExpr, Span: join(x.GetSpan(), elseExpr.GetSpan())}
 	}
 	return x, nil
 }
-func (p *parser) prefix() (ast.Expr, error) {
-	var x ast.Expr
+func (p *parser) prefix() (Expr, error) {
+	var x Expr
 	t := p.cur()
 	switch t.Kind {
-	case lexer.Number:
+	case Number:
 		p.take()
-		x = &ast.NumberExpr{Raw: t.Text, Span: t.Span}
-	case lexer.String:
+		x = &NumberExpr{Raw: t.Text, Span: t.Span}
+	case String:
 		p.take()
 		var value string
 		err := json.Unmarshal([]byte(t.Text), &value)
 		if err != nil {
 			return nil, p.err(t, "invalid string: %v", err)
 		}
-		x = &ast.StringExpr{Value: value, Span: t.Span}
-	case lexer.Ident:
+		x = &StringExpr{Value: value, Span: t.Span}
+	case Ident:
 		p.take()
 		if t.Text == "true" || t.Text == "false" {
-			x = &ast.BoolExpr{Value: t.Text == "true", Span: t.Span}
-		} else if t.Text == "transient" && p.at(lexer.Less) {
+			x = &BoolExpr{Value: t.Text == "true", Span: t.Span}
+		} else if t.Text == "transient" && p.at(Less) {
 			p.take()
 			elem, err := p.typeExpr()
 			if err != nil {
 				return nil, err
 			}
-			if _, err = p.expect(lexer.Greater); err != nil {
+			if _, err = p.expect(Greater); err != nil {
 				return nil, err
 			}
-			if _, err = p.expect(lexer.LParen); err != nil {
+			if _, err = p.expect(LParen); err != nil {
 				return nil, err
 			}
 			count, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
-			right, err := p.expect(lexer.RParen)
+			right, err := p.expect(RParen)
 			if err != nil {
 				return nil, err
 			}
-			return &ast.TransientExpr{Elem: elem, Count: count, Span: join(t.Span, right.Span)}, nil
+			return &TransientExpr{Elem: elem, Count: count, Span: join(t.Span, right.Span)}, nil
 		} else {
-			x = &ast.IdentExpr{Name: t.Text, Span: t.Span}
+			x = &IdentExpr{Name: t.Text, Span: t.Span}
 		}
-	case lexer.Minus, lexer.Bang, lexer.Tilde:
+	case Minus, Bang, Tilde:
 		p.take()
 		v, err := p.expr(11)
 		if err != nil {
 			return nil, err
 		}
-		x = &ast.UnaryExpr{Op: t.Text, X: v, Span: join(t.Span, v.GetSpan())}
-	case lexer.LParen:
+		x = &UnaryExpr{Op: t.Text, X: v, Span: join(t.Span, v.GetSpan())}
+	case LParen:
 		p.take()
 		v, err := p.expr(0)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(lexer.RParen); err != nil {
+		if _, err = p.expect(RParen); err != nil {
 			return nil, err
 		}
 		x = v
-	case lexer.LBrace:
+	case LBrace:
 		return p.structLiteral()
 	default:
 		return nil, p.err(t, "expected expression")
 	}
 	for {
 		switch p.cur().Kind {
-		case lexer.LParen:
+		case LParen:
 			start := x.GetSpan()
 			p.take()
-			var args []ast.Expr
-			if !p.at(lexer.RParen) {
+			var args []Expr
+			if !p.at(RParen) {
 				for {
 					a, err := p.expr(0)
 					if err != nil {
 						return nil, err
 					}
 					args = append(args, a)
-					if !p.at(lexer.Comma) {
+					if !p.at(Comma) {
 						break
 					}
 					p.take()
-					if p.at(lexer.RParen) {
+					if p.at(RParen) {
 						break
 					}
 				}
 			}
-			r, err := p.expect(lexer.RParen)
+			r, err := p.expect(RParen)
 			if err != nil {
 				return nil, err
 			}
-			x = &ast.CallExpr{Callee: x, Args: args, Span: join(start, r.Span)}
-		case lexer.Dot:
+			x = &CallExpr{Callee: x, Args: args, Span: join(start, r.Span)}
+		case Dot:
 			start := x.GetSpan()
 			p.take()
-			n, err := p.expect(lexer.Ident)
+			n, err := p.expect(Ident)
 			if err != nil {
 				return nil, err
 			}
-			x = &ast.MemberExpr{Base: x, Name: n.Text, Span: join(start, n.Span)}
-		case lexer.LBracket:
+			x = &MemberExpr{Base: x, Name: n.Text, Span: join(start, n.Span)}
+		case LBracket:
 			start := x.GetSpan()
 			p.take()
 			i, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
-			r, err := p.expect(lexer.RBracket)
+			r, err := p.expect(RBracket)
 			if err != nil {
 				return nil, err
 			}
-			x = &ast.IndexExpr{Base: x, Index: i, Span: join(start, r.Span)}
+			x = &IndexExpr{Base: x, Index: i, Span: join(start, r.Span)}
 		default:
 			return x, nil
 		}
 	}
 }
-func (p *parser) structLiteral() (ast.Expr, error) {
+func (p *parser) structLiteral() (Expr, error) {
 	l := p.take()
-	e := &ast.StructLiteralExpr{}
-	if !p.at(lexer.RBrace) {
+	e := &StructLiteralExpr{}
+	if !p.at(RBrace) {
 		for {
-			n, err := p.expect(lexer.Ident)
+			n, err := p.expect(Ident)
 			if err != nil {
 				return nil, err
 			}
-			if _, err = p.expect(lexer.Colon); err != nil {
+			if _, err = p.expect(Colon); err != nil {
 				return nil, err
 			}
 			v, err := p.expr(0)
 			if err != nil {
 				return nil, err
 			}
-			e.Fields = append(e.Fields, ast.LiteralField{Name: n.Text, Value: v, Span: join(n.Span, v.GetSpan())})
-			if !p.at(lexer.Comma) {
+			e.Fields = append(e.Fields, LiteralField{Name: n.Text, Value: v, Span: join(n.Span, v.GetSpan())})
+			if !p.at(Comma) {
 				break
 			}
 			p.take()
-			if p.at(lexer.RBrace) {
+			if p.at(RBrace) {
 				break
 			}
 		}
 	}
-	r, err := p.expect(lexer.RBrace)
+	r, err := p.expect(RBrace)
 	if err != nil {
 		return nil, err
 	}

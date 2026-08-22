@@ -64,7 +64,7 @@ nearest tach.json
 strict manifest + canonical one-tier source discovery
     |
     v
-concurrent lexer/recovering parser -> one AST per kernel
+concurrent tokenization/recovering parse -> one syntax tree per kernel
     |
     v
 imports + global names + kernel DAG + collapsed module DAG
@@ -121,7 +121,7 @@ the IR/plan/disassembly views under `build/diagnostics/`.
 
 ## 3. Front end
 
-### Source, lexer, parser, and AST
+### Source and parser
 
 `src/compiler/project.go` first canonicalizes the nearest project root, parses
 the strict manifest, discovers exactly `<module>/<kernel>.tach`, rejects
@@ -131,12 +131,13 @@ rewriting source, checks project-global declaration uniqueness, and validates
 both dependency DAGs.
 
 `src/foundation` owns positions, primary and related spans, ordered diagnostic
-sets, and rendering inputs. `src/lexer` owns Unicode identifiers, strings used
-by imports and `@docs`, suffix-free numbers, preserved line-comment trivia,
-punctuation, and operators. Lexing advances after invalid UTF-8 input and
-returns all independently recoverable lexical diagnostics.
+sets, and rendering inputs. `src/parser` owns the complete source front end:
+Unicode identifiers, strings used by imports and `@docs`, suffix-free numbers,
+preserved line comments, punctuation, operators, recovery, and the resulting
+syntax tree. Tokenization advances after invalid UTF-8 input and returns every
+independently recoverable lexical diagnostic.
 
-`src/parser` builds `src/ast`. The AST retains source roles:
+The syntax tree retains source roles:
 
 - file and declaration attributes;
 - explicit whole-file imports;
@@ -146,12 +147,13 @@ returns all independently recoverable lexical diagnostics.
 - ordinary statements and structured control;
 - `run` domains, `transient<T>(length)` expressions, and terminal
   `view<srgb8>` returns; and
-- exact source spans and comment trivia needed by formatting.
+- exact source spans for later diagnostics.
 
-The parser recovers at declaration and statement boundaries so one broken
-kernel does not suppress diagnostics from siblings. It decides grammar only. It does not resolve types, decide whether an
-export is baseline sugar or explicit orchestration, infer resource access, or
-assign target representation.
+The same package exposes its comment-preserving token stream to the formatter.
+Parsing recovers at declaration and statement boundaries so one broken kernel
+does not suppress diagnostics from siblings. It decides grammar only. It does
+not resolve types, decide whether an export is baseline sugar or explicit
+orchestration, infer resource access, or assign target representation.
 
 ### Semantic analysis
 
@@ -648,7 +650,7 @@ and all their GPU objects still close independently.
 |---|---|
 | project discovery | Is the nearest manifest strict and every source at one canonical module/kernel identity? |
 | import graphs | Do targets exist, remain directly scoped, and form kernel and module DAGs? |
-| lexer/parser | Is source spelling and grammar valid? |
+| parser | Is source spelling and grammar valid? |
 | semantic analysis | Do declarations and expressions have valid Tach meaning? |
 | Kernel IR verifier | Are per-invocation values, places, control, and effects sound? |
 | Flow verifier | Are programs, shapes, resources, versions, dispatches, and terminal views sound? |
@@ -668,9 +670,7 @@ compiler's assumptions against real implementations.
 
 ```text
 src/foundation   source locations, diagnostics, types, constants, host layout
-src/lexer        tokens and preserved line-comment trivia
-src/ast          source-shaped declarations and imports
-src/parser       recovering grammar
+src/parser       tokens, comments, recovering grammar, and source-shaped syntax
 src/ir           Kernel and Flow IR, verification, analysis, host parameter plans
 src/sema         language checking and both IR lowerings
 src/opt          target-neutral Kernel IR optimization
@@ -694,14 +694,14 @@ complete repository package graph as part of the cycle check.
 
 Tests mirror ownership:
 
-- lexer, parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
+- parser, semantic, Kernel IR, Flow IR, optimizer, layout, backend,
   binding, and emitter tests cover local contracts and rejection cases;
 - compiler tests check strict manifests, one-tier discovery, import visibility,
   both DAGs, global names, error recovery, formatter transactions, exact unified
   artifact sets, wide one/many-worker determinism, complete multi-file error
   aggregation, all four function forms, documentation descriptions, and all
   maintained projects in canonical format;
-- bounded fuzz properties challenge lexer progress and spans, parser recovery
+- bounded fuzz properties challenge token progress and spans, parser recovery
   determinism, source-facing semantic failures, and formatter token
   preservation, reparsing, and idempotence;
 - binding tests corrupt each runtime-plan seam, while TypeScript compiler tests

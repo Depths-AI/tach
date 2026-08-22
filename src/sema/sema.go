@@ -11,13 +11,13 @@ import (
 	"strings"
 	"sync"
 
-	"tach/src/ast"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/parser"
 )
 
 type Checker struct {
-	ast           *ast.Module
+	syntax        *parser.File
 	kernel        *ir.KernelModule
 	module        *ir.Module
 	types         map[string]*foundation.Type
@@ -30,7 +30,7 @@ type Checker struct {
 }
 
 type constantDef struct {
-	decl  *ast.ConstDecl
+	decl  *parser.ConstDecl
 	value *foundation.ConstantValue
 	err   error
 	state uint8
@@ -40,7 +40,7 @@ type funcSig struct {
 	name     string
 	params   []namedType
 	ret      *foundation.Type
-	decl     *ast.FunctionDecl
+	decl     *parser.FunctionDecl
 	indexed  bool
 	exported bool
 	view     ir.ViewFormat
@@ -81,7 +81,7 @@ type fnBuilder struct {
 type loopContext struct {
 	names []string
 	base  env
-	post  ast.Stmt
+	post  parser.Stmt
 }
 
 func (b *fnBuilder) value() ir.ValueID {
@@ -99,27 +99,27 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	return &fnBuilder{fn: b.fn, ids: b.ids, block: block, loop: b.loop, comptime: b.comptime}
 }
 
-func CheckAndLower(m *ast.Module) (*ir.Module, error) {
-	module, _, err := CheckAndLowerProject([]*ast.Module{m})
+func CheckAndLower(file *parser.File) (*ir.Module, error) {
+	module, _, err := CheckAndLowerProject([]*parser.File{file})
 	return module, err
 }
 
-func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*ir.Module, []ir.Documentation, error) {
+func CheckAndLowerProject(files []*parser.File, requestedWorkers ...int) (*ir.Module, []ir.Documentation, error) {
 	workers := runtime.GOMAXPROCS(0)
 	if len(requestedWorkers) > 0 && requestedWorkers[0] > 0 && requestedWorkers[0] < workers {
 		workers = requestedWorkers[0]
 	}
-	merged := &ast.Module{}
+	merged := &parser.File{}
 	documentation := ir.Documentation{Types: map[string]ir.TypeDocumentation{}, Functions: map[string]ir.FunctionDocumentation{}}
-	files := make([]ir.Documentation, 0, len(modules))
+	documentationFiles := make([]ir.Documentation, 0, len(files))
 	var documentationDiagnostics foundation.Diagnostics
-	for _, module := range modules {
-		docs, err := checkDocumentation(module)
+	for _, file := range files {
+		docs, err := checkDocumentation(file)
 		if err != nil {
 			documentationDiagnostics = appendError(documentationDiagnostics, err)
 		}
-		files = append(files, docs)
-		if len(modules) == 1 {
+		documentationFiles = append(documentationFiles, docs)
+		if len(files) == 1 {
 			documentation.Title, documentation.Summary = docs.Title, docs.Summary
 		}
 		for name, item := range docs.Types {
@@ -128,24 +128,24 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*ir.M
 		for name, item := range docs.Functions {
 			documentation.Functions[name] = item
 		}
-		merged.Decls = append(merged.Decls, module.Decls...)
+		merged.Decls = append(merged.Decls, file.Decls...)
 	}
 	kernel := &ir.KernelModule{}
-	c := &Checker{ast: merged, kernel: kernel, module: &ir.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*foundation.Type{}, consts: map[string]*constantDef{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
-	for _, module := range modules {
-		file := strings.TrimSuffix(module.File, ".tach")
+	c := &Checker{syntax: merged, kernel: kernel, module: &ir.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*foundation.Type{}, consts: map[string]*constantDef{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
+	for _, syntax := range files {
+		file := strings.TrimSuffix(syntax.Path, ".tach")
 		visible := map[string]bool{file: true}
-		for _, item := range module.Imports {
+		for _, item := range syntax.Imports {
 			visible[item.Target] = true
 		}
 		c.imports[file] = visible
-		for _, declaration := range module.Decls {
+		for _, declaration := range syntax.Decls {
 			switch item := declaration.(type) {
-			case *ast.TypeDecl:
+			case *parser.TypeDecl:
 				c.owners[item.Name] = file
-			case *ast.ConstDecl:
+			case *parser.ConstDecl:
 				c.owners[item.Name] = file
-			case *ast.FunctionDecl:
+			case *parser.FunctionDecl:
 				c.owners[item.Name] = file
 			}
 		}
@@ -185,7 +185,7 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*ir.M
 	if len(documentationDiagnostics) > 0 {
 		return nil, nil, documentationDiagnostics.Sorted()
 	}
-	return c.module, files, nil
+	return c.module, documentationFiles, nil
 }
 
 func appendError(diagnostics foundation.Diagnostics, err error) foundation.Diagnostics {
@@ -224,8 +224,8 @@ func parallel(workers, count int, work func(int) error) []error {
 }
 
 func (c *Checker) collectTypes() error {
-	for _, d := range c.ast.Decls {
-		td, ok := d.(*ast.TypeDecl)
+	for _, d := range c.syntax.Decls {
+		td, ok := d.(*parser.TypeDecl)
 		if !ok {
 			continue
 		}
@@ -240,9 +240,9 @@ func (c *Checker) collectTypes() error {
 }
 func (c *Checker) resolveTypeFields() error {
 	var diagnostics foundation.Diagnostics
-	var declarations []*ast.TypeDecl
-	for _, d := range c.ast.Decls {
-		td, ok := d.(*ast.TypeDecl)
+	var declarations []*parser.TypeDecl
+	for _, d := range c.syntax.Decls {
+		td, ok := d.(*parser.TypeDecl)
 		if ok {
 			declarations = append(declarations, td)
 		}
@@ -337,8 +337,8 @@ func (c *Checker) checkTypeCycles() error {
 }
 
 func (c *Checker) declarationSpan(name string) foundation.Span {
-	for _, declaration := range c.ast.Decls {
-		if item, ok := declaration.(*ast.TypeDecl); ok && item.Name == name {
+	for _, declaration := range c.syntax.Decls {
+		if item, ok := declaration.(*parser.TypeDecl); ok && item.Name == name {
 			return item.Span
 		}
 	}
@@ -346,8 +346,8 @@ func (c *Checker) declarationSpan(name string) foundation.Span {
 }
 
 func (c *Checker) fieldSpan(typeName, fieldName string) foundation.Span {
-	for _, declaration := range c.ast.Decls {
-		if item, ok := declaration.(*ast.TypeDecl); ok && item.Name == typeName {
+	for _, declaration := range c.syntax.Decls {
+		if item, ok := declaration.(*parser.TypeDecl); ok && item.Name == typeName {
 			for _, field := range item.Fields {
 				if field.Name == fieldName {
 					return field.Span
@@ -361,9 +361,9 @@ func (c *Checker) fieldSpan(typeName, fieldName string) foundation.Span {
 
 func (c *Checker) collectFunctions() error {
 	var diagnostics foundation.Diagnostics
-	var declarations []*ast.FunctionDecl
-	for _, d := range c.ast.Decls {
-		if function, ok := d.(*ast.FunctionDecl); ok {
+	var declarations []*parser.FunctionDecl
+	for _, d := range c.syntax.Decls {
+		if function, ok := d.(*parser.FunctionDecl); ok {
 			declarations = append(declarations, function)
 		}
 	}
@@ -436,13 +436,13 @@ func (c *Checker) collectFunctions() error {
 	}
 	return nil
 }
-func (c *Checker) resolveType(te ast.TypeExpr) (*foundation.Type, error) {
+func (c *Checker) resolveType(te parser.TypeExpr) (*foundation.Type, error) {
 	return c.resolveTypeIn(te, nil)
 }
 
-func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*foundation.Type, error) {
+func (c *Checker) resolveTypeIn(te parser.TypeExpr, environment *env) (*foundation.Type, error) {
 	switch t := te.(type) {
-	case *ast.NamedType:
+	case *parser.NamedType:
 		x := c.types[t.Name]
 		if x != nil && !c.visible(t.Name, t.Span.File) {
 			x = nil
@@ -451,7 +451,7 @@ func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*foundation.
 			return nil, diag(t.Span, "unknown type %q", t.Name)
 		}
 		return x, nil
-	case *ast.RuntimeArrayType:
+	case *parser.RuntimeArrayType:
 		e, err := c.resolveTypeIn(t.Elem, environment)
 		if err != nil {
 			return nil, err
@@ -460,7 +460,7 @@ func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*foundation.
 			return nil, diag(t.Span, "invalid runtime array element type %s", e)
 		}
 		return foundation.RuntimeArrayOf(e), nil
-	case *ast.FixedArrayType:
+	case *parser.FixedArrayType:
 		e, err := c.resolveTypeIn(t.Elem, environment)
 		if err != nil {
 			return nil, err
@@ -483,7 +483,7 @@ func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*foundation.
 			return nil, diag(t.Span, "fixed array length must be a positive uint32 constant")
 		}
 		return foundation.FixedArrayOf(e, value.Bits[0]), nil
-	case *ast.VectorType:
+	case *parser.VectorType:
 		e, err := c.resolveTypeIn(t.Elem, environment)
 		if err != nil {
 			return nil, err
@@ -496,7 +496,7 @@ func (c *Checker) resolveTypeIn(te ast.TypeExpr, environment *env) (*foundation.
 			return nil, diag(t.Span, "vec lane count must be 2, 3, or 4")
 		}
 		return foundation.VectorOf(e, lanes), nil
-	case *ast.GenericType:
+	case *parser.GenericType:
 		if t.Name == "buffer" {
 			return nil, diag(t.Span, "buffer<T> is only valid in a kernel parameter")
 		}
@@ -529,9 +529,9 @@ func (c *Checker) visible(name, file string) bool {
 
 func (c *Checker) lowerFunctions() error {
 	var diagnostics foundation.Diagnostics
-	var declarations []*ast.FunctionDecl
-	for _, d := range c.ast.Decls {
-		if function, ok := d.(*ast.FunctionDecl); ok && (len(function.Indices) > 0 || !function.Exported) {
+	var declarations []*parser.FunctionDecl
+	for _, d := range c.syntax.Decls {
+		if function, ok := d.(*parser.FunctionDecl); ok && (len(function.Indices) > 0 || !function.Exported) {
 			declarations = append(declarations, function)
 		}
 	}
@@ -610,7 +610,7 @@ func markBufferWritable(f *ir.Function, roots map[ir.PlaceID]int, place ir.Place
 	}
 }
 
-func (c *Checker) lowerHelper(d *ast.FunctionDecl) error {
+func (c *Checker) lowerHelper(d *parser.FunctionDecl) error {
 	if len(d.Attrs) > 0 {
 		return diag(d.Span, "attributes are invalid on helper %s", d.Name)
 	}
@@ -635,7 +635,7 @@ func (c *Checker) lowerHelper(d *ast.FunctionDecl) error {
 	c.kernel.Functions = append(c.kernel.Functions, f)
 	return nil
 }
-func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
+func (c *Checker) lowerStage(d *parser.FunctionDecl) error {
 	if len(d.Indices) < 1 || len(d.Indices) > 3 {
 		return diag(d.Span, "kernel %s requires 1 to 3 logical indices", d.Name)
 	}
@@ -691,8 +691,8 @@ func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
 	c.kernel.Functions = append(c.kernel.Functions, f)
 	return nil
 }
-func (c *Checker) parameterType(te ast.TypeExpr, allowBuffer bool) (*foundation.Type, bool, error) {
-	g, ok := te.(*ast.GenericType)
+func (c *Checker) parameterType(te parser.TypeExpr, allowBuffer bool) (*foundation.Type, bool, error) {
+	g, ok := te.(*parser.GenericType)
 	if !ok || g.Name != "buffer" {
 		t, err := c.resolveType(te)
 		if err != nil {
@@ -725,7 +725,7 @@ func (c *Checker) parameterType(te ast.TypeExpr, allowBuffer bool) (*foundation.
 	return t, true, nil
 }
 
-func (c *Checker) workgroup(attrs []ast.Attribute, dimensions int) (ir.WorkgroupConstraint, error) {
+func (c *Checker) workgroup(attrs []parser.Attribute, dimensions int) (ir.WorkgroupConstraint, error) {
 	out := ir.WorkgroupConstraint{}
 	found := false
 	for _, a := range attrs {
@@ -793,7 +793,7 @@ func splitNumberLiteral(raw string) (body string, basePrefixed bool) {
 	return body, basePrefixed
 }
 
-func (c *Checker) lowerBlock(b *fnBuilder, src *ast.BlockStmt, e env) error {
+func (c *Checker) lowerBlock(b *fnBuilder, src *parser.BlockStmt, e env) error {
 	for _, s := range src.Stmts {
 		if b.block.Term != nil {
 			return diag(s.GetSpan(), "unreachable statement")
@@ -804,9 +804,9 @@ func (c *Checker) lowerBlock(b *fnBuilder, src *ast.BlockStmt, e env) error {
 	}
 	return nil
 }
-func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
+func (c *Checker) lowerStmt(b *fnBuilder, e env, s parser.Stmt) error {
 	switch x := s.(type) {
-	case *ast.WorkgroupStmt:
+	case *parser.WorkgroupStmt:
 		if b.fn.Kind != ir.Stage {
 			return diag(x.Span, "shared variables are only valid inside kernels")
 		}
@@ -830,7 +830,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		b.fn.WorkgroupVars = append(b.fn.WorkgroupVars, ir.WorkgroupVar{Name: x.Name, Type: ty, Span: x.Span})
 		e.syms[x.Name] = symbol{ty: ty, buffer: -1, workgroup: idx}
 		return nil
-	case *ast.ConstStmt:
+	case *parser.ConstStmt:
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
 		}
@@ -840,7 +840,7 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		}
 		e.syms[x.Name] = symbol{ty: value.Type, constant: value, buffer: -1, workgroup: -1}
 		return nil
-	case *ast.VarStmt:
+	case *parser.VarStmt:
 		if _, ok := e.syms[x.Name]; ok {
 			return diag(x.Span, "%q is already defined in this scope", x.Name)
 		}
@@ -867,14 +867,14 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		}
 		e.syms[x.Name] = symbol{ty: t, value: id, mutable: true, buffer: -1, workgroup: -1}
 		return nil
-	case *ast.AssignStmt:
+	case *parser.AssignStmt:
 		return c.lowerAssign(b, e, x.Target, x.Op, x.Value, x.Span)
-	case *ast.IncStmt:
+	case *parser.IncStmt:
 		return c.lowerInc(b, e, x)
-	case *ast.ExprStmt:
+	case *parser.ExprStmt:
 		_, _, err := c.lowerExpr(b, e, x.Expr, nil)
 		return err
-	case *ast.ReturnStmt:
+	case *parser.ReturnStmt:
 		if b.fn.Return.Kind == foundation.VoidKind {
 			if x.Value != nil {
 				return diag(x.Span, "void function cannot return a value")
@@ -894,19 +894,19 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		}
 		b.block.Term = &ir.Return{Value: v, HasValue: true}
 		return nil
-	case *ast.IfStmt:
+	case *parser.IfStmt:
 		return c.lowerIf(b, e, x)
-	case *ast.WhileStmt:
+	case *parser.WhileStmt:
 		return c.lowerWhile(b, e, x)
-	case *ast.ForStmt:
+	case *parser.ForStmt:
 		return c.lowerFor(b, e, x)
-	case *ast.BreakStmt:
+	case *parser.BreakStmt:
 		if b.loop == nil {
 			return diag(x.Span, "break is only valid inside a loop")
 		}
 		b.block.Term = &ir.Break{Values: loopValues(b.loop.names, e)}
 		return nil
-	case *ast.ContinueStmt:
+	case *parser.ContinueStmt:
 		if b.loop == nil {
 			return diag(x.Span, "continue is only valid inside a loop")
 		}
@@ -915,8 +915,8 @@ func (c *Checker) lowerStmt(b *fnBuilder, e env, s ast.Stmt) error {
 		return fmt.Errorf("unknown statement %T", s)
 	}
 }
-func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, rhs ast.Expr, span foundation.Span) error {
-	if id, ok := target.(*ast.IdentExpr); ok {
+func (c *Checker) lowerAssign(b *fnBuilder, e env, target parser.Expr, op string, rhs parser.Expr, span foundation.Span) error {
+	if id, ok := target.(*parser.IdentExpr); ok {
 		sym, exists := e.syms[id.Name]
 		if exists && sym.buffer < 0 && sym.workgroup < 0 {
 			if !sym.mutable {
@@ -969,41 +969,41 @@ func (c *Checker) lowerAssign(b *fnBuilder, e env, target ast.Expr, op string, r
 	b.emit(&ir.Store{Place: p, Value: v, Span: span})
 	return nil
 }
-func (c *Checker) lowerInc(b *fnBuilder, e env, x *ast.IncStmt) error {
+func (c *Checker) lowerInc(b *fnBuilder, e env, x *parser.IncStmt) error {
 	raw := "1"
 	op := "+"
 	if x.Delta < 0 {
 		op = "-"
 	}
-	one := &ast.NumberExpr{Raw: raw, Span: x.Span}
+	one := &parser.NumberExpr{Raw: raw, Span: x.Span}
 	return c.lowerAssign(b, e, x.Target, op+"=", one, x.Span)
 }
 
-func assigned(block *ast.BlockStmt, out map[string]bool) {
+func assigned(block *parser.BlockStmt, out map[string]bool) {
 	for _, s := range block.Stmts {
 		switch x := s.(type) {
-		case *ast.AssignStmt:
-			if id, ok := x.Target.(*ast.IdentExpr); ok {
+		case *parser.AssignStmt:
+			if id, ok := x.Target.(*parser.IdentExpr); ok {
 				out[id.Name] = true
 			}
-		case *ast.IncStmt:
-			if id, ok := x.Target.(*ast.IdentExpr); ok {
+		case *parser.IncStmt:
+			if id, ok := x.Target.(*parser.IdentExpr); ok {
 				out[id.Name] = true
 			}
-		case *ast.IfStmt:
+		case *parser.IfStmt:
 			assigned(x.Then, out)
 			if x.Else != nil {
 				assigned(x.Else, out)
 			}
-		case *ast.WhileStmt:
+		case *parser.WhileStmt:
 			assigned(x.Body, out)
-		case *ast.ForStmt:
+		case *parser.ForStmt:
 			assigned(x.Body, out)
-			assigned(&ast.BlockStmt{Stmts: []ast.Stmt{x.Post}}, out)
+			assigned(&parser.BlockStmt{Stmts: []parser.Stmt{x.Post}}, out)
 		}
 	}
 }
-func carriedNames(blocks []*ast.BlockStmt, e env) []string {
+func carriedNames(blocks []*parser.BlockStmt, e env) []string {
 	set := map[string]bool{}
 	for _, bl := range blocks {
 		if bl != nil {
@@ -1020,7 +1020,7 @@ func carriedNames(blocks []*ast.BlockStmt, e env) []string {
 	return out
 }
 
-func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
+func (c *Checker) lowerIf(b *fnBuilder, e env, x *parser.IfStmt) error {
 	cond, ct, err := c.lowerExpr(b, e, x.Cond, foundation.BoolType)
 	if err != nil {
 		return err
@@ -1028,7 +1028,7 @@ func (c *Checker) lowerIf(b *fnBuilder, e env, x *ast.IfStmt) error {
 	if !foundation.Equal(ct, foundation.BoolType) {
 		return boolDiag(x.Cond.GetSpan(), "if condition", ct, "reduce the mask with all(mask) or any(mask)")
 	}
-	names := carriedNames([]*ast.BlockStmt{x.Then, x.Else}, e)
+	names := carriedNames([]*parser.BlockStmt{x.Then, x.Else}, e)
 	thenBlock := &ir.Block{}
 	tb := b.child(thenBlock)
 	te := e.clone()
@@ -1106,10 +1106,10 @@ func (c *Checker) continueLoop(b *fnBuilder, e env) error {
 	return nil
 }
 
-func (c *Checker) lowerLoop(b *fnBuilder, e env, cond ast.Expr, body *ast.BlockStmt, post ast.Stmt, span foundation.Span) error {
-	blocks := []*ast.BlockStmt{body}
+func (c *Checker) lowerLoop(b *fnBuilder, e env, cond parser.Expr, body *parser.BlockStmt, post parser.Stmt, span foundation.Span) error {
+	blocks := []*parser.BlockStmt{body}
 	if post != nil {
-		blocks = append(blocks, &ast.BlockStmt{Stmts: []ast.Stmt{post}})
+		blocks = append(blocks, &parser.BlockStmt{Stmts: []parser.Stmt{post}})
 	}
 	names := carriedNames(blocks, e)
 	params := make([]ir.LoopParam, len(names))
@@ -1155,11 +1155,11 @@ func (c *Checker) lowerLoop(b *fnBuilder, e env, cond ast.Expr, body *ast.BlockS
 	return nil
 }
 
-func (c *Checker) lowerWhile(b *fnBuilder, e env, x *ast.WhileStmt) error {
+func (c *Checker) lowerWhile(b *fnBuilder, e env, x *parser.WhileStmt) error {
 	return c.lowerLoop(b, e, x.Cond, x.Body, nil, x.Span)
 }
 
-func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
+func (c *Checker) lowerFor(b *fnBuilder, e env, x *parser.ForStmt) error {
 	// A Tach for-loop is a source-level convenience only. It lowers into the
 	// exact same structured, loop-carried SSA form as while.
 	loopEnv := e.clone()
@@ -1182,11 +1182,11 @@ func (c *Checker) lowerFor(b *fnBuilder, e env, x *ast.ForStmt) error {
 	return nil
 }
 
-func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerExpr(b *fnBuilder, e env, x parser.Expr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	switch v := x.(type) {
-	case *ast.NumberExpr:
+	case *parser.NumberExpr:
 		return c.lowerNumber(b, v, expected)
-	case *ast.BoolExpr:
+	case *parser.BoolExpr:
 		if expected != nil && !foundation.Equal(expected, foundation.BoolType) {
 			return 0, nil, diag(v.Span, "bool literal cannot be used as %s", expected)
 		}
@@ -1197,7 +1197,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 		}
 		b.emit(&ir.Const{Result: id, Type: foundation.BoolType, Raw: raw, Span: v.Span})
 		return id, foundation.BoolType, nil
-	case *ast.IdentExpr:
+	case *parser.IdentExpr:
 		if s, ok := e.syms[v.Name]; ok {
 			if s.constant != nil {
 				value, valueType := materializeConstant(b, s.constant, v.Span)
@@ -1237,7 +1237,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 			return result, resultType, nil
 		}
 		return 0, nil, diag(v.Span, "unknown identifier %q", v.Name)
-	case *ast.MemberExpr:
+	case *parser.MemberExpr:
 		if v.Name == "length" {
 			if p, pt, err := c.lowerPlace(b, e, v.Base); err == nil && pt.Kind == foundation.RuntimeArrayKind {
 				id := b.value()
@@ -1283,7 +1283,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 			return result, resultType, nil
 		}
 		return 0, nil, diag(v.Span, "member access on %s", bt)
-	case *ast.IndexExpr:
+	case *parser.IndexExpr:
 		if p, pt, err := c.lowerPlace(b, e, v); err == nil {
 			id := b.value()
 			b.emit(&ir.Load{Result: id, Type: pt, Place: p, Span: v.Span})
@@ -1306,11 +1306,11 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 		result := b.value()
 		b.emit(&ir.VectorIndex{Result: result, Type: bt.Elem, Base: base, Index: index, Span: v.Span})
 		return result, bt.Elem, nil
-	case *ast.StructLiteralExpr:
+	case *parser.StructLiteralExpr:
 		if expected == nil || expected.Kind != foundation.StructKind {
 			return 0, nil, diag(v.Span, "struct literal requires a contextual struct type")
 		}
-		seen := map[string]ast.Expr{}
+		seen := map[string]parser.Expr{}
 		for _, f := range v.Fields {
 			if _, ok := seen[f.Name]; ok {
 				return 0, nil, diag(f.Span, "duplicate struct literal field %s", f.Name)
@@ -1339,10 +1339,10 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 		id := b.value()
 		b.emit(&ir.Composite{Result: id, Type: expected, Values: vals, Span: v.Span})
 		return id, expected, nil
-	case *ast.UnaryExpr:
+	case *parser.UnaryExpr:
 		want := expected
 		if v.Op == "-" && want == nil {
-			if n, ok := v.X.(*ast.NumberExpr); ok {
+			if n, ok := v.X.(*parser.NumberExpr); ok {
 				want = foundation.Int32Type
 				raw, basePrefixed := splitNumberLiteral(n.Raw)
 				if !basePrefixed && strings.ContainsAny(raw, ".eE") {
@@ -1366,12 +1366,12 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 		r := b.value()
 		b.emit(&ir.Unary{Result: r, Type: t, Op: v.Op, X: id, Span: v.Span})
 		return r, t, nil
-	case *ast.BinaryExpr:
+	case *parser.BinaryExpr:
 		if v.Op == "&&" || v.Op == "||" {
 			return c.lowerShortCircuit(b, e, v)
 		}
 		return c.lowerBinaryExpr(b, e, v, expected)
-	case *ast.ConditionalExpr:
+	case *parser.ConditionalExpr:
 		cond, ct, err := c.lowerExpr(b, e, v.Cond, foundation.BoolType)
 		if err != nil {
 			return 0, nil, err
@@ -1379,7 +1379,7 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 		if !foundation.Equal(ct, foundation.BoolType) {
 			return 0, nil, diag(v.Cond.GetSpan(), "conditional expression requires bool condition, got %s", ct)
 		}
-		expressions := []ast.Expr{v.Then, v.Else}
+		expressions := []parser.Expr{v.Then, v.Else}
 		arguments := make([]detachedExpr, len(expressions))
 		expectedElement, expectedLanes := numericElement(expected)
 		if expected == nil || expectedElement != nil {
@@ -1432,15 +1432,15 @@ func (c *Checker) lowerExpr(b *fnBuilder, e env, x ast.Expr, expected *foundatio
 		r := b.value()
 		b.emit(&ir.If{Results: []ir.Result{{ID: r, Type: arguments[0].type_}}, Cond: cond, Then: thenBlock, Else: elseBlock, Span: v.Span})
 		return r, arguments[0].type_, nil
-	case *ast.CallExpr:
+	case *parser.CallExpr:
 		return c.lowerCall(b, e, v, expected)
-	case *ast.TransientExpr:
+	case *parser.TransientExpr:
 		return 0, nil, diag(v.Span, "transient allocation is only available as a public program let binding")
 	default:
 		return 0, nil, fmt.Errorf("unknown expression %T", x)
 	}
 }
-func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerNumber(b *fnBuilder, n *parser.NumberExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	raw, basePrefixed := splitNumberLiteral(n.Raw)
 	isFloatSpelling := !basePrefixed && strings.ContainsAny(raw, ".eE")
 
@@ -1509,7 +1509,7 @@ func (c *Checker) lowerNumber(b *fnBuilder, n *ast.NumberExpr, expected *foundat
 	return id, t, nil
 }
 
-func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *parser.BinaryExpr) (ir.ValueID, *foundation.Type, error) {
 	left, lt, err := c.lowerExpr(b, e, x.Left, foundation.BoolType)
 	if err != nil {
 		return 0, nil, err
@@ -1530,13 +1530,13 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 			return 0, nil, boolDiag(x.Right.GetSpan(), "logical operand", rt, "use &, |, or ^ for lane-wise mask logic, or all/any to reduce a mask")
 		}
 		then.Term = &ir.Yield{Values: []ir.ValueID{rv}}
-		id, _, err := c.lowerExpr(eb, e.clone(), &ast.BoolExpr{Value: false, Span: x.Span}, foundation.BoolType)
+		id, _, err := c.lowerExpr(eb, e.clone(), &parser.BoolExpr{Value: false, Span: x.Span}, foundation.BoolType)
 		if err != nil {
 			return 0, nil, err
 		}
 		els.Term = &ir.Yield{Values: []ir.ValueID{id}}
 	} else {
-		id, _, err := c.lowerExpr(tb, e.clone(), &ast.BoolExpr{Value: true, Span: x.Span}, foundation.BoolType)
+		id, _, err := c.lowerExpr(tb, e.clone(), &parser.BoolExpr{Value: true, Span: x.Span}, foundation.BoolType)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -1554,7 +1554,7 @@ func (c *Checker) lowerShortCircuit(b *fnBuilder, e env, x *ast.BinaryExpr) (ir.
 	b.emit(&ir.If{Results: []ir.Result{{ID: r, Type: foundation.BoolType}}, Cond: left, Then: then, Else: els, Span: x.Span})
 	return r, foundation.BoolType, nil
 }
-func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *parser.BinaryExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	// Tach shifts use an unsigned count with the shifted value's vector width.
 	// Resolve that directly instead of relying on ordinary binary contextual typing.
 	if x.Op == "<<" || x.Op == ">>" {
@@ -1564,7 +1564,7 @@ func (c *Checker) lowerBinaryExpr(b *fnBuilder, e env, x *ast.BinaryExpr, expect
 		}
 		return c.lowerShift(b, e, x.Op, l, lt, x.Right, x.Span)
 	}
-	expressions := []ast.Expr{x.Left, x.Right}
+	expressions := []parser.Expr{x.Left, x.Right}
 	arguments := make([]detachedExpr, 2)
 	if x.Op == "==" || x.Op == "!=" || x.Op == "&" || x.Op == "|" || x.Op == "^" {
 		for i, expression := range expressions {
@@ -1654,7 +1654,7 @@ func (c *Checker) emitBooleanBinary(b *fnBuilder, left, right detachedExpr, op s
 	return c.emitBinary(b, op, left.value, lt, right.value, rt, span)
 }
 
-func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID, leftType *foundation.Type, right ast.Expr, span foundation.Span) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID, leftType *foundation.Type, right parser.Expr, span foundation.Span) (ir.ValueID, *foundation.Type, error) {
 	if op == "<<" || op == ">>" {
 		return c.lowerShift(b, e, op, left, leftType, right, span)
 	}
@@ -1665,7 +1665,7 @@ func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID,
 		}
 		return c.emitBooleanBinary(b, detachedExpr{block: &ir.Block{}, value: left, type_: leftType}, operand, op, span)
 	}
-	rightArguments, err := c.lowerNumericArguments(b, e, op, []ast.Expr{right})
+	rightArguments, err := c.lowerNumericArguments(b, e, op, []parser.Expr{right})
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1673,7 +1673,7 @@ func (c *Checker) lowerCompound(b *fnBuilder, e env, op string, left ir.ValueID,
 	return c.emitResolvedBinary(b, e, op, arguments, leftType, span)
 }
 
-func (c *Checker) lowerShift(b *fnBuilder, e env, op string, left ir.ValueID, leftType *foundation.Type, right ast.Expr, span foundation.Span) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerShift(b *fnBuilder, e env, op string, left ir.ValueID, leftType *foundation.Type, right parser.Expr, span foundation.Span) (ir.ValueID, *foundation.Type, error) {
 	countType := foundation.ShiftCountType(leftType)
 	if countType == nil {
 		return 0, nil, diag(span, "%s requires an int32/uint32 scalar or integer vector on the left, got %s", op, leftType)
@@ -1860,12 +1860,12 @@ func ReservedName(name string) bool {
 	return foundation.ParseBuiltin(name) != nil
 }
 
-func viewType(expression ast.TypeExpr) (ir.ViewFormat, bool) {
-	generic, ok := expression.(*ast.GenericType)
+func viewType(expression parser.TypeExpr) (ir.ViewFormat, bool) {
+	generic, ok := expression.(*parser.GenericType)
 	if !ok || generic.Name != "view" || len(generic.Args) != 1 {
 		return 0, false
 	}
-	format, ok := generic.Args[0].(*ast.NamedType)
+	format, ok := generic.Args[0].(*parser.NamedType)
 	return ir.SRGB8ViewFormat, ok && format.Name == "srgb8"
 }
 
@@ -1874,27 +1874,27 @@ type detachedExpr struct {
 	value      ir.ValueID
 	type_      *foundation.Type
 	contextual bool
-	source     ast.Expr
+	source     parser.Expr
 }
 
-func (c *Checker) lowerDetached(b *fnBuilder, e env, expression ast.Expr, expected *foundation.Type) (detachedExpr, error) {
+func (c *Checker) lowerDetached(b *fnBuilder, e env, expression parser.Expr, expected *foundation.Type) (detachedExpr, error) {
 	block := &ir.Block{}
 	value, type_, err := c.lowerExpr(b.child(block), e, expression, expected)
 	return detachedExpr{block: block, value: value, type_: type_, contextual: contextualNumeric(expression), source: expression}, err
 }
 
-func contextualNumeric(expression ast.Expr) bool {
+func contextualNumeric(expression parser.Expr) bool {
 	switch x := expression.(type) {
-	case *ast.NumberExpr:
+	case *parser.NumberExpr:
 		return true
-	case *ast.UnaryExpr:
+	case *parser.UnaryExpr:
 		return (x.Op == "-" || x.Op == "~") && contextualNumeric(x.X)
-	case *ast.BinaryExpr:
+	case *parser.BinaryExpr:
 		return contextualNumeric(x.Left) && contextualNumeric(x.Right)
-	case *ast.ConditionalExpr:
+	case *parser.ConditionalExpr:
 		return contextualNumeric(x.Then) && contextualNumeric(x.Else)
-	case *ast.CallExpr:
-		callee, ok := x.Callee.(*ast.IdentExpr)
+	case *parser.CallExpr:
+		callee, ok := x.Callee.(*parser.IdentExpr)
 		if !ok {
 			return false
 		}
@@ -1955,7 +1955,7 @@ func defaultNumericElement(domain ir.NumericDomain, arguments []detachedExpr) *f
 	return foundation.Uint32Type
 }
 
-func (c *Checker) lowerNumericArguments(b *fnBuilder, e env, operation string, expressions []ast.Expr) ([]detachedExpr, error) {
+func (c *Checker) lowerNumericArguments(b *fnBuilder, e env, operation string, expressions []parser.Expr) ([]detachedExpr, error) {
 	arguments := make([]detachedExpr, len(expressions))
 	for i, expression := range expressions {
 		argument, err := c.lowerDetached(b, e, expression, nil)
@@ -2010,7 +2010,7 @@ func (c *Checker) commitArgument(b *fnBuilder, e env, argument detachedExpr, wan
 	return argument.value, argument.type_, nil
 }
 
-func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.IntrinsicKind, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *parser.CallExpr, kind ir.IntrinsicKind, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	rule := kind.Rule()
 	if rule.Arity == 0 {
 		return 0, nil, diag(x.Span, "unsupported intrinsic %s", kind)
@@ -2083,7 +2083,7 @@ func (c *Checker) lowerIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.I
 	return result, out, nil
 }
 
-func (c *Checker) lowerMaskIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind ir.IntrinsicKind, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerMaskIntrinsic(b *fnBuilder, e env, x *parser.CallExpr, kind ir.IntrinsicKind, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	if kind == ir.IntrinsicAll || kind == ir.IntrinsicAny {
 		if len(x.Args) != 1 {
 			return 0, nil, diag(x.Span, "%s expects one argument, got %d", kind, len(x.Args))
@@ -2170,7 +2170,7 @@ func (c *Checker) lowerMaskIntrinsic(b *fnBuilder, e env, x *ast.CallExpr, kind 
 	return result, out, nil
 }
 
-func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *ast.CallExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *parser.CallExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	if len(x.Args) == 0 {
 		return 0, nil, diag(x.Span, "vec requires components")
 	}
@@ -2247,8 +2247,8 @@ func (c *Checker) lowerVectorInference(b *fnBuilder, e env, x *ast.CallExpr, exp
 	return result, vector, nil
 }
 
-func (c *Checker) lowerCall(b *fnBuilder, e env, x *ast.CallExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
-	id, ok := x.Callee.(*ast.IdentExpr)
+func (c *Checker) lowerCall(b *fnBuilder, e env, x *parser.CallExpr, expected *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+	id, ok := x.Callee.(*parser.IdentExpr)
 	if !ok {
 		return 0, nil, diag(x.Callee.GetSpan(), "call target must be a function or type name")
 	}
@@ -2388,7 +2388,7 @@ func atomicBuiltin(name string) (ir.AtomicKind, bool) {
 		return 0, false
 	}
 }
-func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *ast.CallExpr, target *foundation.Type) (ir.ValueID, *foundation.Type, error) {
+func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *parser.CallExpr, target *foundation.Type) (ir.ValueID, *foundation.Type, error) {
 	if len(x.Args) != 1 {
 		return 0, nil, diag(x.Span, "%s constructor expects one argument", target)
 	}
@@ -2397,7 +2397,7 @@ func (c *Checker) lowerConstructor(b *fnBuilder, e env, x *ast.CallExpr, target 
 		return v, t, nil
 	}
 	if err != nil { // contextual literal failure may be meaningful; retry without context only for non-literals
-		if _, ok := x.Args[0].(*ast.NumberExpr); ok {
+		if _, ok := x.Args[0].(*parser.NumberExpr); ok {
 			return 0, nil, err
 		}
 		v, t, err = c.lowerExpr(b, e, x.Args[0], nil)
@@ -2423,9 +2423,9 @@ func (c *Checker) splat(b *fnBuilder, value ir.ValueID, vector *foundation.Type,
 	return result
 }
 
-func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *foundation.Type, error) {
+func (c *Checker) lowerPlace(b *fnBuilder, e env, x parser.Expr) (ir.PlaceID, *foundation.Type, error) {
 	switch v := x.(type) {
-	case *ast.IdentExpr:
+	case *parser.IdentExpr:
 		s, ok := e.syms[v.Name]
 		if !ok || (s.buffer < 0 && s.workgroup < 0) {
 			return 0, nil, diag(v.Span, "%s is not an addressable GPU place", v.Name)
@@ -2437,7 +2437,7 @@ func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *foun
 			b.emit(&ir.PlaceWorkgroup{Result: p, Type: s.ty, Workgroup: s.workgroup, Span: v.Span})
 		}
 		return p, s.ty, nil
-	case *ast.MemberExpr:
+	case *parser.MemberExpr:
 		bp, bt, err := c.lowerPlace(b, e, v.Base)
 		if err != nil {
 			return 0, nil, err
@@ -2464,7 +2464,7 @@ func (c *Checker) lowerPlace(b *fnBuilder, e env, x ast.Expr) (ir.PlaceID, *foun
 		p := b.place()
 		b.emit(&ir.PlaceField{Result: p, Type: ft, Base: bp, Field: idx, Span: v.Span})
 		return p, ft, nil
-	case *ast.IndexExpr:
+	case *parser.IndexExpr:
 		bp, bt, err := c.lowerPlace(b, e, v.Base)
 		if err != nil {
 			return 0, nil, err

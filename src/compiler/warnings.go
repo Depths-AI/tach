@@ -6,23 +6,23 @@ import (
 	"strconv"
 	"strings"
 
-	"tach/src/ast"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/parser"
 )
 
 func warnings(project *project, module *ir.Module) foundation.Diagnostics {
 	owners := map[string]string{}
-	functions := map[string]*ast.FunctionDecl{}
-	constants := map[string]*ast.ConstDecl{}
+	functions := map[string]*parser.FunctionDecl{}
+	constants := map[string]*parser.ConstDecl{}
 	for i := range project.Kernels {
-		for _, declaration := range project.Kernels[i].AST.Decls {
+		for _, declaration := range project.Kernels[i].Syntax.Decls {
 			switch item := declaration.(type) {
-			case *ast.TypeDecl:
+			case *parser.TypeDecl:
 				owners[item.Name] = project.Kernels[i].Identity
-			case *ast.ConstDecl:
+			case *parser.ConstDecl:
 				owners[item.Name], constants[item.Name] = project.Kernels[i].Identity, item
-			case *ast.FunctionDecl:
+			case *parser.FunctionDecl:
 				owners[item.Name], functions[item.Name] = project.Kernels[i].Identity, item
 			}
 		}
@@ -36,7 +36,7 @@ func warnings(project *project, module *ir.Module) foundation.Diagnostics {
 		used := map[string]bool{}
 		visibleConstants := map[string]bool{}
 		visibleOwners := map[string]bool{kernel.Identity: true}
-		for _, item := range kernel.AST.Imports {
+		for _, item := range kernel.Syntax.Imports {
 			visibleOwners[item.Target] = true
 		}
 		for name := range constants {
@@ -44,21 +44,21 @@ func warnings(project *project, module *ir.Module) foundation.Diagnostics {
 				visibleConstants[name] = true
 			}
 		}
-		for _, declaration := range kernel.AST.Decls {
+		for _, declaration := range kernel.Syntax.Decls {
 			analysis := &analysis{refs: map[string]bool{}, reads: map[string]bool{}, globals: visibleConstants, locals: map[string]bool{}}
 			switch item := declaration.(type) {
-			case *ast.TypeDecl:
+			case *parser.TypeDecl:
 				for _, field := range item.Fields {
 					analysis.typeExpression(field.Type)
 				}
 				typeRoots = append(typeRoots, analysis.refs)
-			case *ast.ConstDecl:
+			case *parser.ConstDecl:
 				if item.Type != nil {
 					analysis.typeExpression(item.Type)
 				}
 				analysis.expression(item.Value)
 				refs[item.Name] = analysis.refs
-			case *ast.FunctionDecl:
+			case *parser.FunctionDecl:
 				analysis.function(item)
 				refs[item.Name] = analysis.refs
 				diagnostics = append(diagnostics, analysis.diagnostics...)
@@ -68,7 +68,7 @@ func warnings(project *project, module *ir.Module) foundation.Diagnostics {
 				used[owners[name]] = true
 			}
 		}
-		for _, item := range kernel.AST.Imports {
+		for _, item := range kernel.Syntax.Imports {
 			if !used[item.Target] {
 				diagnostics = append(diagnostics, warning("unused-import", item.Span, fmt.Sprintf("import %q is never used", item.Target), "remove the import"))
 			}
@@ -169,7 +169,7 @@ type analysis struct {
 	diagnostics foundation.Diagnostics
 }
 
-func (a *analysis) function(function *ast.FunctionDecl) {
+func (a *analysis) function(function *parser.FunctionDecl) {
 	for _, attribute := range function.Attrs {
 		if attribute.Name == "workgroup" {
 			for _, argument := range attribute.Args {
@@ -197,93 +197,93 @@ func (a *analysis) function(function *ast.FunctionDecl) {
 	}
 }
 
-func (a *analysis) typeExpression(expression ast.TypeExpr) {
+func (a *analysis) typeExpression(expression parser.TypeExpr) {
 	switch item := expression.(type) {
-	case *ast.NamedType:
+	case *parser.NamedType:
 		a.refs[item.Name] = true
-	case *ast.RuntimeArrayType:
+	case *parser.RuntimeArrayType:
 		a.typeExpression(item.Elem)
-	case *ast.FixedArrayType:
+	case *parser.FixedArrayType:
 		a.typeExpression(item.Elem)
 		a.expression(item.Count)
-	case *ast.VectorType:
+	case *parser.VectorType:
 		a.typeExpression(item.Elem)
-	case *ast.GenericType:
+	case *parser.GenericType:
 		for _, argument := range item.Args {
 			a.typeExpression(argument)
 		}
 	}
 }
 
-func (a *analysis) block(block *ast.BlockStmt) {
+func (a *analysis) block(block *parser.BlockStmt) {
 	outer := maps.Clone(a.locals)
 	defer func() { a.locals = outer }()
 	for _, statement := range block.Stmts {
 		switch item := statement.(type) {
-		case *ast.VarStmt:
+		case *parser.VarStmt:
 			a.bindings = append(a.bindings, binding{"local", item.Name, item.Span})
 			if item.Type != nil {
 				a.typeExpression(item.Type)
 			}
 			a.expression(item.Value)
 			a.locals[item.Name] = true
-		case *ast.ConstStmt:
+		case *parser.ConstStmt:
 			a.bindings = append(a.bindings, binding{"constant", item.Name, item.Span})
 			if item.Type != nil {
 				a.typeExpression(item.Type)
 			}
 			a.expression(item.Value)
 			a.locals[item.Name] = true
-		case *ast.WorkgroupStmt:
+		case *parser.WorkgroupStmt:
 			a.bindings = append(a.bindings, binding{"shared variable", item.Name, item.Span})
 			a.typeExpression(item.Type)
 			a.locals[item.Name] = true
-		case *ast.AssignStmt:
+		case *parser.AssignStmt:
 			a.expression(item.Target)
 			a.expression(item.Value)
-		case *ast.IncStmt:
+		case *parser.IncStmt:
 			a.expression(item.Target)
-		case *ast.ExprStmt:
+		case *parser.ExprStmt:
 			a.expression(item.Expr)
 			if !sideEffecting(item.Expr) {
 				a.diagnostics = append(a.diagnostics, warning("discarded-value", item.Span, "pure expression result is discarded", "remove the statement or bind and use its result"))
 			}
-		case *ast.IfStmt:
+		case *parser.IfStmt:
 			a.expression(item.Cond)
 			a.warnBool(item.Cond, "if")
 			a.block(item.Then)
 			if item.Else != nil {
 				a.block(item.Else)
 			}
-		case *ast.WhileStmt:
+		case *parser.WhileStmt:
 			a.expression(item.Cond)
-			if value, ok := item.Cond.(*ast.BoolExpr); ok && !value.Value {
+			if value, ok := item.Cond.(*parser.BoolExpr); ok && !value.Value {
 				a.diagnostics = append(a.diagnostics, warning("constant-condition", value.Span, "while condition is always false", "remove the loop or use a non-constant condition"))
 			}
 			a.block(item.Body)
-		case *ast.ForStmt:
+		case *parser.ForStmt:
 			a.bindings = append(a.bindings, binding{"local", item.Init.Name, item.Init.Span})
 			a.expression(item.Init.Value)
 			a.locals[item.Init.Name] = true
 			a.expression(item.Cond)
-			if value, ok := item.Cond.(*ast.BoolExpr); ok && !value.Value {
+			if value, ok := item.Cond.(*parser.BoolExpr); ok && !value.Value {
 				a.diagnostics = append(a.diagnostics, warning("constant-condition", value.Span, "for condition is always false", "remove the loop or use a non-constant condition"))
 			}
 			a.block(item.Body)
-			a.block(&ast.BlockStmt{Stmts: []ast.Stmt{item.Post}})
+			a.block(&parser.BlockStmt{Stmts: []parser.Stmt{item.Post}})
 			delete(a.locals, item.Init.Name)
-		case *ast.ReturnStmt:
+		case *parser.ReturnStmt:
 			if item.Value != nil {
 				a.expression(item.Value)
 			}
-		case *ast.RunStmt:
+		case *parser.RunStmt:
 			a.refs[item.Stage] = true
 			for _, argument := range item.Args {
 				a.expression(argument)
 			}
 			for _, axis := range item.Domain.Axes {
 				a.expression(axis)
-				if number, ok := axis.(*ast.NumberExpr); ok && zero(number.Raw) {
+				if number, ok := axis.(*parser.NumberExpr); ok && zero(number.Raw) {
 					a.diagnostics = append(a.diagnostics, warning("zero-dispatch", number.Span, "dispatch axis is always zero, so the kernel cannot run", "use a positive launch extent or remove the dispatch"))
 				}
 			}
@@ -291,25 +291,25 @@ func (a *analysis) block(block *ast.BlockStmt) {
 	}
 }
 
-func (a *analysis) expression(expression ast.Expr) {
+func (a *analysis) expression(expression parser.Expr) {
 	switch item := expression.(type) {
-	case *ast.IdentExpr:
+	case *parser.IdentExpr:
 		a.reads[item.Name] = true
 		if !a.locals[item.Name] && a.globals[item.Name] {
 			a.refs[item.Name] = true
 		}
-	case *ast.UnaryExpr:
+	case *parser.UnaryExpr:
 		a.expression(item.X)
-	case *ast.BinaryExpr:
+	case *parser.BinaryExpr:
 		a.expression(item.Left)
 		a.expression(item.Right)
-	case *ast.ConditionalExpr:
+	case *parser.ConditionalExpr:
 		a.expression(item.Cond)
 		a.warnBool(item.Cond, "conditional")
 		a.expression(item.Then)
 		a.expression(item.Else)
-	case *ast.CallExpr:
-		if callee, ok := item.Callee.(*ast.IdentExpr); ok {
+	case *parser.CallExpr:
+		if callee, ok := item.Callee.(*parser.IdentExpr); ok {
 			a.refs[callee.Name] = true
 		} else {
 			a.expression(item.Callee)
@@ -317,33 +317,33 @@ func (a *analysis) expression(expression ast.Expr) {
 		for _, argument := range item.Args {
 			a.expression(argument)
 		}
-	case *ast.MemberExpr:
+	case *parser.MemberExpr:
 		a.expression(item.Base)
-	case *ast.IndexExpr:
+	case *parser.IndexExpr:
 		a.expression(item.Base)
 		a.expression(item.Index)
-	case *ast.StructLiteralExpr:
+	case *parser.StructLiteralExpr:
 		for _, field := range item.Fields {
 			a.expression(field.Value)
 		}
-	case *ast.TransientExpr:
+	case *parser.TransientExpr:
 		a.typeExpression(item.Elem)
 		a.expression(item.Count)
 	}
 }
 
-func (a *analysis) warnBool(expression ast.Expr, context string) {
-	if value, ok := expression.(*ast.BoolExpr); ok {
+func (a *analysis) warnBool(expression parser.Expr, context string) {
+	if value, ok := expression.(*parser.BoolExpr); ok {
 		a.diagnostics = append(a.diagnostics, warning("constant-condition", value.Span, fmt.Sprintf("%s condition is always %t", context, value.Value), "remove the branch or use a non-constant condition"))
 	}
 }
 
-func sideEffecting(expression ast.Expr) bool {
-	call, ok := expression.(*ast.CallExpr)
+func sideEffecting(expression parser.Expr) bool {
+	call, ok := expression.(*parser.CallExpr)
 	if !ok {
 		return false
 	}
-	callee, ok := call.Callee.(*ast.IdentExpr)
+	callee, ok := call.Callee.(*parser.IdentExpr)
 	return ok && (callee.Name == "workgroupBarrier" || callee.Name == "bufferBarrier" || strings.HasPrefix(callee.Name, "atomic"))
 }
 

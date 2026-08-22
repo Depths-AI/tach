@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"tach/src/ast"
 	"tach/src/ir"
 	"tach/src/opt"
 	"tach/src/parser"
@@ -39,7 +38,7 @@ func emitSource(t *testing.T, name, source string) []byte {
 
 func particleModule(t *testing.T) *ir.Module {
 	t.Helper()
-	var modules []*ast.Module
+	var modules []*parser.File
 	for _, name := range []string{"types", "particles"} {
 		source, err := os.ReadFile("../../examples/simulation/" + name + ".tach")
 		if err != nil {
@@ -49,7 +48,7 @@ func particleModule(t *testing.T) *ir.Module {
 		if err != nil {
 			t.Fatal(err)
 		}
-		module.File = "simulation/" + name
+		module.Path = "simulation/" + name
 		modules = append(modules, module)
 	}
 	module, _, err := sema.CheckAndLowerProject(modules)

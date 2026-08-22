@@ -3,29 +3,29 @@ package sema
 import (
 	"strings"
 
-	"tach/src/ast"
 	"tach/src/foundation"
 	"tach/src/ir"
+	"tach/src/parser"
 )
 
-func checkDocumentation(module *ast.Module) (ir.Documentation, error) {
+func checkDocumentation(file *parser.File) (ir.Documentation, error) {
 	docs := ir.Documentation{Types: map[string]ir.TypeDocumentation{}, Functions: map[string]ir.FunctionDocumentation{}}
 	var diagnostics foundation.Diagnostics
-	moduleDocs, rest, err := takeDocs(module.Attrs)
+	fileDocs, rest, err := takeDocs(file.Attrs)
 	if err != nil {
 		diagnostics = appendError(diagnostics, err)
 	}
 	if len(rest) > 0 {
 		diagnostics = appendError(diagnostics, diag(rest[0].Span, "only @docs is valid at kernel scope"))
 	}
-	if moduleDocs != nil {
-		if err := readModuleDocs(*moduleDocs, &docs); err != nil {
+	if fileDocs != nil {
+		if err := readFileDocs(*fileDocs, &docs); err != nil {
 			diagnostics = appendError(diagnostics, err)
 		}
 	}
-	for _, declaration := range module.Decls {
+	for _, declaration := range file.Decls {
 		switch d := declaration.(type) {
-		case *ast.TypeDecl:
+		case *parser.TypeDecl:
 			a, remaining, err := takeDocs(d.Attrs)
 			if err != nil {
 				diagnostics = appendError(diagnostics, err)
@@ -42,7 +42,7 @@ func checkDocumentation(module *ast.Module) (ir.Documentation, error) {
 				}
 				docs.Types[d.Name] = doc
 			}
-		case *ast.FunctionDecl:
+		case *parser.FunctionDecl:
 			a, remaining, err := takeDocs(d.Attrs)
 			if err != nil {
 				diagnostics = appendError(diagnostics, err)
@@ -64,10 +64,10 @@ func checkDocumentation(module *ast.Module) (ir.Documentation, error) {
 	return docs, nil
 }
 
-func takeDocs(attrs []ast.Attribute) (*ast.Attribute, []ast.Attribute, error) {
-	var docs *ast.Attribute
+func takeDocs(attrs []parser.Attribute) (*parser.Attribute, []parser.Attribute, error) {
+	var docs *parser.Attribute
 	var duplicate error
-	rest := make([]ast.Attribute, 0, len(attrs))
+	rest := make([]parser.Attribute, 0, len(attrs))
 	for i := range attrs {
 		if attrs[i].Name != "docs" {
 			rest = append(rest, attrs[i])
@@ -84,7 +84,7 @@ func takeDocs(attrs []ast.Attribute) (*ast.Attribute, []ast.Attribute, error) {
 	return docs, rest, duplicate
 }
 
-func readModuleDocs(attribute ast.Attribute, out *ir.Documentation) error {
+func readFileDocs(attribute parser.Attribute, out *ir.Documentation) error {
 	seen := map[string]bool{}
 	for _, expression := range attribute.Args {
 		name, args, err := docClause(expression)
@@ -92,7 +92,7 @@ func readModuleDocs(attribute ast.Attribute, out *ir.Documentation) error {
 			return err
 		}
 		if name != "title" && name != "summary" {
-			return diag(expression.GetSpan(), "@docs clause %s is invalid for a module", name)
+			return diag(expression.GetSpan(), "@docs clause %s is invalid at kernel scope", name)
 		}
 		if seen[name] {
 			return diag(expression.GetSpan(), "duplicate %s in @docs", name)
@@ -111,7 +111,7 @@ func readModuleDocs(attribute ast.Attribute, out *ir.Documentation) error {
 	return requireSummary(attribute, seen)
 }
 
-func readTypeDocs(attribute ast.Attribute, declaration *ast.TypeDecl) (ir.TypeDocumentation, error) {
+func readTypeDocs(attribute parser.Attribute, declaration *parser.TypeDecl) (ir.TypeDocumentation, error) {
 	out := ir.TypeDocumentation{Fields: map[string]string{}}
 	fields := map[string]bool{}
 	for _, field := range declaration.Fields {
@@ -152,7 +152,7 @@ func readTypeDocs(attribute ast.Attribute, declaration *ast.TypeDecl) (ir.TypeDo
 	return out, requireSummary(attribute, seen)
 }
 
-func readFunctionDocs(attribute ast.Attribute, declaration *ast.FunctionDecl) (ir.FunctionDocumentation, error) {
+func readFunctionDocs(attribute parser.Attribute, declaration *parser.FunctionDecl) (ir.FunctionDocumentation, error) {
 	out := ir.FunctionDocumentation{Parameters: map[string]string{}, Coordinates: map[string]string{}}
 	parameters, coordinates := map[string]bool{}, map[string]bool{}
 	for _, parameter := range declaration.Params {
@@ -217,34 +217,34 @@ func readFunctionDocs(attribute ast.Attribute, declaration *ast.FunctionDecl) (i
 	return out, requireSummary(attribute, seen)
 }
 
-func docClause(expression ast.Expr) (string, []ast.Expr, error) {
-	call, ok := expression.(*ast.CallExpr)
+func docClause(expression parser.Expr) (string, []parser.Expr, error) {
+	call, ok := expression.(*parser.CallExpr)
 	if !ok {
 		return "", nil, diag(expression.GetSpan(), "@docs entries must be clauses such as summary(\"...\")")
 	}
-	name, ok := call.Callee.(*ast.IdentExpr)
+	name, ok := call.Callee.(*parser.IdentExpr)
 	if !ok {
 		return "", nil, diag(call.Callee.GetSpan(), "@docs clause must have a simple name")
 	}
 	return name.Name, call.Args, nil
 }
 
-func docText(clause string, args []ast.Expr, span foundation.Span) (string, error) {
+func docText(clause string, args []parser.Expr, span foundation.Span) (string, error) {
 	if len(args) != 1 {
 		return "", diag(argsSpan(args, span), "%s expects one string", clause)
 	}
-	text, ok := args[0].(*ast.StringExpr)
+	text, ok := args[0].(*parser.StringExpr)
 	if !ok || strings.TrimSpace(text.Value) == "" {
 		return "", diag(args[0].GetSpan(), "%s expects a non-empty string", clause)
 	}
 	return strings.TrimSpace(text.Value), nil
 }
 
-func namedDoc(clause string, args []ast.Expr, span foundation.Span) (string, string, error) {
+func namedDoc(clause string, args []parser.Expr, span foundation.Span) (string, string, error) {
 	if len(args) != 2 {
 		return "", "", diag(argsSpan(args, span), "%s expects a name and a string", clause)
 	}
-	name, ok := args[0].(*ast.IdentExpr)
+	name, ok := args[0].(*parser.IdentExpr)
 	if !ok {
 		return "", "", diag(args[0].GetSpan(), "%s expects an unquoted declaration name", clause)
 	}
@@ -252,21 +252,21 @@ func namedDoc(clause string, args []ast.Expr, span foundation.Span) (string, str
 	return name.Name, text, err
 }
 
-func requireSummary(attribute ast.Attribute, seen map[string]bool) error {
+func requireSummary(attribute parser.Attribute, seen map[string]bool) error {
 	if !seen["summary"] {
 		return diag(attribute.Span, "@docs requires summary(\"...\")")
 	}
 	return nil
 }
 
-func argsSpan(args []ast.Expr, fallback foundation.Span) foundation.Span {
+func argsSpan(args []parser.Expr, fallback foundation.Span) foundation.Span {
 	if len(args) > 0 {
 		return args[0].GetSpan()
 	}
 	return fallback
 }
 
-func isVoidType(expression ast.TypeExpr) bool {
-	named, ok := expression.(*ast.NamedType)
+func isVoidType(expression parser.TypeExpr) bool {
+	named, ok := expression.(*parser.NamedType)
 	return ok && named.Name == "void"
 }
