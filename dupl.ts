@@ -1,5 +1,5 @@
 const result = await new Deno.Command("go", {
-  args: ["tool", "dupl", "-plumbing", "-t", "75", "src", "native", "main.go"],
+  args: ["-C", "compiler", "tool", "dupl", "-plumbing", "-t", "75", "."],
   stdout: "piped",
   stderr: "inherit",
 }).output();
