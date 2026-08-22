@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"maps"
 
-	"tach/src/source"
+	"tach/src/foundation"
 )
 
 // Tach owns barrier legality at the semantic IR layer. The analysis is scoped
@@ -125,7 +125,7 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 				if x.Kind == BarrierBuffer {
 					name = "bufferBarrier"
 				}
-				return e, control, &source.Diagnostic{Span: x.Span, Message: fmt.Sprintf("%s is reached through non-uniform control flow", name)}
+				return e, control, &foundation.Diagnostic{Span: x.Span, Message: fmt.Sprintf("%s is reached through non-uniform control flow", name)}
 			}
 		case *If:
 			condUniform := value(x.Cond)

@@ -8,16 +8,15 @@ import (
 	"strings"
 
 	"tach/src/ast"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/source"
-	"tach/src/types"
 )
 
 type runtimeConstantDependency struct{ error }
 
 func (e *runtimeConstantDependency) Unwrap() error { return e.error }
 
-func (c *Checker) tryConstant(expression ast.Expr, expected *types.Type, environment env) (*types.Value, bool, error) {
+func (c *Checker) tryConstant(expression ast.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, bool, error) {
 	value, err := c.evaluateConstant(expression, expected, environment)
 	var runtime *runtimeConstantDependency
 	if errors.As(err, &runtime) {
@@ -40,7 +39,7 @@ func (c *Checker) collectConstants() error {
 		}
 		c.consts[item.Name] = &constantDef{decl: item}
 	}
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	reported := map[string]bool{}
 	for _, declaration := range c.ast.Decls {
 		item, ok := declaration.(*ast.ConstDecl)
@@ -60,7 +59,7 @@ func (c *Checker) collectConstants() error {
 	return nil
 }
 
-func (c *Checker) resolveConstant(name string, reference source.Span) (*types.Value, error) {
+func (c *Checker) resolveConstant(name string, reference foundation.Span) (*foundation.ConstantValue, error) {
 	definition := c.consts[name]
 	if definition == nil || !c.visible(name, reference.File) {
 		return nil, diag(reference, "unknown constant %q", name)
@@ -80,10 +79,10 @@ func (c *Checker) resolveConstant(name string, reference source.Span) (*types.Va
 			}
 		}
 		chain := append(append([]string(nil), c.constantStack[start:]...), name)
-		diagnostic := &source.Diagnostic{Span: reference, Message: fmt.Sprintf("compile-time constant cycle: %s", strings.Join(chain, " -> "))}
+		diagnostic := &foundation.Diagnostic{Span: reference, Message: fmt.Sprintf("compile-time constant cycle: %s", strings.Join(chain, " -> "))}
 		for _, item := range chain[:len(chain)-1] {
 			constant := c.consts[item]
-			diagnostic.Related = append(diagnostic.Related, source.Related{Span: constant.decl.Span, Message: fmt.Sprintf("constant %q participates in this cycle", item)})
+			diagnostic.Related = append(diagnostic.Related, foundation.RelatedDiagnostic{Span: constant.decl.Span, Message: fmt.Sprintf("constant %q participates in this cycle", item)})
 			constant.state, constant.err = 3, diagnostic
 		}
 		return nil, diagnostic
@@ -103,25 +102,25 @@ func (c *Checker) resolveConstant(name string, reference source.Span) (*types.Va
 	return definition.value, nil
 }
 
-func (c *Checker) evaluateConstantBinding(typeExpression ast.TypeExpr, expression ast.Expr, environment env) (*types.Value, error) {
-	var expected *types.Type
+func (c *Checker) evaluateConstantBinding(typeExpression ast.TypeExpr, expression ast.Expr, environment env) (*foundation.ConstantValue, error) {
+	var expected *foundation.Type
 	var err error
 	if typeExpression != nil {
 		expected, err = c.resolveTypeIn(typeExpression, &environment)
 		if err != nil {
 			return nil, err
 		}
-		if !types.IsConstantType(expected) {
+		if !foundation.IsConstantType(expected) {
 			return nil, diag(typeExpression.GetSpan(), "compile-time constant type must be a scalar or vector, got %s", expected)
 		}
 	}
 	return c.evaluateConstant(expression, expected, environment)
 }
 
-func (c *Checker) evaluateConstant(expression ast.Expr, expected *types.Type, environment env) (*types.Value, error) {
+func (c *Checker) evaluateConstant(expression ast.Expr, expected *foundation.Type, environment env) (*foundation.ConstantValue, error) {
 	block := &ir.Block{}
 	builder := &fnBuilder{
-		fn:       &ir.Function{Kind: ir.Helper, Return: types.TVoid, Body: block},
+		fn:       &ir.Function{Kind: ir.Helper, Return: foundation.VoidType, Body: block},
 		ids:      &idAllocator{},
 		block:    block,
 		comptime: true,
@@ -130,13 +129,13 @@ func (c *Checker) evaluateConstant(expression ast.Expr, expected *types.Type, en
 	if err != nil {
 		return nil, err
 	}
-	if !types.IsConstantType(resultType) {
+	if !foundation.IsConstantType(resultType) {
 		return nil, diag(expression.GetSpan(), "compile-time expression produces %s; constants must be scalar or vector values", resultType)
 	}
-	if expected != nil && !types.Equal(resultType, expected) {
+	if expected != nil && !foundation.Equal(resultType, expected) {
 		return nil, diag(expression.GetSpan(), "compile-time expression is %s, want %s", resultType, expected)
 	}
-	values := map[ir.ValueID]*types.Value{}
+	values := map[ir.ValueID]*foundation.ConstantValue{}
 	if _, err := evaluateConstantBlock(block, values); err != nil {
 		return nil, diag(expression.GetSpan(), "invalid compile-time expression: %v", err)
 	}
@@ -147,9 +146,9 @@ func (c *Checker) evaluateConstant(expression ast.Expr, expected *types.Type, en
 	return value, nil
 }
 
-func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) ([]*types.Value, error) {
+func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*foundation.ConstantValue) ([]*foundation.ConstantValue, error) {
 	for _, instruction := range block.Instrs {
-		var value *types.Value
+		var value *foundation.ConstantValue
 		var err error
 		switch item := instruction.(type) {
 		case *ir.Const:
@@ -167,24 +166,24 @@ func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) 
 			if base == nil || item.Index < 0 || item.Index >= len(base.Bits) {
 				err = fmt.Errorf("constant vector component is unavailable")
 			} else {
-				value = &types.Value{Type: item.Type, Bits: []uint32{base.Bits[item.Index]}}
+				value = &foundation.ConstantValue{Type: item.Type, Bits: []uint32{base.Bits[item.Index]}}
 			}
 		case *ir.VectorIndex:
 			base, index := values[item.Base], values[item.Index]
 			if base == nil || index == nil || len(index.Bits) != 1 || index.Bits[0] >= uint32(len(base.Bits)) {
 				err = fmt.Errorf("constant vector index is outside its lanes")
 			} else {
-				value = &types.Value{Type: item.Type, Bits: []uint32{base.Bits[index.Bits[0]]}}
+				value = &foundation.ConstantValue{Type: item.Type, Bits: []uint32{base.Bits[index.Bits[0]]}}
 			}
 		case *ir.Intrinsic:
-			arguments := make([]*types.Value, len(item.Args))
+			arguments := make([]*foundation.ConstantValue, len(item.Args))
 			for index, id := range item.Args {
 				arguments[index] = values[id]
 			}
 			value, err = evaluateIntrinsic(item.Kind, item.Type, arguments)
 		case *ir.If:
 			condition := values[item.Cond]
-			if condition == nil || !types.Equal(condition.Type, types.TBool) || len(condition.Bits) != 1 {
+			if condition == nil || !foundation.Equal(condition.Type, foundation.BoolType) || len(condition.Bits) != 1 {
 				err = fmt.Errorf("constant condition is unavailable")
 				break
 			}
@@ -192,7 +191,7 @@ func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) 
 			if condition.Bits[0] != 0 {
 				branch = item.Then
 			}
-			var yielded []*types.Value
+			var yielded []*foundation.ConstantValue
 			yielded, err = evaluateConstantBlock(branch, values)
 			if err == nil && len(yielded) != len(item.Results) {
 				err = fmt.Errorf("constant branch yielded %d values, want %d", len(yielded), len(item.Results))
@@ -220,7 +219,7 @@ func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) 
 	if !ok {
 		return nil, fmt.Errorf("constant expression contains runtime control flow")
 	}
-	out := make([]*types.Value, len(yield.Values))
+	out := make([]*foundation.ConstantValue, len(yield.Values))
 	for index, id := range yield.Values {
 		out[index] = values[id]
 		if out[index] == nil {
@@ -230,29 +229,29 @@ func evaluateConstantBlock(block *ir.Block, values map[ir.ValueID]*types.Value) 
 	return out, nil
 }
 
-func parseConstant(t *types.Type, raw string) (*types.Value, error) {
+func parseConstant(t *foundation.Type, raw string) (*foundation.ConstantValue, error) {
 	var bits uint32
 	switch t.Kind {
-	case types.Bool:
+	case foundation.BoolKind:
 		if raw != "false" {
 			if raw != "true" {
 				return nil, fmt.Errorf("invalid bool constant %q", raw)
 			}
 			bits = 1
 		}
-	case types.I32:
+	case foundation.Int32Kind:
 		number, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil {
 			return nil, err
 		}
 		bits = uint32(int32(number))
-	case types.U32:
+	case foundation.Uint32Kind:
 		number, err := strconv.ParseUint(raw, 10, 32)
 		if err != nil {
 			return nil, err
 		}
 		bits = uint32(number)
-	case types.F16, types.F32:
+	case foundation.Float16Kind, foundation.Float32Kind:
 		number, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			return nil, err
@@ -264,17 +263,17 @@ func parseConstant(t *types.Type, raw string) (*types.Value, error) {
 	default:
 		return nil, fmt.Errorf("%s is not a scalar constant type", t)
 	}
-	return &types.Value{Type: t, Bits: []uint32{bits}}, nil
+	return &foundation.ConstantValue{Type: t, Bits: []uint32{bits}}, nil
 }
 
-func composeConstant(t *types.Type, ids []ir.ValueID, values map[ir.ValueID]*types.Value) (*types.Value, error) {
-	if t.Kind != types.Vector || len(ids) != t.Lanes {
+func composeConstant(t *foundation.Type, ids []ir.ValueID, values map[ir.ValueID]*foundation.ConstantValue) (*foundation.ConstantValue, error) {
+	if t.Kind != foundation.VectorKind || len(ids) != t.Lanes {
 		return nil, fmt.Errorf("invalid constant vector composition")
 	}
-	out := &types.Value{Type: t, Bits: make([]uint32, len(ids))}
+	out := &foundation.ConstantValue{Type: t, Bits: make([]uint32, len(ids))}
 	for index, id := range ids {
 		value := values[id]
-		if value == nil || !types.Equal(value.Type, t.Elem) || len(value.Bits) != 1 {
+		if value == nil || !foundation.Equal(value.Type, t.Elem) || len(value.Bits) != 1 {
 			return nil, fmt.Errorf("constant vector lane %d is unavailable", index)
 		}
 		out.Bits[index] = value.Bits[0]
@@ -282,19 +281,19 @@ func composeConstant(t *types.Type, ids []ir.ValueID, values map[ir.ValueID]*typ
 	return out, nil
 }
 
-func evaluateUnary(operator string, operand *types.Value, resultType *types.Type) (*types.Value, error) {
+func evaluateUnary(operator string, operand *foundation.ConstantValue, resultType *foundation.Type) (*foundation.ConstantValue, error) {
 	if operand == nil {
 		return nil, fmt.Errorf("constant operand is unavailable")
 	}
-	out := &types.Value{Type: resultType, Bits: make([]uint32, len(operand.Bits))}
+	out := &foundation.ConstantValue{Type: resultType, Bits: make([]uint32, len(operand.Bits))}
 	element := resultType
-	if resultType.Kind == types.Vector {
+	if resultType.Kind == foundation.VectorKind {
 		element = resultType.Elem
 	}
 	for index, bits := range operand.Bits {
 		switch operator {
 		case "!":
-			if element.Kind != types.Bool {
+			if element.Kind != foundation.BoolKind {
 				return nil, fmt.Errorf("! requires bool")
 			}
 			out.Bits[index] = 1 - bits
@@ -302,9 +301,9 @@ func evaluateUnary(operator string, operand *types.Value, resultType *types.Type
 			out.Bits[index] = ^bits
 		case "-":
 			switch element.Kind {
-			case types.I32:
+			case foundation.Int32Kind:
 				out.Bits[index] = uint32(-int32(bits))
-			case types.F16, types.F32:
+			case foundation.Float16Kind, foundation.Float32Kind:
 				value, err := floatBits(element, -floatValue(element, bits))
 				if err != nil {
 					return nil, err
@@ -320,7 +319,7 @@ func evaluateUnary(operator string, operand *types.Value, resultType *types.Type
 	return out, nil
 }
 
-func evaluateBinary(operator string, left, right *types.Value, resultType *types.Type) (*types.Value, error) {
+func evaluateBinary(operator string, left, right *foundation.ConstantValue, resultType *foundation.Type) (*foundation.ConstantValue, error) {
 	if left == nil || right == nil {
 		return nil, fmt.Errorf("constant operand is unavailable")
 	}
@@ -328,9 +327,9 @@ func evaluateBinary(operator string, left, right *types.Value, resultType *types
 	if len(left.Bits) != 1 && len(left.Bits) != lanes || len(right.Bits) != 1 && len(right.Bits) != lanes {
 		return nil, fmt.Errorf("constant vector widths differ")
 	}
-	out := &types.Value{Type: resultType, Bits: make([]uint32, lanes)}
+	out := &foundation.ConstantValue{Type: resultType, Bits: make([]uint32, lanes)}
 	element := left.Type
-	if element.Kind == types.Vector {
+	if element.Kind == foundation.VectorKind {
 		element = element.Elem
 	}
 	for lane := range lanes {
@@ -344,20 +343,20 @@ func evaluateBinary(operator string, left, right *types.Value, resultType *types
 	return out, nil
 }
 
-func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, error) {
+func binaryLane(operator string, t *foundation.Type, left, right uint32) (uint32, error) {
 	if operator == "==" || operator == "!=" || operator == "<" || operator == "<=" || operator == ">" || operator == ">=" {
 		var less, equal bool
 		switch t.Kind {
-		case types.Bool:
+		case foundation.BoolKind:
 			if operator != "==" && operator != "!=" {
 				return 0, fmt.Errorf("ordered comparison requires numeric values")
 			}
 			equal = left == right
-		case types.I32:
+		case foundation.Int32Kind:
 			less, equal = int32(left) < int32(right), left == right
-		case types.U32:
+		case foundation.Uint32Kind:
 			less, equal = left < right, left == right
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			l, r := floatValue(t, left), floatValue(t, right)
 			less, equal = l < r, l == r
 		default:
@@ -370,7 +369,7 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 		}
 		return 0, nil
 	}
-	if t.Kind == types.Bool {
+	if t.Kind == foundation.BoolKind {
 		switch operator {
 		case "&":
 			return left & right, nil
@@ -382,7 +381,7 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 			return 0, fmt.Errorf("operator %s is invalid for bool", operator)
 		}
 	}
-	if t.Kind == types.F16 || t.Kind == types.F32 {
+	if t.Kind == foundation.Float16Kind || t.Kind == foundation.Float32Kind {
 		l, r := floatValue(t, left), floatValue(t, right)
 		var value float64
 		switch operator {
@@ -407,7 +406,7 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 		}
 		return floatBits(t, value)
 	}
-	if t.Kind != types.I32 && t.Kind != types.U32 {
+	if t.Kind != foundation.Int32Kind && t.Kind != foundation.Uint32Kind {
 		return 0, fmt.Errorf("operator %s requires numeric values", operator)
 	}
 	switch operator {
@@ -424,7 +423,7 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 			}
 			return 0, fmt.Errorf("division by zero")
 		}
-		if t.Kind == types.I32 {
+		if t.Kind == foundation.Int32Kind {
 			l, r := int32(left), int32(right)
 			if l == math.MinInt32 && r == -1 {
 				return 0, fmt.Errorf("signed division overflows int32")
@@ -447,7 +446,7 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 	case "<<":
 		return left << (right & 31), nil
 	case ">>":
-		if t.Kind == types.I32 {
+		if t.Kind == foundation.Int32Kind {
 			return uint32(int32(left) >> (right & 31)), nil
 		}
 		return left >> (right & 31), nil
@@ -456,43 +455,43 @@ func binaryLane(operator string, t *types.Type, left, right uint32) (uint32, err
 	}
 }
 
-func convertConstant(value *types.Value, target *types.Type) (*types.Value, error) {
-	if value == nil || len(value.Bits) != 1 || !types.IsNumericScalar(value.Type) || !types.IsNumericScalar(target) {
+func convertConstant(value *foundation.ConstantValue, target *foundation.Type) (*foundation.ConstantValue, error) {
+	if value == nil || len(value.Bits) != 1 || !foundation.IsNumericScalar(value.Type) || !foundation.IsNumericScalar(target) {
 		return nil, fmt.Errorf("constant scalar conversion is invalid")
 	}
 	bits := value.Bits[0]
-	if (value.Type.Kind == types.I32 || value.Type.Kind == types.U32) && (target.Kind == types.I32 || target.Kind == types.U32) {
-		return &types.Value{Type: target, Bits: []uint32{bits}}, nil
+	if (value.Type.Kind == foundation.Int32Kind || value.Type.Kind == foundation.Uint32Kind) && (target.Kind == foundation.Int32Kind || target.Kind == foundation.Uint32Kind) {
+		return &foundation.ConstantValue{Type: target, Bits: []uint32{bits}}, nil
 	}
 	var number float64
 	switch value.Type.Kind {
-	case types.I32:
+	case foundation.Int32Kind:
 		number = float64(int32(bits))
-	case types.U32:
+	case foundation.Uint32Kind:
 		number = float64(bits)
-	case types.F16, types.F32:
+	case foundation.Float16Kind, foundation.Float32Kind:
 		number = floatValue(value.Type, bits)
 	}
-	if target.Kind == types.F16 || target.Kind == types.F32 {
+	if target.Kind == foundation.Float16Kind || target.Kind == foundation.Float32Kind {
 		converted, err := floatBits(target, number)
-		return &types.Value{Type: target, Bits: []uint32{converted}}, err
+		return &foundation.ConstantValue{Type: target, Bits: []uint32{converted}}, err
 	}
-	if value.Type.Kind == types.F16 || value.Type.Kind == types.F32 {
+	if value.Type.Kind == foundation.Float16Kind || value.Type.Kind == foundation.Float32Kind {
 		number = math.Trunc(number)
 	}
-	if target.Kind == types.I32 {
+	if target.Kind == foundation.Int32Kind {
 		if number < math.MinInt32 || number > math.MaxInt32 {
 			return nil, fmt.Errorf("constant conversion is outside int32")
 		}
-		return &types.Value{Type: target, Bits: []uint32{uint32(int32(number))}}, nil
+		return &foundation.ConstantValue{Type: target, Bits: []uint32{uint32(int32(number))}}, nil
 	}
 	if number < 0 || number > math.MaxUint32 {
 		return nil, fmt.Errorf("constant conversion is outside uint32")
 	}
-	return &types.Value{Type: target, Bits: []uint32{uint32(number)}}, nil
+	return &foundation.ConstantValue{Type: target, Bits: []uint32{uint32(number)}}, nil
 }
 
-func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments []*types.Value) (*types.Value, error) {
+func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *foundation.Type, arguments []*foundation.ConstantValue) (*foundation.ConstantValue, error) {
 	for _, argument := range arguments {
 		if argument == nil {
 			return nil, fmt.Errorf("constant intrinsic argument is unavailable")
@@ -507,10 +506,10 @@ func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments 
 				truth = truth || bit != 0
 			}
 		}
-		return &types.Value{Type: types.TBool, Bits: []uint32{boolBit(truth)}}, nil
+		return &foundation.ConstantValue{Type: foundation.BoolType, Bits: []uint32{boolBit(truth)}}, nil
 	}
 	if kind == ir.IntrinsicSelect {
-		out := &types.Value{Type: resultType, Bits: make([]uint32, resultType.Lanes)}
+		out := &foundation.ConstantValue{Type: resultType, Bits: make([]uint32, resultType.Lanes)}
 		for lane, bit := range arguments[0].Bits {
 			arm := arguments[2]
 			if bit != 0 {
@@ -522,14 +521,14 @@ func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments 
 	}
 	resultLanes := 1
 	resultElement := resultType
-	if resultType.Kind == types.Vector {
+	if resultType.Kind == foundation.VectorKind {
 		resultLanes, resultElement = resultType.Lanes, resultType.Elem
 	}
 	if kind == ir.IntrinsicDot || kind == ir.IntrinsicLength || kind == ir.IntrinsicDistance {
 		return evaluateGeometricScalar(kind, resultElement, arguments)
 	}
 	if kind == ir.IntrinsicCross {
-		out := &types.Value{Type: resultType, Bits: make([]uint32, 3)}
+		out := &foundation.ConstantValue{Type: resultType, Bits: make([]uint32, 3)}
 		left, right := arguments[0], arguments[1]
 		for lane, pair := range [][2]int{{1, 2}, {2, 0}, {0, 1}} {
 			a := floatValue(resultElement, left.Bits[pair[0]]) * floatValue(resultElement, right.Bits[pair[1]])
@@ -551,7 +550,7 @@ func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments 
 		if denominator == 0 {
 			return nil, fmt.Errorf("normalize of a zero vector")
 		}
-		out := &types.Value{Type: resultType, Bits: make([]uint32, resultLanes)}
+		out := &foundation.ConstantValue{Type: resultType, Bits: make([]uint32, resultLanes)}
 		for lane := range resultLanes {
 			bits, err := floatBits(resultElement, floatValue(resultElement, arguments[0].Bits[lane])/denominator)
 			if err != nil {
@@ -561,7 +560,7 @@ func evaluateIntrinsic(kind ir.IntrinsicKind, resultType *types.Type, arguments 
 		}
 		return out, nil
 	}
-	out := &types.Value{Type: resultType, Bits: make([]uint32, resultLanes)}
+	out := &foundation.ConstantValue{Type: resultType, Bits: make([]uint32, resultLanes)}
 	for lane := range resultLanes {
 		laneArguments := make([]uint32, len(arguments))
 		for index, argument := range arguments {
@@ -583,7 +582,7 @@ func boolBit(value bool) uint32 {
 	return 0
 }
 
-func evaluateGeometricScalar(kind ir.IntrinsicKind, t *types.Type, arguments []*types.Value) (*types.Value, error) {
+func evaluateGeometricScalar(kind ir.IntrinsicKind, t *foundation.Type, arguments []*foundation.ConstantValue) (*foundation.ConstantValue, error) {
 	left := arguments[0]
 	sum := 0.0
 	for lane := range len(left.Bits) {
@@ -602,15 +601,15 @@ func evaluateGeometricScalar(kind ir.IntrinsicKind, t *types.Type, arguments []*
 		sum = math.Sqrt(sum)
 	}
 	bits, err := floatBits(t, sum)
-	return &types.Value{Type: t, Bits: []uint32{bits}}, err
+	return &foundation.ConstantValue{Type: t, Bits: []uint32{bits}}, err
 }
 
-func intrinsicLane(kind ir.IntrinsicKind, t *types.Type, arguments []uint32) (uint32, error) {
-	if t.Kind == types.I32 || t.Kind == types.U32 {
+func intrinsicLane(kind ir.IntrinsicKind, t *foundation.Type, arguments []uint32) (uint32, error) {
+	if t.Kind == foundation.Int32Kind || t.Kind == foundation.Uint32Kind {
 		left := arguments[0]
 		switch kind {
 		case ir.IntrinsicAbs:
-			if t.Kind == types.I32 && int32(left) < 0 {
+			if t.Kind == foundation.Int32Kind && int32(left) < 0 {
 				left = uint32(-int32(left))
 			}
 			return left, nil
@@ -621,7 +620,7 @@ func intrinsicLane(kind ir.IntrinsicKind, t *types.Type, arguments []uint32) (ui
 				first, second = right, left
 			}
 			less := first < second
-			if t.Kind == types.I32 {
+			if t.Kind == foundation.Int32Kind {
 				less = int32(first) < int32(second)
 			}
 			if less {
@@ -692,19 +691,19 @@ func intrinsicLane(kind ir.IntrinsicKind, t *types.Type, arguments []uint32) (ui
 	return floatBits(t, result)
 }
 
-func floatValue(t *types.Type, bits uint32) float64 {
-	if t.Kind == types.F16 {
-		return types.Float16frombits(uint16(bits))
+func floatValue(t *foundation.Type, bits uint32) float64 {
+	if t.Kind == foundation.Float16Kind {
+		return foundation.Float16FromBits(uint16(bits))
 	}
 	return float64(math.Float32frombits(bits))
 }
 
-func floatBits(t *types.Type, value float64) (uint32, error) {
+func floatBits(t *foundation.Type, value float64) (uint32, error) {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return 0, fmt.Errorf("constant expression produced a non-finite %s", t)
 	}
-	if t.Kind == types.F16 {
-		bits, ok := types.Float16bits(value)
+	if t.Kind == foundation.Float16Kind {
+		bits, ok := foundation.Float16Bits(value)
 		if !ok {
 			return 0, fmt.Errorf("constant expression is outside float16")
 		}
@@ -717,7 +716,7 @@ func floatBits(t *types.Type, value float64) (uint32, error) {
 	return math.Float32bits(converted), nil
 }
 
-func materializeConstant(builder *fnBuilder, value *types.Value, span source.Span) (ir.ValueID, *types.Type) {
+func materializeConstant(builder *fnBuilder, value *foundation.ConstantValue, span foundation.Span) (ir.ValueID, *foundation.Type) {
 	result, instructions := ir.MaterializeConstant(value, span, builder.value)
 	builder.block.Instrs = append(builder.block.Instrs, instructions...)
 	return result, value.Type

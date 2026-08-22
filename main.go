@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"tach/src/compiler"
-	"tach/src/source"
+	"tach/src/foundation"
 )
 
 var version = "0.2.0"
@@ -16,7 +16,7 @@ func main() {
 	if len(os.Args) < 2 {
 		fail(fmt.Errorf("private Tach compiler operation is required"))
 	}
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	var err error
 	switch os.Args[1] {
 	case "_build":
@@ -48,7 +48,7 @@ func main() {
 	}
 }
 
-func build(args []string) (source.Diagnostics, error) {
+func build(args []string) (foundation.Diagnostics, error) {
 	flags := flag.NewFlagSet("_build", flag.ContinueOnError)
 	output := flags.String("output", "", "")
 	verbose := flags.Bool("verbose", false, "")
@@ -69,7 +69,7 @@ func build(args []string) (source.Diagnostics, error) {
 	return result.Diagnostics, err
 }
 
-func check(args []string) (source.Diagnostics, error) {
+func check(args []string) (foundation.Diagnostics, error) {
 	workers, err := workerArgs("_check", args)
 	if err != nil {
 		return nil, err
@@ -92,7 +92,7 @@ func check(args []string) (source.Diagnostics, error) {
 	return result.Diagnostics, err
 }
 
-func docs(args []string) (source.Diagnostics, error) {
+func docs(args []string) (foundation.Diagnostics, error) {
 	workers, err := workerArgs("_docs", args)
 	if err != nil {
 		return nil, err
@@ -132,9 +132,9 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-func writeDiagnostics(diagnostics source.Diagnostics) {
+func writeDiagnostics(diagnostics foundation.Diagnostics) {
 	_ = json.NewEncoder(os.Stderr).Encode(struct {
-		Schema      int                `json:"schema"`
-		Diagnostics source.Diagnostics `json:"diagnostics"`
+		Schema      int                    `json:"schema"`
+		Diagnostics foundation.Diagnostics `json:"diagnostics"`
 	}{1, diagnostics})
 }

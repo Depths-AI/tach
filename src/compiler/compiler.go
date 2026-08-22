@@ -13,9 +13,9 @@ import (
 	"tach/src/backend"
 	"tach/src/bindings"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/opt"
 	"tach/src/sema"
-	"tach/src/source"
 	"tach/src/spirv"
 	"tach/src/wgsl"
 )
@@ -30,7 +30,7 @@ type Result struct {
 	Metadata        *bindings.Metadata
 	MetadataJSON    []byte
 	Description     []byte
-	Diagnostics     source.Diagnostics
+	Diagnostics     foundation.Diagnostics
 }
 
 func WriteNativeArtifacts(result *Result, output string, verbose bool) error {

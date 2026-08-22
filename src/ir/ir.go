@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"strings"
 
-	"tach/src/source"
-	"tach/src/types"
+	"tach/src/foundation"
 )
 
 type ValueID uint32
 type PlaceID uint32
 
 type Module struct {
-	Structs   []*types.Type
+	Structs   []*foundation.Type
 	Functions []*Function
 }
 
@@ -25,9 +24,9 @@ const (
 
 type BufferParam struct {
 	Name   string
-	Type   *types.Type // logical resource type; runtime array is allowed for buffers
+	Type   *foundation.Type // logical resource type; runtime array is allowed for buffers
 	Access Access
-	Span   source.Span
+	Span   foundation.Span
 }
 
 type FunctionKind uint8
@@ -63,23 +62,23 @@ type Function struct {
 	BufferParams  []BufferParam
 	Params        []Param
 	SourceParams  []SourceParam
-	Return        *types.Type
+	Return        *foundation.Type
 	Body          *Block
 	Workgroup     WorkgroupConstraint
 	WorkgroupVars []WorkgroupVar
-	Span          source.Span
+	Span          foundation.Span
 }
 
 type WorkgroupVar struct {
 	Name string
-	Type *types.Type
-	Span source.Span
+	Type *foundation.Type
+	Span foundation.Span
 }
 
 type Param struct {
 	Name string
 	ID   ValueID
-	Type *types.Type
+	Type *foundation.Type
 }
 
 type Block struct {
@@ -89,43 +88,43 @@ type Block struct {
 
 type Instr interface {
 	instrNode()
-	SpanOf() source.Span
+	SpanOf() foundation.Span
 }
 
 type ValueDef interface {
 	ResultValue() ValueID
-	ResultType() *types.Type
+	ResultType() *foundation.Type
 }
 type PlaceDef interface {
 	ResultPlace() PlaceID
-	PlaceType() *types.Type
+	PlaceType() *foundation.Type
 }
 
 type Const struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Raw    string
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*Const) instrNode()                {}
-func (x *Const) SpanOf() source.Span     { return x.Span }
-func (x *Const) ResultValue() ValueID    { return x.Result }
-func (x *Const) ResultType() *types.Type { return x.Type }
+func (*Const) instrNode()                     {}
+func (x *Const) SpanOf() foundation.Span      { return x.Span }
+func (x *Const) ResultValue() ValueID         { return x.Result }
+func (x *Const) ResultType() *foundation.Type { return x.Type }
 
 // MaterializeConstant creates scalar constants and, for a vector, its final composite.
-func MaterializeConstant(value *types.Value, span source.Span, fresh func() ValueID) (ValueID, []Instr) {
+func MaterializeConstant(value *foundation.ConstantValue, span foundation.Span, fresh func() ValueID) (ValueID, []Instr) {
 	element := value.Type
-	if value.Type.Kind == types.Vector {
+	if value.Type.Kind == foundation.VectorKind {
 		element = value.Type.Elem
 	}
 	components := make([]ValueID, len(value.Bits))
 	instructions := make([]Instr, 0, len(value.Bits)+1)
 	for index, bits := range value.Bits {
 		components[index] = fresh()
-		instructions = append(instructions, &Const{Result: components[index], Type: element, Raw: types.ScalarRaw(element, bits), Span: span})
+		instructions = append(instructions, &Const{Result: components[index], Type: element, Raw: foundation.ScalarLiteral(element, bits), Span: span})
 	}
-	if value.Type.Kind != types.Vector {
+	if value.Type.Kind != foundation.VectorKind {
 		return components[0], instructions
 	}
 	result := fresh()
@@ -134,93 +133,93 @@ func MaterializeConstant(value *types.Value, span source.Span, fresh func() Valu
 
 type Unary struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Op     string
 	X      ValueID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*Unary) instrNode()                {}
-func (x *Unary) SpanOf() source.Span     { return x.Span }
-func (x *Unary) ResultValue() ValueID    { return x.Result }
-func (x *Unary) ResultType() *types.Type { return x.Type }
+func (*Unary) instrNode()                     {}
+func (x *Unary) SpanOf() foundation.Span      { return x.Span }
+func (x *Unary) ResultValue() ValueID         { return x.Result }
+func (x *Unary) ResultType() *foundation.Type { return x.Type }
 
 type Binary struct {
 	Result      ValueID
-	Type        *types.Type
+	Type        *foundation.Type
 	Op          string
 	Left, Right ValueID
-	Span        source.Span
+	Span        foundation.Span
 }
 
-func (*Binary) instrNode()                {}
-func (x *Binary) SpanOf() source.Span     { return x.Span }
-func (x *Binary) ResultValue() ValueID    { return x.Result }
-func (x *Binary) ResultType() *types.Type { return x.Type }
+func (*Binary) instrNode()                     {}
+func (x *Binary) SpanOf() foundation.Span      { return x.Span }
+func (x *Binary) ResultValue() ValueID         { return x.Result }
+func (x *Binary) ResultType() *foundation.Type { return x.Type }
 
 type Convert struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	X      ValueID
-	From   *types.Type
-	Span   source.Span
+	From   *foundation.Type
+	Span   foundation.Span
 }
 
-func (*Convert) instrNode()                {}
-func (x *Convert) SpanOf() source.Span     { return x.Span }
-func (x *Convert) ResultValue() ValueID    { return x.Result }
-func (x *Convert) ResultType() *types.Type { return x.Type }
+func (*Convert) instrNode()                     {}
+func (x *Convert) SpanOf() foundation.Span      { return x.Span }
+func (x *Convert) ResultValue() ValueID         { return x.Result }
+func (x *Convert) ResultType() *foundation.Type { return x.Type }
 
 type Composite struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Values []ValueID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*Composite) instrNode()                {}
-func (x *Composite) SpanOf() source.Span     { return x.Span }
-func (x *Composite) ResultValue() ValueID    { return x.Result }
-func (x *Composite) ResultType() *types.Type { return x.Type }
+func (*Composite) instrNode()                     {}
+func (x *Composite) SpanOf() foundation.Span      { return x.Span }
+func (x *Composite) ResultValue() ValueID         { return x.Result }
+func (x *Composite) ResultType() *foundation.Type { return x.Type }
 
 type Extract struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Base   ValueID
 	Index  int
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*Extract) instrNode()                {}
-func (x *Extract) SpanOf() source.Span     { return x.Span }
-func (x *Extract) ResultValue() ValueID    { return x.Result }
-func (x *Extract) ResultType() *types.Type { return x.Type }
+func (*Extract) instrNode()                     {}
+func (x *Extract) SpanOf() foundation.Span      { return x.Span }
+func (x *Extract) ResultValue() ValueID         { return x.Result }
+func (x *Extract) ResultType() *foundation.Type { return x.Type }
 
 type VectorIndex struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Base   ValueID
 	Index  ValueID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*VectorIndex) instrNode()                {}
-func (x *VectorIndex) SpanOf() source.Span     { return x.Span }
-func (x *VectorIndex) ResultValue() ValueID    { return x.Result }
-func (x *VectorIndex) ResultType() *types.Type { return x.Type }
+func (*VectorIndex) instrNode()                     {}
+func (x *VectorIndex) SpanOf() foundation.Span      { return x.Span }
+func (x *VectorIndex) ResultValue() ValueID         { return x.Result }
+func (x *VectorIndex) ResultType() *foundation.Type { return x.Type }
 
 type Call struct {
 	Result   ValueID
-	Type     *types.Type
+	Type     *foundation.Type
 	Function string
 	Args     []ValueID
-	Span     source.Span
+	Span     foundation.Span
 }
 
-func (*Call) instrNode()                {}
-func (x *Call) SpanOf() source.Span     { return x.Span }
-func (x *Call) ResultValue() ValueID    { return x.Result }
-func (x *Call) ResultType() *types.Type { return x.Type }
+func (*Call) instrNode()                     {}
+func (x *Call) SpanOf() foundation.Span      { return x.Span }
+func (x *Call) ResultValue() ValueID         { return x.Result }
+func (x *Call) ResultType() *foundation.Type { return x.Type }
 
 type IntrinsicKind uint8
 
@@ -297,14 +296,14 @@ func (k IntrinsicKind) Rule() IntrinsicRule {
 	}
 }
 
-func (d NumericDomain) Accepts(t *types.Type) bool {
+func (d NumericDomain) Accepts(t *foundation.Type) bool {
 	switch d {
 	case NumericAny:
-		return types.IsNumericScalar(t)
+		return foundation.IsNumericScalar(t)
 	case NumericSigned:
-		return t != nil && (t.Kind == types.I32 || t.Kind == types.F16 || t.Kind == types.F32)
+		return t != nil && (t.Kind == foundation.Int32Kind || t.Kind == foundation.Float16Kind || t.Kind == foundation.Float32Kind)
 	case NumericFloat:
-		return t != nil && (t.Kind == types.F16 || t.Kind == types.F32)
+		return t != nil && (t.Kind == foundation.Float16Kind || t.Kind == foundation.Float32Kind)
 	default:
 		return false
 	}
@@ -325,128 +324,128 @@ func (d NumericDomain) String() string {
 
 type Intrinsic struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Kind   IntrinsicKind
 	Args   []ValueID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*Intrinsic) instrNode()                {}
-func (x *Intrinsic) SpanOf() source.Span     { return x.Span }
-func (x *Intrinsic) ResultValue() ValueID    { return x.Result }
-func (x *Intrinsic) ResultType() *types.Type { return x.Type }
+func (*Intrinsic) instrNode()                     {}
+func (x *Intrinsic) SpanOf() foundation.Span      { return x.Span }
+func (x *Intrinsic) ResultValue() ValueID         { return x.Result }
+func (x *Intrinsic) ResultType() *foundation.Type { return x.Type }
 
 type PlaceRoot struct {
 	Result PlaceID
-	Type   *types.Type
+	Type   *foundation.Type
 	Buffer int
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*PlaceRoot) instrNode()               {}
-func (x *PlaceRoot) SpanOf() source.Span    { return x.Span }
-func (x *PlaceRoot) ResultPlace() PlaceID   { return x.Result }
-func (x *PlaceRoot) PlaceType() *types.Type { return x.Type }
+func (*PlaceRoot) instrNode()                    {}
+func (x *PlaceRoot) SpanOf() foundation.Span     { return x.Span }
+func (x *PlaceRoot) ResultPlace() PlaceID        { return x.Result }
+func (x *PlaceRoot) PlaceType() *foundation.Type { return x.Type }
 
 type PlaceWorkgroup struct {
 	Result    PlaceID
-	Type      *types.Type
+	Type      *foundation.Type
 	Workgroup int
-	Span      source.Span
+	Span      foundation.Span
 }
 
-func (*PlaceWorkgroup) instrNode()               {}
-func (x *PlaceWorkgroup) SpanOf() source.Span    { return x.Span }
-func (x *PlaceWorkgroup) ResultPlace() PlaceID   { return x.Result }
-func (x *PlaceWorkgroup) PlaceType() *types.Type { return x.Type }
+func (*PlaceWorkgroup) instrNode()                    {}
+func (x *PlaceWorkgroup) SpanOf() foundation.Span     { return x.Span }
+func (x *PlaceWorkgroup) ResultPlace() PlaceID        { return x.Result }
+func (x *PlaceWorkgroup) PlaceType() *foundation.Type { return x.Type }
 
 type PlaceField struct {
 	Result PlaceID
-	Type   *types.Type
+	Type   *foundation.Type
 	Base   PlaceID
 	Field  int
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*PlaceField) instrNode()               {}
-func (x *PlaceField) SpanOf() source.Span    { return x.Span }
-func (x *PlaceField) ResultPlace() PlaceID   { return x.Result }
-func (x *PlaceField) PlaceType() *types.Type { return x.Type }
+func (*PlaceField) instrNode()                    {}
+func (x *PlaceField) SpanOf() foundation.Span     { return x.Span }
+func (x *PlaceField) ResultPlace() PlaceID        { return x.Result }
+func (x *PlaceField) PlaceType() *foundation.Type { return x.Type }
 
 type PlaceIndex struct {
 	Result PlaceID
-	Type   *types.Type
+	Type   *foundation.Type
 	Base   PlaceID
 	Index  ValueID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*PlaceIndex) instrNode()               {}
-func (x *PlaceIndex) SpanOf() source.Span    { return x.Span }
-func (x *PlaceIndex) ResultPlace() PlaceID   { return x.Result }
-func (x *PlaceIndex) PlaceType() *types.Type { return x.Type }
+func (*PlaceIndex) instrNode()                    {}
+func (x *PlaceIndex) SpanOf() foundation.Span     { return x.Span }
+func (x *PlaceIndex) ResultPlace() PlaceID        { return x.Result }
+func (x *PlaceIndex) PlaceType() *foundation.Type { return x.Type }
 
 type Load struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Place  PlaceID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*Load) instrNode()                {}
-func (x *Load) SpanOf() source.Span     { return x.Span }
-func (x *Load) ResultValue() ValueID    { return x.Result }
-func (x *Load) ResultType() *types.Type { return x.Type }
+func (*Load) instrNode()                     {}
+func (x *Load) SpanOf() foundation.Span      { return x.Span }
+func (x *Load) ResultValue() ValueID         { return x.Result }
+func (x *Load) ResultType() *foundation.Type { return x.Type }
 
 type Store struct {
 	Place PlaceID
 	Value ValueID
-	Span  source.Span
+	Span  foundation.Span
 }
 
-func (*Store) instrNode()            {}
-func (x *Store) SpanOf() source.Span { return x.Span }
+func (*Store) instrNode()                {}
+func (x *Store) SpanOf() foundation.Span { return x.Span }
 
 type ArrayLength struct {
 	Result ValueID
-	Type   *types.Type
+	Type   *foundation.Type
 	Place  PlaceID
-	Span   source.Span
+	Span   foundation.Span
 }
 
-func (*ArrayLength) instrNode()                {}
-func (x *ArrayLength) SpanOf() source.Span     { return x.Span }
-func (x *ArrayLength) ResultValue() ValueID    { return x.Result }
-func (x *ArrayLength) ResultType() *types.Type { return x.Type }
+func (*ArrayLength) instrNode()                     {}
+func (x *ArrayLength) SpanOf() foundation.Span      { return x.Span }
+func (x *ArrayLength) ResultValue() ValueID         { return x.Result }
+func (x *ArrayLength) ResultType() *foundation.Type { return x.Type }
 
 type If struct {
 	Results    []Result
 	Cond       ValueID
 	Then, Else *Block
-	Span       source.Span
+	Span       foundation.Span
 }
 
-func (*If) instrNode()            {}
-func (x *If) SpanOf() source.Span { return x.Span }
+func (*If) instrNode()                {}
+func (x *If) SpanOf() foundation.Span { return x.Span }
 
 type Loop struct {
 	Results []Result
 	Params  []LoopParam
 	Cond    *Block
 	Body    *Block
-	Span    source.Span
+	Span    foundation.Span
 }
 
-func (*Loop) instrNode()            {}
-func (x *Loop) SpanOf() source.Span { return x.Span }
+func (*Loop) instrNode()                {}
+func (x *Loop) SpanOf() foundation.Span { return x.Span }
 
 type Scope struct {
 	Body *Block
-	Span source.Span
+	Span foundation.Span
 }
 
-func (*Scope) instrNode()            {}
-func (x *Scope) SpanOf() source.Span { return x.Span }
+func (*Scope) instrNode()                {}
+func (x *Scope) SpanOf() foundation.Span { return x.Span }
 
 type AtomicKind uint8
 
@@ -465,19 +464,19 @@ const (
 )
 
 type Atomic struct {
-	Result   ValueID     // zero only for AtomicStore
-	Type     *types.Type // underlying int32/uint32 result/value type
+	Result   ValueID          // zero only for AtomicStore
+	Type     *foundation.Type // underlying int32/uint32 result/value type
 	Op       AtomicKind
 	Place    PlaceID
 	Value    ValueID // zero only for AtomicLoad
 	Expected ValueID // nonzero only for AtomicCompareExchange
-	Span     source.Span
+	Span     foundation.Span
 }
 
-func (*Atomic) instrNode()                {}
-func (x *Atomic) SpanOf() source.Span     { return x.Span }
-func (x *Atomic) ResultValue() ValueID    { return x.Result }
-func (x *Atomic) ResultType() *types.Type { return x.Type }
+func (*Atomic) instrNode()                     {}
+func (x *Atomic) SpanOf() foundation.Span      { return x.Span }
+func (x *Atomic) ResultValue() ValueID         { return x.Result }
+func (x *Atomic) ResultType() *foundation.Type { return x.Type }
 
 type BarrierKind uint8
 
@@ -488,19 +487,19 @@ const (
 
 type Barrier struct {
 	Kind BarrierKind
-	Span source.Span
+	Span foundation.Span
 }
 
-func (*Barrier) instrNode()            {}
-func (x *Barrier) SpanOf() source.Span { return x.Span }
+func (*Barrier) instrNode()                {}
+func (x *Barrier) SpanOf() foundation.Span { return x.Span }
 
 type Result struct {
 	ID   ValueID
-	Type *types.Type
+	Type *foundation.Type
 }
 type LoopParam struct {
 	ID   ValueID
-	Type *types.Type
+	Type *foundation.Type
 	Init ValueID
 }
 
@@ -545,7 +544,7 @@ func Clone(m *Module) *Module {
 	if m == nil {
 		return nil
 	}
-	out := &Module{Structs: append([]*types.Type(nil), m.Structs...), Functions: make([]*Function, len(m.Functions))}
+	out := &Module{Structs: append([]*foundation.Type(nil), m.Structs...), Functions: make([]*Function, len(m.Functions))}
 	for i, f := range m.Functions {
 		g := *f
 		g.Indices = append([]Param(nil), f.Indices...)
@@ -802,7 +801,7 @@ func (k BarrierKind) String() string {
 	}
 }
 func dumpFunc(b *strings.Builder, f *Function) {
-	parameterTypes := make(map[ValueID]*types.Type, len(f.Params))
+	parameterTypes := make(map[ValueID]*foundation.Type, len(f.Params))
 	for _, parameter := range f.Params {
 		parameterTypes[parameter.ID] = parameter.Type
 	}

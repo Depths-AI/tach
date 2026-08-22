@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strconv"
 
-	"tach/src/source"
+	"tach/src/foundation"
 )
 
 type MemoryAccessKind uint8
@@ -27,7 +27,7 @@ type MemoryAccess struct {
 	Kind      MemoryAccessKind
 	Indices   []Affine
 	Value     ValueID
-	Span      source.Span
+	Span      foundation.Span
 	complete  bool
 }
 
@@ -148,7 +148,7 @@ func AnalyzeAccess(function *Function) AccessSummary {
 	return summary
 }
 
-func addMemoryAccess(summary *AccessSummary, place placeAccess, kind MemoryAccessKind, value ValueID, span source.Span, complete bool, definitions map[ValueID]Instr, coordinates map[ValueID]int) {
+func addMemoryAccess(summary *AccessSummary, place placeAccess, kind MemoryAccessKind, value ValueID, span foundation.Span, complete bool, definitions map[ValueID]Instr, coordinates map[ValueID]int) {
 	if place.buffer < 0 || place.buffer >= len(summary.Buffers) {
 		return
 	}

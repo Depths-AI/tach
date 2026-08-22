@@ -3,8 +3,8 @@ package abi
 import (
 	"regexp"
 	"strings"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/types"
 	"testing"
 )
 
@@ -24,12 +24,12 @@ func TestMangleIsInjectiveAndPortable(t *testing.T) {
 }
 
 func TestPlanParametersUsesExplicitBindingAndCanonicalFields(t *testing.T) {
-	f := &ir.Function{Name: "stage", Kind: ir.Stage, Params: []ir.Param{{Name: "enabled", ID: 1, Type: types.TBool}, {Name: "factor", ID: 2, Type: types.TF32}}}
+	f := &ir.Function{Name: "stage", Kind: ir.Stage, Params: []ir.Param{{Name: "enabled", ID: 1, Type: foundation.BoolType}, {Name: "factor", ID: 2, Type: foundation.Float32Type}}}
 	block, err := PlanParameters(f, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if block.Binding != 3 || block.Layout.Size != 16 || len(block.Fields) != 2 || block.Fields[0].Physical != types.TU32 || block.Fields[1].Offset != 4 {
+	if block.Binding != 3 || block.Layout.Size != 16 || len(block.Fields) != 2 || block.Fields[0].Physical != foundation.Uint32Type || block.Fields[1].Offset != 4 {
 		t.Fatalf("unexpected block: %+v", block)
 	}
 }
@@ -42,8 +42,8 @@ func TestPlanParametersOmitsEmptyBlock(t *testing.T) {
 }
 
 func TestPlanParametersRejectsBooleanMasks(t *testing.T) {
-	mask := types.Vec(types.TBool, 2)
-	for _, value := range []*types.Type{mask, {Kind: types.Struct, Name: "Options", Fields: []types.Field{{Name: "mask", Type: mask}}}} {
+	mask := foundation.VectorOf(foundation.BoolType, 2)
+	for _, value := range []*foundation.Type{mask, {Kind: foundation.StructKind, Name: "Options", Fields: []foundation.TypeField{{Name: "mask", Type: mask}}}} {
 		f := &ir.Function{Name: "stage", Kind: ir.Stage, Params: []ir.Param{{Name: "value", Type: value}}}
 		if _, err := PlanParameters(f, 0); err == nil || !strings.Contains(err.Error(), "cannot cross the host parameter ABI") {
 			t.Fatalf("PlanParameters(%s) error = %v", value, err)

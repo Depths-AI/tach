@@ -5,12 +5,12 @@ import (
 
 	"tach/src/ast"
 	"tach/src/flow"
-	"tach/src/source"
+	"tach/src/foundation"
 )
 
 func checkDocumentation(module *ast.Module) (flow.Documentation, error) {
 	docs := flow.Documentation{Types: map[string]flow.TypeDocumentation{}, Functions: map[string]flow.FunctionDocumentation{}}
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	moduleDocs, rest, err := takeDocs(module.Attrs)
 	if err != nil {
 		diagnostics = appendError(diagnostics, err)
@@ -229,7 +229,7 @@ func docClause(expression ast.Expr) (string, []ast.Expr, error) {
 	return name.Name, call.Args, nil
 }
 
-func docText(clause string, args []ast.Expr, span source.Span) (string, error) {
+func docText(clause string, args []ast.Expr, span foundation.Span) (string, error) {
 	if len(args) != 1 {
 		return "", diag(argsSpan(args, span), "%s expects one string", clause)
 	}
@@ -240,7 +240,7 @@ func docText(clause string, args []ast.Expr, span source.Span) (string, error) {
 	return strings.TrimSpace(text.Value), nil
 }
 
-func namedDoc(clause string, args []ast.Expr, span source.Span) (string, string, error) {
+func namedDoc(clause string, args []ast.Expr, span foundation.Span) (string, string, error) {
 	if len(args) != 2 {
 		return "", "", diag(argsSpan(args, span), "%s expects a name and a string", clause)
 	}
@@ -259,7 +259,7 @@ func requireSummary(attribute ast.Attribute, seen map[string]bool) error {
 	return nil
 }
 
-func argsSpan(args []ast.Expr, fallback source.Span) source.Span {
+func argsSpan(args []ast.Expr, fallback foundation.Span) foundation.Span {
 	if len(args) > 0 {
 		return args[0].GetSpan()
 	}

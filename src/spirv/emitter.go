@@ -11,9 +11,8 @@ import (
 	"tach/src/abi"
 	"tach/src/backend"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/layout"
-	"tach/src/types"
 )
 
 type inputKind uint8
@@ -185,7 +184,7 @@ func encodeString(s string) []uint32 {
 
 func (b *builder) build() error {
 	emit(&b.capabilities, OpCapability, CapabilityShader)
-	if ir.UsesKind(b.m, types.F16) {
+	if ir.UsesKind(b.m, foundation.Float16Kind) {
 		emit(&b.capabilities, OpCapability, CapabilityFloat16)
 		features := backend.RequiredFeatures(b.p.executable)
 		for _, feature := range features {
@@ -247,26 +246,26 @@ func (b *builder) ensureGLSL450() uint32 {
 	return b.glsl450
 }
 
-func typeKey(t *types.Type) string {
+func typeKey(t *foundation.Type) string {
 	if t == nil {
 		return "<nil>"
 	}
 	switch t.Kind {
-	case types.Vector:
+	case foundation.VectorKind:
 		return fmt.Sprintf("v%d:%s", t.Lanes, typeKey(t.Elem))
-	case types.RuntimeArray:
+	case foundation.RuntimeArrayKind:
 		return "ra:" + typeKey(t.Elem)
-	case types.Struct:
+	case foundation.StructKind:
 		return "s:" + t.Name
 	default:
 		return t.String()
 	}
 }
 
-func normalizedTypeRole(t *types.Type, role typeRole) typeRole {
+func normalizedTypeRole(t *foundation.Type, role typeRole) typeRole {
 	if role == typeHostABI && t != nil {
 		switch t.Kind {
-		case types.FixedArray, types.RuntimeArray, types.Struct:
+		case foundation.FixedArrayKind, foundation.RuntimeArrayKind, foundation.StructKind:
 			return typeHostABI
 		}
 	}
@@ -276,13 +275,13 @@ func normalizedTypeRole(t *types.Type, role typeRole) typeRole {
 // typeID is the single SPIR-V type-lowering path. Logical types are used by
 // SSA values and Workgroup memory. Host-ABI types exist only behind Uniform or
 // StorageBuffer pointers and carry Tach's compiler-owned layout decorations.
-func (b *builder) typeID(t *types.Type, role typeRole) (uint32, error) {
+func (b *builder) typeID(t *foundation.Type, role typeRole) (uint32, error) {
 	role = normalizedTypeRole(t, role)
 	key := fmt.Sprintf("%d:%s", role, typeKey(t))
 	if id := b.types[key]; id != 0 {
 		return id, nil
 	}
-	if t.Kind == types.Atomic {
+	if t.Kind == foundation.AtomicKind {
 		// SPIR-V atomicity is an operation property; the pointed-to object keeps
 		// the underlying integer type. Resolve it before allocating an ID so the
 		// module ID space remains dense and deterministic.
@@ -296,25 +295,25 @@ func (b *builder) typeID(t *types.Type, role typeRole) (uint32, error) {
 	id := b.id()
 	b.types[key] = id
 	switch t.Kind {
-	case types.Void:
+	case foundation.VoidKind:
 		emit(&b.typesGlobals, OpTypeVoid, id)
-	case types.Bool:
+	case foundation.BoolKind:
 		emit(&b.typesGlobals, OpTypeBool, id)
-	case types.I32:
+	case foundation.Int32Kind:
 		emit(&b.typesGlobals, OpTypeInt, id, 32, 1)
-	case types.U32:
+	case foundation.Uint32Kind:
 		emit(&b.typesGlobals, OpTypeInt, id, 32, 0)
-	case types.F16:
+	case foundation.Float16Kind:
 		emit(&b.typesGlobals, OpTypeFloat, id, 16)
-	case types.F32:
+	case foundation.Float32Kind:
 		emit(&b.typesGlobals, OpTypeFloat, id, 32)
-	case types.Vector:
+	case foundation.VectorKind:
 		elem, err := b.typeID(t.Elem, typeLogical)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpTypeVector, id, elem, uint32(t.Lanes))
-	case types.FixedArray:
+	case foundation.FixedArrayKind:
 		elem, err := b.typeID(t.Elem, role)
 		if err != nil {
 			return 0, err
@@ -325,26 +324,26 @@ func (b *builder) typeID(t *types.Type, role typeRole) (uint32, error) {
 		}
 		emit(&b.typesGlobals, OpTypeArray, id, elem, length)
 		if role == typeHostABI {
-			l, err := layout.Of(t)
+			l, err := foundation.LayoutOf(t)
 			if err != nil {
 				return 0, err
 			}
 			emit(&b.annotations, OpDecorate, id, DecorationArrayStride, l.Stride)
 		}
-	case types.RuntimeArray:
+	case foundation.RuntimeArrayKind:
 		elem, err := b.typeID(t.Elem, role)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpTypeRuntimeArray, id, elem)
 		if role == typeHostABI {
-			l, err := layout.Of(t)
+			l, err := foundation.LayoutOf(t)
 			if err != nil {
 				return 0, err
 			}
 			emit(&b.annotations, OpDecorate, id, DecorationArrayStride, l.Stride)
 		}
-	case types.Struct:
+	case foundation.StructKind:
 		members := []uint32{id}
 		for _, f := range t.Fields {
 			mid, err := b.typeID(f.Type, role)
@@ -355,7 +354,7 @@ func (b *builder) typeID(t *types.Type, role typeRole) (uint32, error) {
 		}
 		emit(&b.typesGlobals, OpTypeStruct, members...)
 		if role == typeHostABI {
-			l, err := layout.Of(t)
+			l, err := foundation.LayoutOf(t)
 			if err != nil {
 				return 0, err
 			}
@@ -376,7 +375,7 @@ func typeRoleForStorage(storage uint32) typeRole {
 	return typeLogical
 }
 
-func (b *builder) pointerID(storage uint32, t *types.Type) (uint32, error) {
+func (b *builder) pointerID(storage uint32, t *foundation.Type) (uint32, error) {
 	pointee, err := b.typeID(t, typeRoleForStorage(storage))
 	if err != nil {
 		return 0, err
@@ -391,7 +390,7 @@ func (b *builder) pointerID(storage uint32, t *types.Type) (uint32, error) {
 	return id, nil
 }
 
-func (b *builder) functionTypeID(ret *types.Type, params []ir.Param) (uint32, error) {
+func (b *builder) functionTypeID(ret *foundation.Type, params []ir.Param) (uint32, error) {
 	rid, err := b.typeID(ret, typeLogical)
 	if err != nil {
 		return 0, err
@@ -420,7 +419,7 @@ func (b *builder) functionTypeID(ret *types.Type, params []ir.Param) (uint32, er
 
 func (b *builder) emitStructDebugTypes() error {
 	for _, t := range b.m.Structs {
-		if types.ContainsRuntimeArray(t) {
+		if foundation.ContainsRuntimeArray(t) {
 			continue
 		}
 		id, err := b.typeID(t, typeLogical)
@@ -447,7 +446,7 @@ func (b *builder) emitResources() error {
 				return fmt.Errorf("resource %s type: %w", r.Name, err)
 			}
 			root := physical
-			if r.Type.Kind == types.Struct && types.ContainsRuntimeArray(r.Type) {
+			if r.Type.Kind == foundation.StructKind && foundation.ContainsRuntimeArray(r.Type) {
 				emit(&b.annotations, OpDecorate, root, DecorationBlock)
 			} else {
 				root = b.id()
@@ -466,7 +465,7 @@ func (b *builder) emitResources() error {
 			emit(&b.typesGlobals, OpVariable, ptr, varID, storage)
 			emit(&b.annotations, OpDecorate, varID, DecorationDescriptorSet, 0)
 			emit(&b.annotations, OpDecorate, varID, DecorationBinding, uint32(i))
-			if r.Access == ir.Read && !types.ContainsAtomic(r.Type) {
+			if r.Access == ir.Read && !foundation.ContainsAtomic(r.Type) {
 				emit(&b.annotations, OpDecorate, varID, DecorationNonWritable)
 			}
 			emit(&b.debug, OpName, append([]uint32{varID}, encodeString(r.Name)...)...)
@@ -505,15 +504,15 @@ func (b *builder) emitParameterBlocks() error {
 	return nil
 }
 
-func inputInfo(k inputKind) (*types.Type, uint32, string) {
-	vec3u := types.Vec(types.TU32, 3)
+func inputInfo(k inputKind) (*foundation.Type, uint32, string) {
+	vec3u := foundation.VectorOf(foundation.Uint32Type, 3)
 	switch k {
 	case inputGlobalIndex:
 		return vec3u, BuiltInGlobalInvocationID, "globalIndex"
 	case inputLocalIndex:
 		return vec3u, BuiltInLocalInvocationID, "localIndex"
 	case inputLocalLinear:
-		return types.TU32, BuiltInLocalInvocationIndex, "localLinear"
+		return foundation.Uint32Type, BuiltInLocalInvocationIndex, "localLinear"
 	default:
 		return nil, 0, ""
 	}
@@ -626,7 +625,7 @@ func (b *builder) entryGlobals(name string, visiting, visited map[string]bool) (
 	return ids, nil
 }
 
-func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
+func (b *builder) constant(t *foundation.Type, raw string) (uint32, error) {
 	tid, err := b.typeID(t, typeLogical)
 	if err != nil {
 		return 0, err
@@ -637,7 +636,7 @@ func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
 	}
 	id := b.id()
 	switch t.Kind {
-	case types.Bool:
+	case foundation.BoolKind:
 		if raw == "true" {
 			emit(&b.typesGlobals, OpConstantTrue, tid, id)
 		} else if raw == "false" {
@@ -645,27 +644,27 @@ func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
 		} else {
 			return 0, fmt.Errorf("invalid bool constant %q", raw)
 		}
-	case types.I32:
+	case foundation.Int32Kind:
 		v, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpConstant, tid, id, uint32(int32(v)))
-	case types.U32:
+	case foundation.Uint32Kind:
 		v, err := strconv.ParseUint(raw, 10, 32)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpConstant, tid, id, uint32(v))
-	case types.F32:
+	case foundation.Float32Kind:
 		v, err := strconv.ParseFloat(raw, 32)
 		if err != nil {
 			return 0, err
 		}
 		emit(&b.typesGlobals, OpConstant, tid, id, math.Float32bits(float32(v)))
-	case types.F16:
+	case foundation.Float16Kind:
 		v, err := strconv.ParseFloat(raw, 64)
-		bits, ok := types.Float16bits(v)
+		bits, ok := foundation.Float16Bits(v)
 		if err != nil || !ok {
 			return 0, fmt.Errorf("invalid float16 constant %q", raw)
 		}
@@ -678,10 +677,10 @@ func (b *builder) constant(t *types.Type, raw string) (uint32, error) {
 }
 
 func (b *builder) u32Constant(v uint32) (uint32, error) {
-	return b.constant(types.TU32, strconv.FormatUint(uint64(v), 10))
+	return b.constant(foundation.Uint32Type, strconv.FormatUint(uint64(v), 10))
 }
 
-func (b *builder) nullConstant(t *types.Type) (uint32, error) {
+func (b *builder) nullConstant(t *foundation.Type) (uint32, error) {
 	tid, err := b.typeID(t, typeLogical)
 	if err != nil {
 		return 0, err
@@ -698,7 +697,7 @@ func (b *builder) nullConstant(t *types.Type) (uint32, error) {
 
 type spvPlace struct {
 	ptr         uint32
-	ty          *types.Type
+	ty          *foundation.Type
 	storage     uint32
 	resource    int
 	arrayBase   uint32 // pointer to struct containing a runtime array
@@ -711,7 +710,7 @@ type fnEmitter struct {
 	f *ir.Function
 
 	values map[ir.ValueID]uint32
-	vtypes map[ir.ValueID]*types.Type
+	vtypes map[ir.ValueID]*foundation.Type
 	places map[ir.PlaceID]spvPlace
 	inputs map[inputKind]uint32
 
@@ -741,7 +740,7 @@ func (b *builder) emitFunction(f *ir.Function) error {
 	}
 	emit(&b.functions, OpFunction, retType, fid, control, fnType)
 
-	s := &fnEmitter{b: b, f: f, values: map[ir.ValueID]uint32{}, vtypes: map[ir.ValueID]*types.Type{}, places: map[ir.PlaceID]spvPlace{}, inputs: map[inputKind]uint32{}}
+	s := &fnEmitter{b: b, f: f, values: map[ir.ValueID]uint32{}, vtypes: map[ir.ValueID]*foundation.Type{}, places: map[ir.PlaceID]spvPlace{}, inputs: map[inputKind]uint32{}}
 	for _, p := range parameters {
 		pt, err := b.typeID(p.Type, typeLogical)
 		if err != nil {
@@ -802,8 +801,8 @@ func (s *fnEmitter) emitParameters() error {
 	return nil
 }
 
-func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int, logical *types.Type, cursor *int) (uint32, error) {
-	if logical.Kind == types.Struct {
+func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int, logical *foundation.Type, cursor *int) (uint32, error) {
+	if logical.Kind == foundation.StructKind {
 		values := make([]uint32, len(logical.Fields))
 		for index, field := range logical.Fields {
 			value, err := s.emitParameterValue(block, parameter, field.Type, cursor)
@@ -826,7 +825,7 @@ func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int,
 	fieldIndex := *cursor
 	field := block.Fields[fieldIndex]
 	*cursor = fieldIndex + 1
-	if field.Parameter != parameter || !types.Equal(field.Logical, logical) {
+	if field.Parameter != parameter || !foundation.Equal(field.Logical, logical) {
 		return 0, fmt.Errorf("kernel parameter %d field %d does not match %s", parameter, fieldIndex, logical)
 	}
 	pointer, err := s.b.pointerID(StorageUniform, field.Physical)
@@ -852,14 +851,14 @@ func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int,
 	if err := s.emitLoad(typeID, loaded, address, StorageUniform, field.Physical); err != nil {
 		return 0, err
 	}
-	if logical.Kind != types.Bool {
+	if logical.Kind != foundation.BoolKind {
 		return loaded, nil
 	}
 	zero, err := s.b.u32Constant(0)
 	if err != nil {
 		return 0, err
 	}
-	boolType, err := s.b.typeID(types.TBool, typeLogical)
+	boolType, err := s.b.typeID(foundation.BoolType, typeLogical)
 	if err != nil {
 		return 0, err
 	}
@@ -877,7 +876,7 @@ func (s *fnEmitter) emitCoordinates() error {
 	if !active {
 		return nil
 	}
-	u32Type, err := s.b.typeID(types.TU32, typeLogical)
+	u32Type, err := s.b.typeID(foundation.Uint32Type, typeLogical)
 	if err != nil {
 		return err
 	}
@@ -893,9 +892,9 @@ func (s *fnEmitter) emitCoordinates() error {
 				return fmt.Errorf("coordinate input %d was not declared", input)
 			}
 			s.useGlobal(variable)
-			t := types.TU32
+			t := foundation.Uint32Type
 			if input != inputLocalLinear {
-				t = types.Vec(types.TU32, 3)
+				t = foundation.VectorOf(foundation.Uint32Type, 3)
 			}
 			typeID, err := s.b.typeID(t, typeLogical)
 			if err != nil {
@@ -908,12 +907,12 @@ func (s *fnEmitter) emitCoordinates() error {
 			s.inputs[input] = loaded
 		}
 		if input == inputLocalLinear {
-			s.def(value, loaded, types.TU32)
+			s.def(value, loaded, foundation.Uint32Type)
 			continue
 		}
 		id := s.b.id()
 		emit(&s.b.functions, OpCompositeExtract, u32Type, id, loaded, dimension)
-		s.def(value, id, types.TU32)
+		s.def(value, id, foundation.Uint32Type)
 	}
 	return nil
 }
@@ -1041,18 +1040,18 @@ func (s *fnEmitter) place(id ir.PlaceID) (spvPlace, error) {
 	return p, nil
 }
 
-func (s *fnEmitter) def(irID ir.ValueID, spvID uint32, t *types.Type) {
+func (s *fnEmitter) def(irID ir.ValueID, spvID uint32, t *foundation.Type) {
 	if irID != 0 {
 		s.values[irID] = spvID
 		s.vtypes[irID] = t
 	}
 }
 
-func (s *fnEmitter) accessField(base spvPlace, field int, t *types.Type) (spvPlace, error) {
-	if base.ty == nil || base.ty.Kind != types.Struct {
+func (s *fnEmitter) accessField(base spvPlace, field int, t *foundation.Type) (spvPlace, error) {
+	if base.ty == nil || base.ty.Kind != foundation.StructKind {
 		return spvPlace{}, fmt.Errorf("field access base is not a struct place")
 	}
-	if field < 0 || field >= len(base.ty.Fields) || !types.Equal(base.ty.Fields[field].Type, t) {
+	if field < 0 || field >= len(base.ty.Fields) || !foundation.Equal(base.ty.Fields[field].Type, t) {
 		return spvPlace{}, fmt.Errorf("field %d does not match place type %s", field, base.ty)
 	}
 	ptrType, err := s.b.pointerID(base.storage, t)
@@ -1066,7 +1065,7 @@ func (s *fnEmitter) accessField(base spvPlace, field int, t *types.Type) (spvPla
 	id := s.b.id()
 	emit(&s.b.functions, OpAccessChain, ptrType, id, base.ptr, idx)
 	p := spvPlace{ptr: id, ty: t, storage: base.storage, resource: base.resource}
-	if t.Kind == types.RuntimeArray {
+	if t.Kind == foundation.RuntimeArrayKind {
 		p.arrayBase = base.ptr
 		p.arrayMember = uint32(field)
 		p.hasArrayLen = true
@@ -1077,12 +1076,12 @@ func (s *fnEmitter) accessField(base spvPlace, field int, t *types.Type) (spvPla
 // loadPlace keeps physical host-layout aggregates behind descriptor pointers.
 // A constructible resource struct is loaded field-by-field into its one logical
 // SSA type; Workgroup and ordinary values use that logical type directly.
-func (s *fnEmitter) loadPlace(p spvPlace, t *types.Type) (uint32, error) {
-	if !types.IsConstructible(t) {
+func (s *fnEmitter) loadPlace(p spvPlace, t *foundation.Type) (uint32, error) {
+	if !foundation.IsConstructible(t) {
 		return 0, fmt.Errorf("cannot load non-constructible place type %s", t)
 	}
 	role := typeRoleForStorage(p.storage)
-	if role == typeHostABI && t.Kind == types.Struct {
+	if role == typeHostABI && t.Kind == foundation.StructKind {
 		tid, err := s.b.typeID(t, typeLogical)
 		if err != nil {
 			return 0, err
@@ -1126,11 +1125,11 @@ func (s *fnEmitter) loadPlace(p spvPlace, t *types.Type) (uint32, error) {
 // directly. No physical aggregate is admitted into the SSA value domain.
 func (s *fnEmitter) storePlace(p spvPlace, value uint32) error {
 	t := p.ty
-	if !types.IsConstructible(t) {
+	if !foundation.IsConstructible(t) {
 		return fmt.Errorf("cannot store non-constructible place type %s", t)
 	}
 	role := typeRoleForStorage(p.storage)
-	if role == typeHostABI && t.Kind == types.Struct {
+	if role == typeHostABI && t.Kind == foundation.StructKind {
 		for i, f := range t.Fields {
 			fieldType, err := s.b.typeID(f.Type, typeLogical)
 			if err != nil {
@@ -1295,16 +1294,16 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 			if err != nil {
 				return err
 			}
-			s.def(x.Result, id, types.TU32)
+			s.def(x.Result, id, foundation.Uint32Type)
 			return nil
 		}
 		if !p.hasArrayLen {
 			return fmt.Errorf("runtime-array place lacks OpArrayLength base")
 		}
-		tid, _ := s.b.typeID(types.TU32, typeLogical)
+		tid, _ := s.b.typeID(foundation.Uint32Type, typeLogical)
 		id := s.b.id()
 		emit(&s.b.functions, OpArrayLength, tid, id, p.arrayBase, p.arrayMember)
-		s.def(x.Result, id, types.TU32)
+		s.def(x.Result, id, foundation.Uint32Type)
 	case *ir.If:
 		return s.emitIf(x)
 	case *ir.Loop:
@@ -1319,7 +1318,7 @@ func (s *fnEmitter) emitInstr(in ir.Instr) error {
 
 func (s *fnEmitter) emitScope(scope *ir.Scope) error {
 	header, body, cont, merge := s.b.id(), s.b.id(), s.b.id(), s.b.id()
-	again, err := s.b.constant(types.TBool, "false")
+	again, err := s.b.constant(foundation.BoolType, "false")
 	if err != nil {
 		return err
 	}
@@ -1383,9 +1382,9 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		return nil
 	}
 	if x.Kind == ir.IntrinsicMin || x.Kind == ir.IntrinsicMax || x.Kind == ir.IntrinsicClamp {
-		conditionType := types.TBool
-		if x.Type.Kind == types.Vector {
-			conditionType = types.Vec(types.TBool, x.Type.Lanes)
+		conditionType := foundation.BoolType
+		if x.Type.Kind == foundation.VectorKind {
+			conditionType = foundation.VectorOf(foundation.BoolType, x.Type.Lanes)
 		}
 		conditionTypeID, err := s.b.typeID(conditionType, typeLogical)
 		if err != nil {
@@ -1393,9 +1392,9 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 		}
 		kind := scalarKind(x.Type)
 		less := OpFOrdLessThan
-		if kind == types.I32 {
+		if kind == foundation.Int32Kind {
 			less = OpSLessThan
-		} else if kind == types.U32 {
+		} else if kind == foundation.Uint32Kind {
 			less = OpULessThan
 		}
 		bound := func(minimum bool, left, right uint32) uint32 {
@@ -1420,7 +1419,7 @@ func (s *fnEmitter) emitIntrinsic(x *ir.Intrinsic) error {
 	var inst uint32
 	switch x.Kind {
 	case ir.IntrinsicAbs:
-		if types.IsFloatLike(x.Type) {
+		if foundation.IsFloatLike(x.Type) {
 			inst = GLSL450FAbs
 		} else {
 			inst = GLSL450SAbs
@@ -1538,13 +1537,13 @@ func (s *fnEmitter) emitAtomic(x *ir.Atomic) error {
 	case ir.AtomicSub:
 		op = OpAtomicISub
 	case ir.AtomicMin:
-		if x.Type.Kind == types.I32 {
+		if x.Type.Kind == foundation.Int32Kind {
 			op = OpAtomicSMin
 		} else {
 			op = OpAtomicUMin
 		}
 	case ir.AtomicMax:
-		if x.Type.Kind == types.I32 {
+		if x.Type.Kind == foundation.Int32Kind {
 			op = OpAtomicSMax
 		} else {
 			op = OpAtomicUMax
@@ -1594,7 +1593,7 @@ func (s *fnEmitter) emitPlaceRoot(x *ir.PlaceRoot) error {
 	}
 	s.useGlobal(resources[x.Buffer])
 	storage := uint32(StorageStorageBuffer)
-	if x.Type.Kind == types.Struct && types.ContainsRuntimeArray(x.Type) {
+	if x.Type.Kind == foundation.StructKind && foundation.ContainsRuntimeArray(x.Type) {
 		s.places[x.Result] = spvPlace{ptr: resources[x.Buffer], ty: x.Type, storage: storage, resource: x.Buffer}
 		return nil
 	}
@@ -1609,7 +1608,7 @@ func (s *fnEmitter) emitPlaceRoot(x *ir.PlaceRoot) error {
 	id := s.b.id()
 	emit(&s.b.functions, OpAccessChain, ptrType, id, resources[x.Buffer], zero)
 	p := spvPlace{ptr: id, ty: x.Type, storage: storage, resource: x.Buffer}
-	if x.Type.Kind == types.RuntimeArray {
+	if x.Type.Kind == foundation.RuntimeArrayKind {
 		p.arrayBase = resources[x.Buffer]
 		p.arrayMember = 0
 		p.hasArrayLen = true
@@ -1650,19 +1649,19 @@ func (s *fnEmitter) emitPlaceIndex(x *ir.PlaceIndex) error {
 	return nil
 }
 
-func scalarKind(t *types.Type) types.Kind {
-	if t != nil && t.Kind == types.Vector {
+func scalarKind(t *foundation.Type) foundation.TypeKind {
+	if t != nil && t.Kind == foundation.VectorKind {
 		return t.Elem.Kind
 	}
 	if t == nil {
-		return types.Invalid
+		return foundation.InvalidKind
 	}
 	return t.Kind
 }
 
-func memoryAlignment(storage uint32, t *types.Type) (uint32, error) {
+func memoryAlignment(storage uint32, t *foundation.Type) (uint32, error) {
 	if storage == StorageUniform || storage == StorageStorageBuffer {
-		l, err := layout.Of(t)
+		l, err := foundation.LayoutOf(t)
 		if err != nil {
 			return 0, err
 		}
@@ -1671,16 +1670,16 @@ func memoryAlignment(storage uint32, t *types.Type) (uint32, error) {
 	return logicalAlignment(t)
 }
 
-func logicalAlignment(t *types.Type) (uint32, error) {
+func logicalAlignment(t *foundation.Type) (uint32, error) {
 	if t == nil {
 		return 0, fmt.Errorf("nil type has no memory alignment")
 	}
 	switch t.Kind {
-	case types.F16:
+	case foundation.Float16Kind:
 		return 2, nil
-	case types.I32, types.U32, types.F32, types.Atomic:
+	case foundation.Int32Kind, foundation.Uint32Kind, foundation.Float32Kind, foundation.AtomicKind:
 		return 4, nil
-	case types.Vector:
+	case foundation.VectorKind:
 		element, err := logicalAlignment(t.Elem)
 		if err != nil {
 			return 0, err
@@ -1689,9 +1688,9 @@ func logicalAlignment(t *types.Type) (uint32, error) {
 			return element * 2, nil
 		}
 		return element * 4, nil
-	case types.FixedArray:
+	case foundation.FixedArrayKind:
 		return logicalAlignment(t.Elem)
-	case types.Struct:
+	case foundation.StructKind:
 		var align uint32
 		for _, field := range t.Fields {
 			fieldAlign, err := logicalAlignment(field.Type)
@@ -1711,7 +1710,7 @@ func logicalAlignment(t *types.Type) (uint32, error) {
 	}
 }
 
-func (s *fnEmitter) memoryAccess(storage uint32, t *types.Type) (mask, align uint32, err error) {
+func (s *fnEmitter) memoryAccess(storage uint32, t *foundation.Type) (mask, align uint32, err error) {
 	align, err = memoryAlignment(storage, t)
 	if err != nil {
 		return 0, 0, err
@@ -1723,7 +1722,7 @@ func (s *fnEmitter) memoryAccess(storage uint32, t *types.Type) (mask, align uin
 	return mask, align, nil
 }
 
-func (s *fnEmitter) emitLoad(resultType, result, ptr, storage uint32, t *types.Type) error {
+func (s *fnEmitter) emitLoad(resultType, result, ptr, storage uint32, t *foundation.Type) error {
 	mask, align, err := s.memoryAccess(storage, t)
 	if err != nil {
 		return err
@@ -1732,7 +1731,7 @@ func (s *fnEmitter) emitLoad(resultType, result, ptr, storage uint32, t *types.T
 	return nil
 }
 
-func (s *fnEmitter) emitStore(ptr, value, storage uint32, t *types.Type) error {
+func (s *fnEmitter) emitStore(ptr, value, storage uint32, t *foundation.Type) error {
 	mask, align, err := s.memoryAccess(storage, t)
 	if err != nil {
 		return err
@@ -1753,7 +1752,7 @@ func (s *fnEmitter) emitUnary(x *ir.Unary) error {
 	case "!":
 		op = OpLogicalNot
 	case "-":
-		if types.IsFloatLike(x.Type) {
+		if foundation.IsFloatLike(x.Type) {
 			op = OpFNegate
 		} else {
 			op = OpSNegate
@@ -1768,7 +1767,7 @@ func (s *fnEmitter) emitUnary(x *ir.Unary) error {
 	return nil
 }
 
-func (s *fnEmitter) splatVector(vector *types.Type, scalar uint32) (uint32, error) {
+func (s *fnEmitter) splatVector(vector *foundation.Type, scalar uint32) (uint32, error) {
 	tid, err := s.b.typeID(vector, typeLogical)
 	if err != nil {
 		return 0, err
@@ -1798,8 +1797,8 @@ func (s *fnEmitter) emitBinary(x *ir.Binary) error {
 	kind := scalarKind(lt)
 	var op Op
 
-	isVectorScalar := lt != nil && lt.Kind == types.Vector && rt != nil && types.Equal(lt.Elem, rt)
-	isScalarVector := rt != nil && rt.Kind == types.Vector && lt != nil && types.Equal(rt.Elem, lt)
+	isVectorScalar := lt != nil && lt.Kind == foundation.VectorKind && rt != nil && foundation.Equal(lt.Elem, rt)
+	isScalarVector := rt != nil && rt.Kind == foundation.VectorKind && lt != nil && foundation.Equal(rt.Elem, lt)
 	if x.Op == "*" && (isVectorScalar || isScalarVector) {
 		if isScalarVector {
 			lv, rv = rv, lv
@@ -1817,39 +1816,39 @@ func (s *fnEmitter) emitBinary(x *ir.Binary) error {
 
 	switch x.Op {
 	case "+":
-		if kind == types.F16 || kind == types.F32 {
+		if kind == foundation.Float16Kind || kind == foundation.Float32Kind {
 			op = OpFAdd
 		} else {
 			op = OpIAdd
 		}
 	case "-":
-		if kind == types.F16 || kind == types.F32 {
+		if kind == foundation.Float16Kind || kind == foundation.Float32Kind {
 			op = OpFSub
 		} else {
 			op = OpISub
 		}
 	case "*":
-		if kind == types.F16 || kind == types.F32 {
+		if kind == foundation.Float16Kind || kind == foundation.Float32Kind {
 			op = OpFMul
 		} else {
 			op = OpIMul
 		}
 	case "/":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFDiv
-		case types.U32:
+		case foundation.Uint32Kind:
 			op = OpUDiv
-		case types.I32:
+		case foundation.Int32Kind:
 			op = OpSDiv
 		}
 	case "%":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFRem
-		case types.U32:
+		case foundation.Uint32Kind:
 			op = OpUMod
-		case types.I32:
+		case foundation.Int32Kind:
 			op = OpSRem
 		}
 	case "&&":
@@ -1857,19 +1856,19 @@ func (s *fnEmitter) emitBinary(x *ir.Binary) error {
 	case "||":
 		op = OpLogicalOr
 	case "&":
-		if kind == types.Bool {
+		if kind == foundation.BoolKind {
 			op = OpLogicalAnd
 		} else {
 			op = OpBitwiseAnd
 		}
 	case "|":
-		if kind == types.Bool {
+		if kind == foundation.BoolKind {
 			op = OpLogicalOr
 		} else {
 			op = OpBitwiseOr
 		}
 	case "^":
-		if kind == types.Bool {
+		if kind == foundation.BoolKind {
 			op = OpLogicalNotEqual
 		} else {
 			op = OpBitwiseXor
@@ -1877,63 +1876,63 @@ func (s *fnEmitter) emitBinary(x *ir.Binary) error {
 	case "<<":
 		op = OpShiftLeftLogical
 	case ">>":
-		if kind == types.I32 {
+		if kind == foundation.Int32Kind {
 			op = OpShiftRightArithmetic
 		} else {
 			op = OpShiftRightLogical
 		}
 	case "==":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFOrdEqual
-		case types.I32, types.U32:
+		case foundation.Int32Kind, foundation.Uint32Kind:
 			op = OpIEqual
-		case types.Bool:
+		case foundation.BoolKind:
 			op = OpLogicalEqual
 		}
 	case "!=":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFOrdNotEqual
-		case types.I32, types.U32:
+		case foundation.Int32Kind, foundation.Uint32Kind:
 			op = OpINotEqual
-		case types.Bool:
+		case foundation.BoolKind:
 			op = OpLogicalNotEqual
 		}
 	case "<":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFOrdLessThan
-		case types.U32:
+		case foundation.Uint32Kind:
 			op = OpULessThan
-		case types.I32:
+		case foundation.Int32Kind:
 			op = OpSLessThan
 		}
 	case "<=":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFOrdLessThanEqual
-		case types.U32:
+		case foundation.Uint32Kind:
 			op = OpULessThanEqual
-		case types.I32:
+		case foundation.Int32Kind:
 			op = OpSLessThanEqual
 		}
 	case ">":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFOrdGreaterThan
-		case types.U32:
+		case foundation.Uint32Kind:
 			op = OpUGreaterThan
-		case types.I32:
+		case foundation.Int32Kind:
 			op = OpSGreaterThan
 		}
 	case ">=":
 		switch kind {
-		case types.F16, types.F32:
+		case foundation.Float16Kind, foundation.Float32Kind:
 			op = OpFOrdGreaterThanEqual
-		case types.U32:
+		case foundation.Uint32Kind:
 			op = OpUGreaterThanEqual
-		case types.I32:
+		case foundation.Int32Kind:
 			op = OpSGreaterThanEqual
 		}
 	}
@@ -1954,17 +1953,17 @@ func (s *fnEmitter) emitConvert(x *ir.Convert) error {
 	id := s.b.id()
 	var op Op
 	switch {
-	case types.IsFloatLike(x.From) && x.Type.Kind == types.U32:
+	case foundation.IsFloatLike(x.From) && x.Type.Kind == foundation.Uint32Kind:
 		op = OpConvertFToU
-	case types.IsFloatLike(x.From) && x.Type.Kind == types.I32:
+	case foundation.IsFloatLike(x.From) && x.Type.Kind == foundation.Int32Kind:
 		op = OpConvertFToS
-	case x.From.Kind == types.I32 && types.IsFloatLike(x.Type):
+	case x.From.Kind == foundation.Int32Kind && foundation.IsFloatLike(x.Type):
 		op = OpConvertSToF
-	case x.From.Kind == types.U32 && types.IsFloatLike(x.Type):
+	case x.From.Kind == foundation.Uint32Kind && foundation.IsFloatLike(x.Type):
 		op = OpConvertUToF
-	case types.IsFloatLike(x.From) && types.IsFloatLike(x.Type):
+	case foundation.IsFloatLike(x.From) && foundation.IsFloatLike(x.Type):
 		op = OpFConvert
-	case (x.From.Kind == types.I32 && x.Type.Kind == types.U32) || (x.From.Kind == types.U32 && x.Type.Kind == types.I32):
+	case (x.From.Kind == foundation.Int32Kind && x.Type.Kind == foundation.Uint32Kind) || (x.From.Kind == foundation.Uint32Kind && x.Type.Kind == foundation.Int32Kind):
 		op = OpBitcast
 	default:
 		return fmt.Errorf("unsupported conversion %s -> %s", x.From, x.Type)

@@ -6,11 +6,11 @@ import (
 
 	"tach/src/backend"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
-	"tach/src/types"
 )
 
 func packsDisplayPixel(function *ir.Function) bool {
@@ -27,7 +27,7 @@ func packsDisplayPixel(function *ir.Function) bool {
 					srgb = true
 				}
 			case *ir.Convert:
-				if x.Type == types.TU32 && x.From == types.TF32 {
+				if x.Type == foundation.Uint32Type && x.From == foundation.Float32Type {
 					quantize = true
 				}
 			case *ir.Binary:
@@ -49,8 +49,8 @@ func packsDisplayPixel(function *ir.Function) bool {
 	return srgb && quantize && packed
 }
 
-func runtimeU32(t *types.Type) bool {
-	return t != nil && t.Kind == types.RuntimeArray && t.Elem == types.TU32
+func runtimeU32(t *foundation.Type) bool {
+	return t != nil && t.Kind == foundation.RuntimeArrayKind && t.Elem == foundation.Uint32Type
 }
 
 func lower(t *testing.T, source string, profile backend.Profile) *backend.Executable {
@@ -148,13 +148,13 @@ export function halve(values: buffer<float16[]>) {
 }`, backend.WebProfile)
 	kernel := executable.PhysicalKernels[0]
 	for _, parameter := range kernel.Function.Params {
-		if types.Contains(parameter.Type, types.F16) {
+		if foundation.Contains(parameter.Type, foundation.Float16Kind) {
 			t.Fatalf("compile-time value remained a runtime parameter: %#v", kernel.Function.Params)
 		}
 	}
 	found := false
 	for _, instruction := range kernel.Function.Body.Instrs {
-		if constant, ok := instruction.(*ir.Const); ok && constant.Type.Kind == types.F16 && constant.Raw == "0.5" {
+		if constant, ok := instruction.(*ir.Const); ok && constant.Type.Kind == foundation.Float16Kind && constant.Raw == "0.5" {
 			found = true
 		}
 	}

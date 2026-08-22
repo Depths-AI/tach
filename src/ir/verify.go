@@ -4,16 +4,16 @@ import (
 	"fmt"
 	"maps"
 
-	"tach/src/types"
+	"tach/src/foundation"
 )
 
 type placeInfo struct {
-	ty     *types.Type
+	ty     *foundation.Type
 	buffer int
 }
 
 type verifyEnv struct {
-	values map[ValueID]*types.Type
+	values map[ValueID]*foundation.Type
 	places map[PlaceID]placeInfo
 }
 
@@ -27,7 +27,7 @@ func Verify(m *Module) error {
 	}
 	names := map[string]bool{}
 	for _, s := range m.Structs {
-		if s.Kind != types.Struct {
+		if s.Kind != foundation.StructKind {
 			return fmt.Errorf("module struct %s is not a struct", s)
 		}
 		if names[s.Name] {
@@ -160,11 +160,11 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 			return fmt.Errorf("compute function requires 1 to 3 logical indices")
 		}
 		for _, index := range f.Indices {
-			if !types.Equal(index.Type, types.TU32) {
+			if !foundation.Equal(index.Type, foundation.Uint32Type) {
 				return fmt.Errorf("logical index %s has type %s, want uint32", index.Name, index.Type)
 			}
 		}
-		if f.Return.Kind != types.Void {
+		if f.Return.Kind != foundation.VoidKind {
 			return fmt.Errorf("compute function must return void")
 		}
 		if f.Workgroup.Explicit {
@@ -191,7 +191,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	valueParams := map[ValueID]Param{}
 	for _, p := range f.Params {
 		valueParams[p.ID] = p
-		if f.Kind == Stage && !types.IsConstructible(p.Type) {
+		if f.Kind == Stage && !foundation.IsConstructible(p.Type) {
 			return fmt.Errorf("kernel parameter %s has invalid value type %s", p.Name, p.Type)
 		}
 	}
@@ -228,7 +228,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 			}
 		}
 		for i, buffer := range f.BufferParams {
-			if buffer.Name == "" || !types.IsHostShareable(buffer.Type) || (buffer.Access != Read && buffer.Access != Mutable) || !seenBuffers[i] {
+			if buffer.Name == "" || !foundation.IsHostShareable(buffer.Type) || (buffer.Access != Read && buffer.Access != Mutable) || !seenBuffers[i] {
 				return fmt.Errorf("invalid stage buffer parameter %d", i)
 			}
 		}
@@ -242,11 +242,11 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 			return fmt.Errorf("invalid or duplicate workgroup variable name %q", w.Name)
 		}
 		wgnames[w.Name] = true
-		if !types.IsWorkgroupStorable(w.Type) {
+		if !foundation.IsWorkgroupStorable(w.Type) {
 			return fmt.Errorf("workgroup variable %s has invalid type %s", w.Name, w.Type)
 		}
 	}
-	e := verifyEnv{values: map[ValueID]*types.Type{}, places: map[PlaceID]placeInfo{}}
+	e := verifyEnv{values: map[ValueID]*foundation.Type{}, places: map[PlaceID]placeInfo{}}
 	for _, index := range f.Indices {
 		e.values[index.ID] = index.Type
 	}
@@ -271,11 +271,11 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	return nil
 }
 
-func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string, loopTypes []*types.Type) (verifyEnv, error) {
+func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string, loopTypes []*foundation.Type) (verifyEnv, error) {
 	if b == nil {
 		return e, fmt.Errorf("nil block")
 	}
-	defVal := func(id ValueID, t *types.Type) error {
+	defVal := func(id ValueID, t *foundation.Type) error {
 		if id == 0 {
 			return fmt.Errorf("value id 0 is reserved")
 		}
@@ -295,7 +295,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 		e.places[id] = p
 		return nil
 	}
-	val := func(id ValueID) (*types.Type, error) {
+	val := func(id ValueID) (*foundation.Type, error) {
 		t, ok := e.values[id]
 		if !ok {
 			return nil, fmt.Errorf("use of undefined value %%%d", id)
@@ -312,7 +312,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 	for _, in := range b.Instrs {
 		switch x := in.(type) {
 		case *Const:
-			if !types.IsScalar(x.Type) {
+			if !foundation.IsScalar(x.Type) {
 				return e, fmt.Errorf("constant %%%d has non-scalar type %s", x.Result, x.Type)
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
@@ -323,16 +323,16 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if !types.Equal(t, x.Type) {
+			if !foundation.Equal(t, x.Type) {
 				return e, fmt.Errorf("unary %s type mismatch %s -> %s", x.Op, t, x.Type)
 			}
-			if x.Op == "!" && !types.IsBoolean(t) {
+			if x.Op == "!" && !foundation.IsBoolean(t) {
 				return e, fmt.Errorf("! requires bool or boolean vector")
 			}
-			if x.Op == "-" && !types.IsSignedNumeric(t) {
+			if x.Op == "-" && !foundation.IsSignedNumeric(t) {
 				return e, fmt.Errorf("unary - requires signed/float numeric")
 			}
-			if x.Op == "~" && !types.IsIntegerLike(t) {
+			if x.Op == "~" && !foundation.IsIntegerLike(t) {
 				return e, fmt.Errorf("unary ~ requires integer scalar/vector")
 			}
 			if x.Op != "!" && x.Op != "-" && x.Op != "~" {
@@ -361,17 +361,17 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if !types.Equal(t, x.From) {
+			if !foundation.Equal(t, x.From) {
 				return e, fmt.Errorf("convert source says %s but value is %s", x.From, t)
 			}
-			if !types.IsNumericScalar(t) || !types.IsNumericScalar(x.Type) {
+			if !foundation.IsNumericScalar(t) || !foundation.IsNumericScalar(x.Type) {
 				return e, fmt.Errorf("convert supports scalar numerics")
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
 				return e, err
 			}
 		case *Composite:
-			if x.Type.Kind == types.Struct {
+			if x.Type.Kind == foundation.StructKind {
 				if len(x.Values) != len(x.Type.Fields) {
 					return e, fmt.Errorf("struct %s construction has %d values", x.Type, len(x.Values))
 				}
@@ -380,11 +380,11 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 					if err != nil {
 						return e, err
 					}
-					if !types.Equal(t, x.Type.Fields[i].Type) {
+					if !foundation.Equal(t, x.Type.Fields[i].Type) {
 						return e, fmt.Errorf("struct %s field %s has %s, want %s", x.Type, x.Type.Fields[i].Name, t, x.Type.Fields[i].Type)
 					}
 				}
-			} else if x.Type.Kind == types.Vector {
+			} else if x.Type.Kind == foundation.VectorKind {
 				if len(x.Values) != x.Type.Lanes {
 					return e, fmt.Errorf("vector construction has %d components, want %d", len(x.Values), x.Type.Lanes)
 				}
@@ -393,7 +393,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 					if err != nil {
 						return e, err
 					}
-					if !types.Equal(t, x.Type.Elem) {
+					if !foundation.Equal(t, x.Type.Elem) {
 						return e, fmt.Errorf("vector component has %s, want %s", t, x.Type.Elem)
 					}
 				}
@@ -408,13 +408,13 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			var et *types.Type
-			if bt.Kind == types.Struct {
+			var et *foundation.Type
+			if bt.Kind == foundation.StructKind {
 				if x.Index < 0 || x.Index >= len(bt.Fields) {
 					return e, fmt.Errorf("struct extract index %d out of range", x.Index)
 				}
 				et = bt.Fields[x.Index].Type
-			} else if bt.Kind == types.Vector {
+			} else if bt.Kind == foundation.VectorKind {
 				if x.Index < 0 || x.Index >= bt.Lanes {
 					return e, fmt.Errorf("vector extract index %d out of range", x.Index)
 				}
@@ -422,7 +422,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			} else {
 				return e, fmt.Errorf("extract from %s", bt)
 			}
-			if !types.Equal(et, x.Type) {
+			if !foundation.Equal(et, x.Type) {
 				return e, fmt.Errorf("extract type %s, want %s", x.Type, et)
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
@@ -437,20 +437,20 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if bt.Kind != types.Vector {
+			if bt.Kind != foundation.VectorKind {
 				return e, fmt.Errorf("vector index base is %s", bt)
 			}
-			if !types.IsInteger(it) {
+			if !foundation.IsInteger(it) {
 				return e, fmt.Errorf("vector index is %s, want int32 or uint32", it)
 			}
-			if !types.Equal(x.Type, bt.Elem) {
+			if !foundation.Equal(x.Type, bt.Elem) {
 				return e, fmt.Errorf("vector index type %s, want %s", x.Type, bt.Elem)
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
 				return e, err
 			}
 		case *Intrinsic:
-			args := make([]*types.Type, len(x.Args))
+			args := make([]*foundation.Type, len(x.Args))
 			for i, id := range x.Args {
 				t, err := val(id)
 				if err != nil {
@@ -480,14 +480,14 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				if err != nil {
 					return e, err
 				}
-				if !types.Equal(t, callee.Params[i].Type) {
+				if !foundation.Equal(t, callee.Params[i].Type) {
 					return e, fmt.Errorf("call %s arg %d is %s, want %s", x.Function, i, t, callee.Params[i].Type)
 				}
 			}
-			if !types.Equal(x.Type, callee.Return) {
+			if !foundation.Equal(x.Type, callee.Return) {
 				return e, fmt.Errorf("call %s result says %s, want %s", x.Function, x.Type, callee.Return)
 			}
-			if x.Type.Kind != types.Void {
+			if x.Type.Kind != foundation.VoidKind {
 				if err := defVal(x.Result, x.Type); err != nil {
 					return e, err
 				}
@@ -497,7 +497,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("invalid buffer %d", x.Buffer)
 			}
 			r := f.BufferParams[x.Buffer]
-			if !types.Equal(x.Type, r.Type) {
+			if !foundation.Equal(x.Type, r.Type) {
 				return e, fmt.Errorf("buffer place type %s, want %s", x.Type, r.Type)
 			}
 			if err := defPlace(x.Result, placeInfo{x.Type, x.Buffer}); err != nil {
@@ -508,7 +508,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("invalid workgroup place %d", x.Workgroup)
 			}
 			w := f.WorkgroupVars[x.Workgroup]
-			if !types.Equal(x.Type, w.Type) {
+			if !foundation.Equal(x.Type, w.Type) {
 				return e, fmt.Errorf("workgroup place type %s, want %s", x.Type, w.Type)
 			}
 			if err := defPlace(x.Result, placeInfo{x.Type, -1}); err != nil {
@@ -519,11 +519,11 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if bp.ty.Kind != types.Struct || x.Field < 0 || x.Field >= len(bp.ty.Fields) {
+			if bp.ty.Kind != foundation.StructKind || x.Field < 0 || x.Field >= len(bp.ty.Fields) {
 				return e, fmt.Errorf("invalid field place on %s", bp.ty)
 			}
 			want := bp.ty.Fields[x.Field].Type
-			if !types.Equal(want, x.Type) {
+			if !foundation.Equal(want, x.Type) {
 				return e, fmt.Errorf("field place type %s, want %s", x.Type, want)
 			}
 			if err := defPlace(x.Result, placeInfo{x.Type, bp.buffer}); err != nil {
@@ -534,17 +534,17 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if bp.ty.Kind != types.RuntimeArray && bp.ty.Kind != types.FixedArray && bp.ty.Kind != types.Vector {
+			if bp.ty.Kind != foundation.RuntimeArrayKind && bp.ty.Kind != foundation.FixedArrayKind && bp.ty.Kind != foundation.VectorKind {
 				return e, fmt.Errorf("index place base is %s", bp.ty)
 			}
 			it, err := val(x.Index)
 			if err != nil {
 				return e, err
 			}
-			if !types.Equal(it, types.TU32) && !types.Equal(it, types.TI32) {
+			if !foundation.Equal(it, foundation.Uint32Type) && !foundation.Equal(it, foundation.Int32Type) {
 				return e, fmt.Errorf("array index is %s", it)
 			}
-			if !types.Equal(x.Type, bp.ty.Elem) {
+			if !foundation.Equal(x.Type, bp.ty.Elem) {
 				return e, fmt.Errorf("index result %s, want %s", x.Type, bp.ty.Elem)
 			}
 			if err := defPlace(x.Result, placeInfo{x.Type, bp.buffer}); err != nil {
@@ -555,10 +555,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if !types.IsConstructible(p.ty) {
+			if !foundation.IsConstructible(p.ty) {
 				return e, fmt.Errorf("place of type %s cannot be loaded as a value", p.ty)
 			}
-			if !types.Equal(p.ty, x.Type) {
+			if !foundation.Equal(p.ty, x.Type) {
 				return e, fmt.Errorf("load type %s, place is %s", x.Type, p.ty)
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
@@ -573,10 +573,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if !types.Equal(p.ty, v) {
+			if !foundation.Equal(p.ty, v) {
 				return e, fmt.Errorf("store %s into %s", v, p.ty)
 			}
-			if !types.IsConstructible(p.ty) {
+			if !foundation.IsConstructible(p.ty) {
 				return e, fmt.Errorf("place of type %s cannot be stored as a whole value", p.ty)
 			}
 			if p.buffer >= 0 {
@@ -590,7 +590,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if p.ty.Kind != types.Atomic || !types.Equal(p.ty.Elem, x.Type) || (x.Type.Kind != types.I32 && x.Type.Kind != types.U32) {
+			if p.ty.Kind != foundation.AtomicKind || !foundation.Equal(p.ty.Elem, x.Type) || (x.Type.Kind != foundation.Int32Kind && x.Type.Kind != foundation.Uint32Kind) {
 				return e, fmt.Errorf("atomic operation type %s does not match place %s", x.Type, p.ty)
 			}
 			if p.buffer >= 0 && x.Op != AtomicLoad {
@@ -612,7 +612,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 					return e, fmt.Errorf("atomicStore result/value shape is invalid")
 				}
 				vt, err := val(x.Value)
-				if err != nil || !types.Equal(vt, x.Type) {
+				if err != nil || !foundation.Equal(vt, x.Type) {
 					if err != nil {
 						return e, err
 					}
@@ -626,7 +626,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				if err != nil {
 					return e, err
 				}
-				if !types.Equal(vt, x.Type) {
+				if !foundation.Equal(vt, x.Type) {
 					return e, fmt.Errorf("atomic operand is %s, want %s", vt, x.Type)
 				}
 				if err := defVal(x.Result, x.Type); err != nil {
@@ -641,7 +641,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 					if err != nil {
 						return e, err
 					}
-					if !types.Equal(operandType, x.Type) {
+					if !foundation.Equal(operandType, x.Type) {
 						return e, fmt.Errorf("atomic compare-exchange operand is %s, want %s", operandType, x.Type)
 					}
 				}
@@ -663,10 +663,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if p.ty.Kind != types.RuntimeArray {
+			if p.ty.Kind != foundation.RuntimeArrayKind {
 				return e, fmt.Errorf("array_length on %s", p.ty)
 			}
-			if !types.Equal(x.Type, types.TU32) {
+			if !foundation.Equal(x.Type, foundation.Uint32Type) {
 				return e, fmt.Errorf("array_length result must be uint32")
 			}
 			if err := defVal(x.Result, x.Type); err != nil {
@@ -677,7 +677,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if !types.Equal(ct, types.TBool) {
+			if !foundation.Equal(ct, foundation.BoolType) {
 				return e, fmt.Errorf("if condition is %s", ct)
 			}
 			te, err := verifyBlock(m, f, x.Then, e.clone(), fmap, "yield", loopTypes)
@@ -702,13 +702,13 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			for i, r := range x.Results {
 				if ok1 {
 					a := te.values[ty.Values[i]]
-					if !types.Equal(a, r.Type) {
+					if !foundation.Equal(a, r.Type) {
 						return e, fmt.Errorf("if then result %d type mismatch", i)
 					}
 				}
 				if ok2 {
 					bb := ee.values[ey.Values[i]]
-					if !types.Equal(bb, r.Type) {
+					if !foundation.Equal(bb, r.Type) {
 						return e, fmt.Errorf("if else result %d type mismatch", i)
 					}
 				}
@@ -723,7 +723,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				if err != nil {
 					return e, err
 				}
-				if !types.Equal(it, p.Type) {
+				if !foundation.Equal(it, p.Type) {
 					return e, fmt.Errorf("loop init %s, want %s", it, p.Type)
 				}
 				if _, exists := le.values[p.ID]; exists {
@@ -736,10 +736,10 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("loop condition: %w", err)
 			}
 			cy, ok := x.Cond.Term.(*Yield)
-			if !ok || len(cy.Values) != 1 || !types.Equal(ce.values[cy.Values[0]], types.TBool) {
+			if !ok || len(cy.Values) != 1 || !foundation.Equal(ce.values[cy.Values[0]], foundation.BoolType) {
 				return e, fmt.Errorf("loop condition must yield one bool")
 			}
-			carriedTypes := make([]*types.Type, len(x.Params))
+			carriedTypes := make([]*foundation.Type, len(x.Params))
 			for i, parameter := range x.Params {
 				carriedTypes[i] = parameter.Type
 			}
@@ -751,7 +751,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 				return e, fmt.Errorf("loop carried arity mismatch")
 			}
 			for i, p := range x.Params {
-				if !types.Equal(x.Results[i].Type, p.Type) {
+				if !foundation.Equal(x.Results[i].Type, p.Type) {
 					return e, fmt.Errorf("loop carried value %d type mismatch", i)
 				}
 				if err := defVal(x.Results[i].ID, p.Type); err != nil {
@@ -784,7 +784,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return err
 			}
-			if !types.Equal(type_, loopTypes[i]) {
+			if !foundation.Equal(type_, loopTypes[i]) {
 				return fmt.Errorf("%s value %d is %s, want %s", kind, i, type_, loopTypes[i])
 			}
 		}
@@ -792,7 +792,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 	}
 	switch t := b.Term.(type) {
 	case *Return:
-		if f.Return.Kind == types.Void {
+		if f.Return.Kind == foundation.VoidKind {
 			if t.HasValue {
 				return e, fmt.Errorf("void function returns a value")
 			}
@@ -804,7 +804,7 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 			if err != nil {
 				return e, err
 			}
-			if !types.Equal(vt, f.Return) {
+			if !foundation.Equal(vt, f.Return) {
 				return e, fmt.Errorf("return value is %s, want %s", vt, f.Return)
 			}
 		}
@@ -837,15 +837,15 @@ func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]
 	return e, nil
 }
 
-func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
+func verifyIntrinsic(x *Intrinsic, args []*foundation.Type) error {
 	if x.Kind == IntrinsicAll || x.Kind == IntrinsicAny {
-		if len(args) != 1 || args[0] == nil || args[0].Kind != types.Vector || args[0].Elem.Kind != types.Bool || !types.Equal(x.Type, types.TBool) {
+		if len(args) != 1 || args[0] == nil || args[0].Kind != foundation.VectorKind || args[0].Elem.Kind != foundation.BoolKind || !foundation.Equal(x.Type, foundation.BoolType) {
 			return fmt.Errorf("intrinsic %s requires vec<bool, N> and returns bool", x.Kind)
 		}
 		return nil
 	}
 	if x.Kind == IntrinsicSelect {
-		if len(args) != 3 || args[0] == nil || args[0].Kind != types.Vector || args[0].Elem.Kind != types.Bool || !types.Equal(args[1], args[2]) || !types.Equal(x.Type, args[1]) || x.Type.Kind != types.Vector || x.Type.Lanes != args[0].Lanes {
+		if len(args) != 3 || args[0] == nil || args[0].Kind != foundation.VectorKind || args[0].Elem.Kind != foundation.BoolKind || !foundation.Equal(args[1], args[2]) || !foundation.Equal(x.Type, args[1]) || x.Type.Kind != foundation.VectorKind || x.Type.Lanes != args[0].Lanes {
 			return fmt.Errorf("intrinsic select requires a boolean-vector mask and matching vector arms")
 		}
 		return nil
@@ -860,14 +860,14 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 	t := args[0]
 	element := t
 	lanes := 0
-	if t != nil && t.Kind == types.Vector {
+	if t != nil && t.Kind == foundation.VectorKind {
 		element, lanes = t.Elem, t.Lanes
 	}
 	if !rule.Domain.Accepts(element) || rule.VectorOnly && lanes == 0 || rule.Lanes != 0 && lanes != rule.Lanes {
 		return fmt.Errorf("intrinsic %s does not accept %s", x.Kind, t)
 	}
 	for _, argument := range args[1:] {
-		if !types.Equal(argument, t) {
+		if !foundation.Equal(argument, t) {
 			return fmt.Errorf("intrinsic %s requires matching operands", x.Kind)
 		}
 	}
@@ -875,53 +875,53 @@ func verifyIntrinsic(x *Intrinsic, args []*types.Type) error {
 	if rule.ResultElement {
 		out = element
 	}
-	if !types.Equal(x.Type, out) {
+	if !foundation.Equal(x.Type, out) {
 		return fmt.Errorf("intrinsic %s returns %s, got %s", x.Kind, out, x.Type)
 	}
 	return nil
 }
 
-func verifyBinary(x *Binary, l, r *types.Type) error {
+func verifyBinary(x *Binary, l, r *foundation.Type) error {
 	switch x.Op {
 	case "+", "-":
-		if !types.Equal(l, r) || !types.Equal(x.Type, l) || !types.IsNumeric(l) {
+		if !foundation.Equal(l, r) || !foundation.Equal(x.Type, l) || !foundation.IsNumeric(l) {
 			return fmt.Errorf("%s requires matching numeric operands; got %s and %s -> %s", x.Op, l, r, x.Type)
 		}
 	case "*":
-		if types.Equal(l, r) && types.Equal(x.Type, l) && types.IsNumeric(l) {
+		if foundation.Equal(l, r) && foundation.Equal(x.Type, l) && foundation.IsNumeric(l) {
 			return nil
 		}
-		if l.Kind == types.Vector && types.Equal(r, l.Elem) && types.Equal(x.Type, l) {
+		if l.Kind == foundation.VectorKind && foundation.Equal(r, l.Elem) && foundation.Equal(x.Type, l) {
 			return nil
 		}
-		if r.Kind == types.Vector && types.Equal(l, r.Elem) && types.Equal(x.Type, r) {
+		if r.Kind == foundation.VectorKind && foundation.Equal(l, r.Elem) && foundation.Equal(x.Type, r) {
 			return nil
 		}
 		return fmt.Errorf("* invalid for %s and %s -> %s", l, r, x.Type)
 	case "/", "%":
-		if types.Equal(l, r) && types.Equal(x.Type, l) && types.IsNumeric(l) && (x.Op == "/" || types.IsNumericScalar(l)) {
+		if foundation.Equal(l, r) && foundation.Equal(x.Type, l) && foundation.IsNumeric(l) && (x.Op == "/" || foundation.IsNumericScalar(l)) {
 			return nil
 		}
-		if x.Op == "/" && l.Kind == types.Vector && types.Equal(r, l.Elem) && types.Equal(x.Type, l) {
+		if x.Op == "/" && l.Kind == foundation.VectorKind && foundation.Equal(r, l.Elem) && foundation.Equal(x.Type, l) {
 			return nil
 		}
 		return fmt.Errorf("%s invalid for %s and %s", x.Op, l, r)
 	case "==", "!=", "<", "<=", ">", ">=":
-		valid := types.IsNumeric(l) || (x.Op == "==" || x.Op == "!=") && types.IsBoolean(l)
-		if !types.Equal(l, r) || !valid || !types.Equal(x.Type, types.BoolShape(l)) {
+		valid := foundation.IsNumeric(l) || (x.Op == "==" || x.Op == "!=") && foundation.IsBoolean(l)
+		if !foundation.Equal(l, r) || !valid || !foundation.Equal(x.Type, foundation.BoolShape(l)) {
 			return fmt.Errorf("comparison invalid for %s and %s", l, r)
 		}
 	case "&&", "||":
-		if !types.Equal(l, types.TBool) || !types.Equal(r, types.TBool) || !types.Equal(x.Type, types.TBool) {
+		if !foundation.Equal(l, foundation.BoolType) || !foundation.Equal(r, foundation.BoolType) || !foundation.Equal(x.Type, foundation.BoolType) {
 			return fmt.Errorf("logical op requires bool operands")
 		}
 	case "&", "|", "^":
-		if !types.Equal(l, r) || !types.Equal(x.Type, l) || !types.IsIntegerLike(l) && !types.IsBoolean(l) {
+		if !foundation.Equal(l, r) || !foundation.Equal(x.Type, l) || !foundation.IsIntegerLike(l) && !foundation.IsBoolean(l) {
 			return fmt.Errorf("%s requires matching integer or boolean operands; got %s and %s -> %s", x.Op, l, r, x.Type)
 		}
 	case "<<", ">>":
-		want := types.ShiftCountType(l)
-		if want == nil || !types.Equal(r, want) || !types.Equal(x.Type, l) {
+		want := foundation.ShiftCountType(l)
+		if want == nil || !foundation.Equal(r, want) || !foundation.Equal(x.Type, l) {
 			return fmt.Errorf("%s requires integer value %s shifted by %s; got %s and %s -> %s", x.Op, l, want, l, r, x.Type)
 		}
 	default:

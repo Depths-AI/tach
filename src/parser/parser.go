@@ -5,15 +5,15 @@ import (
 	"fmt"
 
 	"tach/src/ast"
+	"tach/src/foundation"
 	"tach/src/lexer"
-	"tach/src/source"
 )
 
 type parser struct {
 	toks        []lexer.Token
 	i           int
 	file        string
-	diagnostics source.Diagnostics
+	diagnostics foundation.Diagnostics
 }
 
 func Parse(file, src string) (*ast.Module, error) {
@@ -24,16 +24,16 @@ func Parse(file, src string) (*ast.Module, error) {
 	return m, nil
 }
 
-func ParseRecover(file, src string) (*ast.Module, source.Diagnostics) {
+func ParseRecover(file, src string) (*ast.Module, foundation.Diagnostics) {
 	toks, diagnostics := lexer.LexRecover(file, src)
 	p := &parser{toks: toks, file: file}
 	m, parsed := p.moduleRecover()
 	return m, append(diagnostics, parsed...).Sorted()
 }
 
-func (p *parser) moduleRecover() (*ast.Module, source.Diagnostics) {
+func (p *parser) moduleRecover() (*ast.Module, foundation.Diagnostics) {
 	m := &ast.Module{File: p.file}
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	importsDone, declarations := false, false
 	for !p.at(lexer.EOF) {
 		start := p.i
@@ -86,13 +86,13 @@ func (p *parser) moduleRecover() (*ast.Module, source.Diagnostics) {
 	return m, append(diagnostics, p.diagnostics...).Sorted()
 }
 
-func diagnostic(err error) source.Diagnostic {
-	if d, ok := err.(*source.Diagnostic); ok {
+func diagnostic(err error) foundation.Diagnostic {
+	if d, ok := err.(*foundation.Diagnostic); ok {
 		out := *d
 		out.Kind = "parser"
 		return out
 	}
-	return source.Diagnostic{Kind: "parser", Message: err.Error()}
+	return foundation.Diagnostic{Kind: "parser", Message: err.Error()}
 }
 
 func (p *parser) syncTop(start int) {
@@ -168,7 +168,7 @@ func (p *parser) take() lexer.Token {
 	return t
 }
 func (p *parser) err(t lexer.Token, f string, a ...any) error {
-	return &source.Diagnostic{Span: t.Span, Message: fmt.Sprintf(f, a...)}
+	return &foundation.Diagnostic{Span: t.Span, Message: fmt.Sprintf(f, a...)}
 }
 func (p *parser) expect(k lexer.Kind) (lexer.Token, error) {
 	if !p.at(k) {
@@ -192,12 +192,12 @@ func (p *parser) typeGreater() (lexer.Token, error) {
 	}
 	t := p.cur()
 	first := t
-	first.Kind, first.Text, first.Span.End = lexer.Greater, ">", source.Pos{Offset: t.Span.Start.Offset + 1, Line: t.Span.Start.Line, Column: t.Span.Start.Column + 1}
-	p.toks[p.i] = lexer.Token{Kind: lexer.Greater, Text: ">", Span: source.Span{File: t.Span.File, Start: first.Span.End, End: t.Span.End}}
+	first.Kind, first.Text, first.Span.End = lexer.Greater, ">", foundation.Position{Offset: t.Span.Start.Offset + 1, Line: t.Span.Start.Line, Column: t.Span.Start.Column + 1}
+	p.toks[p.i] = lexer.Token{Kind: lexer.Greater, Text: ">", Span: foundation.Span{File: t.Span.File, Start: first.Span.End, End: t.Span.End}}
 	return first, nil
 }
 
-func join(a, b source.Span) source.Span { a.End = b.End; return a }
+func join(a, b foundation.Span) foundation.Span { a.End = b.End; return a }
 func assignment(k lexer.Kind) bool {
 	switch k {
 	case lexer.Assign, lexer.PlusEq, lexer.MinusEq, lexer.StarEq, lexer.SlashEq, lexer.PercentEq, lexer.AmpEq, lexer.PipeEq, lexer.CaretEq, lexer.ShiftLeftEq, lexer.ShiftRightEq:
@@ -293,25 +293,25 @@ func (p *parser) constDecl() (*ast.ConstDecl, error) {
 	return &ast.ConstDecl{Name: name.Text, Type: ty, Value: value, Span: join(start, end)}, nil
 }
 
-func (p *parser) binding() (lexer.Token, ast.TypeExpr, ast.Expr, source.Span, error) {
+func (p *parser) binding() (lexer.Token, ast.TypeExpr, ast.Expr, foundation.Span, error) {
 	name, err := p.expect(lexer.Ident)
 	if err != nil {
-		return lexer.Token{}, nil, nil, source.Span{}, err
+		return lexer.Token{}, nil, nil, foundation.Span{}, err
 	}
 	var ty ast.TypeExpr
 	if p.at(lexer.Colon) {
 		p.take()
 		ty, err = p.typeExpr()
 		if err != nil {
-			return lexer.Token{}, nil, nil, source.Span{}, err
+			return lexer.Token{}, nil, nil, foundation.Span{}, err
 		}
 	}
 	if _, err = p.expect(lexer.Assign); err != nil {
-		return lexer.Token{}, nil, nil, source.Span{}, err
+		return lexer.Token{}, nil, nil, foundation.Span{}, err
 	}
 	value, err := p.expr(0)
 	if err != nil {
-		return lexer.Token{}, nil, nil, source.Span{}, err
+		return lexer.Token{}, nil, nil, foundation.Span{}, err
 	}
 	semi, err := p.expect(lexer.Semicolon)
 	return name, ty, value, semi.Span, err

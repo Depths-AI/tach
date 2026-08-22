@@ -17,9 +17,9 @@ import (
 	"tach/src/ast"
 	"tach/src/bindings"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/parser"
 	"tach/src/sema"
-	"tach/src/source"
 )
 
 type manifest struct {
@@ -94,11 +94,11 @@ func loadProject(cwd string, workers int) (*project, error) {
 			span.End.Offset++
 		}
 		message := strings.TrimPrefix(err.Error(), "tach.json: ")
-		return nil, newDiagnosticError(source.Diagnostics{{Kind: "manifest", Span: span, Message: message}}, map[string]string{"tach.json": manifestSource})
+		return nil, newDiagnosticError(foundation.Diagnostics{{Kind: "manifest", Span: span, Message: message}}, map[string]string{"tach.json": manifestSource})
 	}
 	kernels, diagnostics := discover(root)
 	if len(kernels) == 0 {
-		diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan("tach.json"), Message: "project contains no module kernel files"})
+		diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan("tach.json"), Message: "project contains no module kernel files"})
 	}
 	project := &project{Root: root, Manifest: manifest, Kernels: kernels, sources: map[string]string{"tach.json": manifestSource}}
 	project.parse(workers, &diagnostics)
@@ -196,13 +196,13 @@ func requireEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func discover(root string) ([]kernel, source.Diagnostics) {
+func discover(root string) ([]kernel, foundation.Diagnostics) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil, source.Diagnostics{{Kind: "layout", Message: err.Error()}}
+		return nil, foundation.Diagnostics{{Kind: "layout", Message: err.Error()}}
 	}
 	var kernels []kernel
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	folded, foldedModules := map[string]string{}, map[string]string{}
 	type physicalFile struct {
 		identity string
@@ -212,7 +212,7 @@ func discover(root string) ([]kernel, source.Diagnostics) {
 	for _, entry := range entries {
 		name := entry.Name()
 		if filepath.Ext(name) == ".tach" {
-			diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(filepath.ToSlash(name)), Message: "root-level .tach files are invalid; place kernels in a module directory"})
+			diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(filepath.ToSlash(name)), Message: "root-level .tach files are invalid; place kernels in a module directory"})
 			continue
 		}
 		if strings.EqualFold(name, "build") || !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
@@ -221,7 +221,7 @@ func discover(root string) ([]kernel, source.Diagnostics) {
 		modulePath := filepath.Join(root, name)
 		children, readErr := os.ReadDir(modulePath)
 		if readErr != nil {
-			diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(filepath.ToSlash(name)), Message: readErr.Error()})
+			diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(filepath.ToSlash(name)), Message: readErr.Error()})
 			continue
 		}
 		moduleSeen := false
@@ -230,14 +230,14 @@ func discover(root string) ([]kernel, source.Diagnostics) {
 			if child.IsDir() && child.Type()&os.ModeSymlink == 0 {
 				_ = filepath.WalkDir(childPath, func(path string, item os.DirEntry, walkErr error) error {
 					if walkErr != nil {
-						diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(relative(root, path)), Message: walkErr.Error()})
+						diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(relative(root, path)), Message: walkErr.Error()})
 						return nil
 					}
 					if item.Type()&os.ModeSymlink != 0 && item.IsDir() {
 						return filepath.SkipDir
 					}
 					if !item.IsDir() && filepath.Ext(item.Name()) == ".tach" {
-						diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(relative(root, path)), Message: ".tach files must be exactly one module directory below tach.json"})
+						diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(relative(root, path)), Message: ".tach files must be exactly one module directory below tach.json"})
 					}
 					return nil
 				})
@@ -249,24 +249,24 @@ func discover(root string) ([]kernel, source.Diagnostics) {
 			if !moduleSeen {
 				foldedModule := strings.ToLower(name)
 				if previous := foldedModules[foldedModule]; previous != "" && previous != name {
-					diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(filepath.ToSlash(name)), Message: fmt.Sprintf("module identity collides with %s under case folding", previous)})
+					diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(filepath.ToSlash(name)), Message: fmt.Sprintf("module identity collides with %s under case folding", previous)})
 				}
 				foldedModules[foldedModule], moduleSeen = name, true
 			}
 			kernelName := strings.TrimSuffix(child.Name(), filepath.Ext(child.Name()))
 			identity := filepath.ToSlash(filepath.Join(name, kernelName))
 			if !validImport(identity) {
-				diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: fmt.Sprintf("invalid kernel identity %q; want <module>/<kernel> using canonical import spelling", identity)})
+				diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: fmt.Sprintf("invalid kernel identity %q; want <module>/<kernel> using canonical import spelling", identity)})
 				continue
 			}
 			fold := strings.ToLower(identity)
 			if previous := folded[fold]; previous != "" && previous != identity {
-				diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: fmt.Sprintf("kernel identity collides with %s under case folding", previous)})
+				diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: fmt.Sprintf("kernel identity collides with %s under case folding", previous)})
 			}
 			folded[fold] = identity
 			info, statErr := os.Stat(childPath)
 			if statErr != nil {
-				diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: statErr.Error()})
+				diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: statErr.Error()})
 				continue
 			}
 			// DECISION: os.SameFile is portable but O(n²); use platform file IDs if
@@ -279,7 +279,7 @@ func discover(root string) ([]kernel, source.Diagnostics) {
 				}
 			}
 			if duplicate != "" {
-				diagnostics = append(diagnostics, source.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: fmt.Sprintf("physical kernel is already included as %s", duplicate)})
+				diagnostics = append(diagnostics, foundation.Diagnostic{Kind: "layout", Span: fileSpan(identity + ".tach"), Message: fmt.Sprintf("physical kernel is already included as %s", duplicate)})
 				continue
 			}
 			physical = append(physical, physicalFile{identity, info})
@@ -290,12 +290,12 @@ func discover(root string) ([]kernel, source.Diagnostics) {
 	return kernels, diagnostics
 }
 
-func (p *project) parse(workers int, diagnostics *source.Diagnostics) {
+func (p *project) parse(workers int, diagnostics *foundation.Diagnostics) {
 	if workers <= 0 || workers > runtime.GOMAXPROCS(0) {
 		workers = runtime.GOMAXPROCS(0)
 	}
 	jobs := make(chan int)
-	results := make([]source.Diagnostics, len(p.Kernels))
+	results := make([]foundation.Diagnostics, len(p.Kernels))
 	var wait sync.WaitGroup
 	for range workers {
 		wait.Add(1)
@@ -305,7 +305,7 @@ func (p *project) parse(workers int, diagnostics *source.Diagnostics) {
 				kernel := &p.Kernels[index]
 				data, err := os.ReadFile(kernel.Path)
 				if err != nil {
-					results[index] = source.Diagnostics{{Kind: "source", Span: fileSpan(kernel.Identity + ".tach"), Message: err.Error()}}
+					results[index] = foundation.Diagnostics{{Kind: "source", Span: fileSpan(kernel.Identity + ".tach"), Message: err.Error()}}
 					kernel.AST = &ast.Module{File: kernel.Identity}
 					continue
 				}
@@ -326,9 +326,9 @@ func (p *project) parse(workers int, diagnostics *source.Diagnostics) {
 	}
 }
 
-func (p *project) validate(diagnostics *source.Diagnostics) {
+func (p *project) validate(diagnostics *foundation.Diagnostics) {
 	byIdentity := map[string]*kernel{}
-	owners := map[string]source.Span{}
+	owners := map[string]foundation.Span{}
 	for i := range p.Kernels {
 		kernel := &p.Kernels[i]
 		byIdentity[kernel.Identity] = kernel
@@ -349,21 +349,21 @@ func (p *project) validate(diagnostics *source.Diagnostics) {
 				if exported {
 					for _, parameter := range item.Params {
 						if err := abi.ValidateExportName(parameter.Name); err != nil {
-							*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "export", Span: parameter.Span, Message: fmt.Sprintf("parameter name: %v", err)})
+							*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "export", Span: parameter.Span, Message: fmt.Sprintf("parameter name: %v", err)})
 						}
 					}
 				}
 			}
 			if sema.ReservedName(name) {
-				*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "name", Span: declaration.GetSpan(), Message: fmt.Sprintf("declaration name %q is reserved by Tach", name)})
+				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "name", Span: declaration.GetSpan(), Message: fmt.Sprintf("declaration name %q is reserved by Tach", name)})
 			}
 			if exported {
 				if err := validate(name); err != nil {
-					*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "export", Span: declaration.GetSpan(), Message: err.Error()})
+					*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "export", Span: declaration.GetSpan(), Message: err.Error()})
 				}
 			}
 			if previous, exists := owners[name]; exists {
-				*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "name", Span: declaration.GetSpan(), Message: fmt.Sprintf("project declaration %q is already defined", name), Related: []source.Related{{Span: previous, Message: "first declaration"}}})
+				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "name", Span: declaration.GetSpan(), Message: fmt.Sprintf("project declaration %q is already defined", name), Related: []foundation.RelatedDiagnostic{{Span: previous, Message: "first declaration"}}})
 			} else {
 				owners[name] = declaration.GetSpan()
 			}
@@ -375,18 +375,18 @@ func (p *project) validate(diagnostics *source.Diagnostics) {
 		for j := range kernel.AST.Imports {
 			item := &kernel.AST.Imports[j]
 			if !validImport(item.Target) {
-				*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("invalid import %q; want \"<module>/<kernel>\" without .tach", item.Target)})
+				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("invalid import %q; want \"<module>/<kernel>\" without .tach", item.Target)})
 				continue
 			}
 			if item.Target == kernel.Identity {
-				*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "import", Span: item.Span, Message: "kernel cannot import itself"})
+				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "import", Span: item.Span, Message: "kernel cannot import itself"})
 			}
 			if seen[item.Target] {
-				*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("duplicate import %q", item.Target)})
+				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("duplicate import %q", item.Target)})
 			}
 			seen[item.Target] = true
 			if byIdentity[item.Target] == nil {
-				*diagnostics = append(*diagnostics, source.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("import target %q does not exist", item.Target)})
+				*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "import", Span: item.Span, Message: fmt.Sprintf("import target %q does not exist", item.Target)})
 			}
 		}
 	}
@@ -404,10 +404,10 @@ func validImport(target string) bool {
 
 type graphEdge struct {
 	to   string
-	span source.Span
+	span foundation.Span
 }
 
-func graphDiagnostics(kernels []kernel, modules bool) source.Diagnostics {
+func graphDiagnostics(kernels []kernel, modules bool) foundation.Diagnostics {
 	graph := map[string][]graphEdge{}
 	known := map[string]bool{}
 	for _, kernel := range kernels {
@@ -444,7 +444,7 @@ func graphDiagnostics(kernels []kernel, modules bool) source.Diagnostics {
 	state, positions := map[string]uint8{}, map[string]int{}
 	var stack []string
 	var edges []graphEdge
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	var visit func(string)
 	visit = func(node string) {
 		state[node], positions[node] = 1, len(stack)
@@ -460,16 +460,16 @@ func graphDiagnostics(kernels []kernel, modules bool) source.Diagnostics {
 			} else if state[edge.to] == 1 {
 				start := positions[edge.to]
 				chain := append(append([]string(nil), stack[start:]...), edge.to)
-				related := make([]source.Related, 0, len(chain)-1)
+				related := make([]foundation.RelatedDiagnostic, 0, len(chain)-1)
 				for i := start; i < len(edges); i++ {
-					related = append(related, source.Related{Span: edges[i].span, Message: fmt.Sprintf("%s imports %s", stack[i], stack[i+1])})
+					related = append(related, foundation.RelatedDiagnostic{Span: edges[i].span, Message: fmt.Sprintf("%s imports %s", stack[i], stack[i+1])})
 				}
-				related = append(related, source.Related{Span: edge.span, Message: fmt.Sprintf("%s imports %s", node, edge.to)})
+				related = append(related, foundation.RelatedDiagnostic{Span: edge.span, Message: fmt.Sprintf("%s imports %s", node, edge.to)})
 				kind := "kernel"
 				if modules {
 					kind = "module"
 				}
-				diagnostics = append(diagnostics, source.Diagnostic{Kind: kind + "-cycle", Span: edge.span, Message: fmt.Sprintf("%s import cycle: %s", kind, strings.Join(chain, " -> ")), Related: related})
+				diagnostics = append(diagnostics, foundation.Diagnostic{Kind: kind + "-cycle", Span: edge.span, Message: fmt.Sprintf("%s import cycle: %s", kind, strings.Join(chain, " -> ")), Related: related})
 			}
 		}
 		stack = stack[:len(stack)-1]
@@ -485,7 +485,7 @@ func graphDiagnostics(kernels []kernel, modules bool) source.Diagnostics {
 }
 
 type diagnosticError struct {
-	diagnostics source.Diagnostics
+	diagnostics foundation.Diagnostics
 }
 
 func (e *diagnosticError) Error() string {
@@ -508,18 +508,18 @@ func (e *diagnosticError) Error() string {
 	return out.String()
 }
 
-func newDiagnosticError(diagnostics source.Diagnostics, sources map[string]string) *diagnosticError {
+func newDiagnosticError(diagnostics foundation.Diagnostics, sources map[string]string) *diagnosticError {
 	return &diagnosticError{diagnostics: enrichDiagnostics(diagnostics, sources, "error")}
 }
 
-func enrichDiagnostics(diagnostics source.Diagnostics, sources map[string]string, severity string) source.Diagnostics {
-	out := append(source.Diagnostics(nil), diagnostics...)
+func enrichDiagnostics(diagnostics foundation.Diagnostics, sources map[string]string, severity string) foundation.Diagnostics {
+	out := append(foundation.Diagnostics(nil), diagnostics...)
 	for i := range out {
 		if out[i].Severity == "" {
 			out[i].Severity = severity
 		}
 		out[i].Source = sourceLine(sources[out[i].Span.File], out[i].Span.Start.Line)
-		out[i].Related = append([]source.Related(nil), out[i].Related...)
+		out[i].Related = append([]foundation.RelatedDiagnostic(nil), out[i].Related...)
 		for j := range out[i].Related {
 			related := &out[i].Related[j]
 			related.Source = sourceLine(sources[related.Span.File], related.Span.Start.Line)
@@ -528,22 +528,22 @@ func enrichDiagnostics(diagnostics source.Diagnostics, sources map[string]string
 	return out.Sorted()
 }
 
-func ErrorDiagnostics(err error) (source.Diagnostics, bool) {
+func ErrorDiagnostics(err error) (foundation.Diagnostics, bool) {
 	var diagnostics *diagnosticError
 	if !errors.As(err, &diagnostics) {
 		return nil, false
 	}
-	return append(source.Diagnostics(nil), diagnostics.diagnostics...), true
+	return append(foundation.Diagnostics(nil), diagnostics.diagnostics...), true
 }
 
 func (p *project) semanticError(err error) error {
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	if errors.As(err, &diagnostics) {
 		return newDiagnosticError(diagnostics, p.sources)
 	}
-	var diagnostic *source.Diagnostic
+	var diagnostic *foundation.Diagnostic
 	if errors.As(err, &diagnostic) {
-		return newDiagnosticError(source.Diagnostics{*diagnostic}, p.sources)
+		return newDiagnosticError(foundation.Diagnostics{*diagnostic}, p.sources)
 	}
 	return err
 }
@@ -556,7 +556,7 @@ func sourceLine(text string, number int) string {
 	return strings.TrimSuffix(lines[number-1], "\r")
 }
 
-func position(text string, offset int) source.Pos {
+func position(text string, offset int) foundation.Position {
 	if offset < 0 {
 		offset = 0
 	}
@@ -571,11 +571,11 @@ func position(text string, offset int) source.Pos {
 			column++
 		}
 	}
-	return source.Pos{Offset: offset, Line: line, Column: column}
+	return foundation.Position{Offset: offset, Line: line, Column: column}
 }
 
-func fileSpan(file string) source.Span {
-	return source.Span{File: file, Start: source.Pos{Line: 1, Column: 1}, End: source.Pos{Line: 1, Column: 2}}
+func fileSpan(file string) foundation.Span {
+	return foundation.Span{File: file, Start: foundation.Position{Line: 1, Column: 1}, End: foundation.Position{Line: 1, Column: 2}}
 }
 
 func relative(root, path string) string {

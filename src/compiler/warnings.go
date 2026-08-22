@@ -8,11 +8,11 @@ import (
 
 	"tach/src/ast"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/source"
 )
 
-func warnings(project *project, module *flow.Module) source.Diagnostics {
+func warnings(project *project, module *flow.Module) foundation.Diagnostics {
 	owners := map[string]string{}
 	functions := map[string]*ast.FunctionDecl{}
 	constants := map[string]*ast.ConstDecl{}
@@ -31,7 +31,7 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 
 	refs := map[string]map[string]bool{}
 	var typeRoots []map[string]bool
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	for i := range project.Kernels {
 		kernel := &project.Kernels[i]
 		used := map[string]bool{}
@@ -144,7 +144,7 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 				_, stride, _ := strings.Cut(key, ":")
 				diagnostic := warning("strided-access", accesses[0].Span, fmt.Sprintf("adjacent invocations access one buffer with stride %s", stride), "prefer adjacent elements when the algorithm permits contiguous GPU memory access")
 				for _, access := range accesses[1:] {
-					diagnostic.Related = append(diagnostic.Related, source.Related{Span: access.Span, Message: "same strided access pattern"})
+					diagnostic.Related = append(diagnostic.Related, foundation.RelatedDiagnostic{Span: access.Span, Message: "same strided access pattern"})
 				}
 				diagnostics = append(diagnostics, diagnostic)
 			}
@@ -153,13 +153,13 @@ func warnings(project *project, module *flow.Module) source.Diagnostics {
 	return enrichDiagnostics(diagnostics, project.sources, "warning")
 }
 
-func warning(code string, span source.Span, message, help string) source.Diagnostic {
-	return source.Diagnostic{Severity: "warning", Kind: code, Span: span, Message: message, Help: help}
+func warning(code string, span foundation.Span, message, help string) foundation.Diagnostic {
+	return foundation.Diagnostic{Severity: "warning", Kind: code, Span: span, Message: message, Help: help}
 }
 
 type binding struct {
 	kind, name string
-	span       source.Span
+	span       foundation.Span
 }
 
 type analysis struct {
@@ -167,7 +167,7 @@ type analysis struct {
 	globals     map[string]bool
 	locals      map[string]bool
 	bindings    []binding
-	diagnostics source.Diagnostics
+	diagnostics foundation.Diagnostics
 }
 
 func (a *analysis) function(function *ast.FunctionDecl) {

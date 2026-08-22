@@ -7,9 +7,8 @@ import (
 	"strings"
 	"unicode"
 
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/layout"
-	"tach/src/types"
 )
 
 func PrivateEntry(index int) string { return fmt.Sprintf("_tach_k%d", index) }
@@ -76,8 +75,8 @@ const maxParameterBytes = 16 * 1024
 type ParameterBlock struct {
 	Function *ir.Function
 	Binding  uint32
-	Type     *types.Type
-	Layout   layout.TypeLayout
+	Type     *foundation.Type
+	Layout   foundation.TypeLayout
 	Fields   []ParameterField
 }
 
@@ -85,8 +84,8 @@ type ParameterField struct {
 	Parameter int
 	Path      []string
 	Name      string
-	Logical   *types.Type
-	Physical  *types.Type
+	Logical   *foundation.Type
+	Physical  *foundation.Type
 	Offset    uint32
 }
 
@@ -97,16 +96,16 @@ func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, err
 	if len(function.Params) == 0 {
 		return nil, nil
 	}
-	block := &ParameterBlock{Function: function, Binding: binding, Type: &types.Type{Kind: types.Struct, Name: "__tach_parameters_" + Mangle(function.Name)}}
+	block := &ParameterBlock{Function: function, Binding: binding, Type: &foundation.Type{Kind: foundation.StructKind, Name: "__tach_parameters_" + Mangle(function.Name)}}
 	for parameter, value := range function.Params {
-		if !types.IsHostParameter(value.Type) {
+		if !foundation.IsHostParameter(value.Type) {
 			return nil, fmt.Errorf("kernel %s parameter %s: type %s cannot cross the host parameter ABI", function.Name, value.Name, value.Type)
 		}
 		if err := flattenParameter(block, parameter, nil, value.Type); err != nil {
 			return nil, fmt.Errorf("kernel %s parameter %s: %w", function.Name, value.Name, err)
 		}
 	}
-	physical, err := layout.Of(block.Type)
+	physical, err := foundation.LayoutOf(block.Type)
 	if err != nil {
 		return nil, fmt.Errorf("kernel %s parameter block: %w", function.Name, err)
 	}
@@ -120,11 +119,11 @@ func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, err
 	return block, nil
 }
 
-func flattenParameter(block *ParameterBlock, parameter int, path []string, logical *types.Type) error {
+func flattenParameter(block *ParameterBlock, parameter int, path []string, logical *foundation.Type) error {
 	if logical == nil {
 		return fmt.Errorf("missing type")
 	}
-	if logical.Kind == types.Struct {
+	if logical.Kind == foundation.StructKind {
 		for _, field := range logical.Fields {
 			if err := flattenParameter(block, parameter, appendPath(path, field.Name), field.Type); err != nil {
 				return err
@@ -133,13 +132,13 @@ func flattenParameter(block *ParameterBlock, parameter int, path []string, logic
 		return nil
 	}
 	physical := logical
-	if logical.Kind == types.Bool {
-		physical = types.TU32
-	} else if !types.IsNumeric(logical) {
+	if logical.Kind == foundation.BoolKind {
+		physical = foundation.Uint32Type
+	} else if !foundation.IsNumeric(logical) {
 		return fmt.Errorf("type %s cannot cross the host parameter ABI", logical)
 	}
 	name := fmt.Sprintf("f%d", len(block.Fields))
-	block.Type.Fields = append(block.Type.Fields, types.Field{Name: name, Type: physical})
+	block.Type.Fields = append(block.Type.Fields, foundation.TypeField{Name: name, Type: physical})
 	block.Fields = append(block.Fields, ParameterField{Parameter: parameter, Path: append([]string{}, path...), Name: name, Logical: logical, Physical: physical})
 	return nil
 }

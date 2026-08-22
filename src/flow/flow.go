@@ -5,9 +5,8 @@ import (
 	"slices"
 	"strings"
 
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/source"
-	"tach/src/types"
 )
 
 type ResourceID uint32
@@ -92,9 +91,9 @@ const (
 type Parameter struct {
 	Name     string
 	Kind     ParameterKind
-	Type     *types.Type
+	Type     *foundation.Type
 	Resource ResourceID
-	Span     source.Span
+	Span     foundation.Span
 }
 
 type ResourceKind uint8
@@ -108,12 +107,12 @@ type Resource struct {
 	ID        ResourceID
 	Name      string
 	Kind      ResourceKind
-	Type      *types.Type
+	Type      *foundation.Type
 	Parameter int
 	Length    ShapeID
 	Initial   VersionID
 	Final     VersionID
-	Span      source.Span
+	Span      foundation.Span
 }
 
 type Version struct {
@@ -151,7 +150,7 @@ type Shape struct {
 	Axis      uint8
 	Left      ShapeID
 	Right     ShapeID
-	Span      source.Span
+	Span      foundation.Span
 }
 
 type BufferArgument struct {
@@ -175,7 +174,7 @@ type ValueArgument struct {
 	Kind      ValueKind
 	Parameter int
 	Path      []string
-	Constant  *types.Value
+	Constant  *foundation.ConstantValue
 	Shape     ShapeID
 }
 
@@ -185,7 +184,7 @@ type Dispatch struct {
 	Domain  []ShapeID
 	Buffers []BufferArgument
 	Values  []ValueArgument
-	Span    source.Span
+	Span    foundation.Span
 }
 
 type ViewFormat uint8
@@ -207,12 +206,12 @@ type View struct {
 	Input  VersionID
 	Width  ShapeID
 	Height ShapeID
-	Span   source.Span
+	Span   foundation.Span
 }
 
 type Program struct {
 	Name       string
-	Span       source.Span
+	Span       foundation.Span
 	Indexed    bool
 	Rank       int
 	Parameters []Parameter
@@ -308,7 +307,7 @@ func Clone(m *Module) *Module {
 			for k := range q.Dispatches[j].Values {
 				value := &q.Dispatches[j].Values[k]
 				if value.Constant != nil {
-					value.Constant = &types.Value{Type: value.Constant.Type, Bits: append([]uint32(nil), value.Constant.Bits...)}
+					value.Constant = &foundation.ConstantValue{Type: value.Constant.Type, Bits: append([]uint32(nil), value.Constant.Bits...)}
 				}
 				value.Path = append([]string(nil), value.Path...)
 			}

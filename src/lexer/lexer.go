@@ -5,7 +5,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"tach/src/source"
+	"tach/src/foundation"
 )
 
 type Kind uint16
@@ -65,13 +65,13 @@ const (
 type Token struct {
 	Kind    Kind
 	Text    string
-	Span    source.Span
+	Span    foundation.Span
 	Leading []Trivia
 }
 
 type Trivia struct {
 	Text string
-	Span source.Span
+	Span foundation.Span
 }
 
 func (k Kind) String() string {
@@ -95,9 +95,11 @@ type lexer struct {
 
 func newLexer(file, src string) *lexer { return &lexer{file: file, src: src, line: 1, col: 1} }
 
-func (l *lexer) pos() source.Pos { return source.Pos{Offset: l.off, Line: l.line, Column: l.col} }
-func (l *lexer) span(start source.Pos) source.Span {
-	return source.Span{File: l.file, Start: start, End: l.pos()}
+func (l *lexer) pos() foundation.Position {
+	return foundation.Position{Offset: l.off, Line: l.line, Column: l.col}
+}
+func (l *lexer) span(start foundation.Position) foundation.Span {
+	return foundation.Span{File: l.file, Start: start, End: l.pos()}
 }
 
 func (l *lexer) peek() (rune, int) {
@@ -212,10 +214,10 @@ func (l *lexer) next() (token Token, err error) {
 					break
 				}
 				if digits == 0 {
-					return Token{}, &source.Diagnostic{Span: l.span(start), Message: "base-prefixed integer literal requires digits"}
+					return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: "base-prefixed integer literal requires digits"}
 				}
 				if c, _ := l.peek(); unicode.IsLetter(c) {
-					return Token{}, &source.Diagnostic{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
+					return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 				}
 				return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 			}
@@ -257,11 +259,11 @@ func (l *lexer) next() (token Token, err error) {
 				break
 			}
 			if digits == 0 {
-				return Token{}, &source.Diagnostic{Span: l.span(start), Message: "floating-point exponent requires digits"}
+				return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: "floating-point exponent requires digits"}
 			}
 		}
 		if c, _ = l.peek(); unicode.IsLetter(c) {
-			return Token{}, &source.Diagnostic{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
+			return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: "numeric suffixes are not part of Tach; use an explicit type constructor"}
 		}
 		return Token{Kind: Number, Text: l.src[start.Offset:l.off], Span: l.span(start)}, nil
 	}
@@ -270,7 +272,7 @@ func (l *lexer) next() (token Token, err error) {
 		for {
 			r, _ = l.peek()
 			if r == 0 || r == '\n' {
-				return Token{}, &source.Diagnostic{Span: l.span(start), Message: "unterminated string"}
+				return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: "unterminated string"}
 			}
 			l.advance()
 			if r == '"' {
@@ -278,7 +280,7 @@ func (l *lexer) next() (token Token, err error) {
 			}
 			if r == '\\' {
 				if next, _ := l.peek(); next == 0 || next == '\n' {
-					return Token{}, &source.Diagnostic{Span: l.span(start), Message: "unterminated string"}
+					return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: "unterminated string"}
 				}
 				l.advance()
 			}
@@ -381,7 +383,7 @@ func (l *lexer) next() (token Token, err error) {
 		return one(Tilde)
 	}
 	l.advance()
-	return Token{}, &source.Diagnostic{Span: l.span(start), Message: fmt.Sprintf("unexpected character %q", r)}
+	return Token{}, &foundation.Diagnostic{Span: l.span(start), Message: fmt.Sprintf("unexpected character %q", r)}
 }
 
 func Lex(file, src string) ([]Token, error) {
@@ -392,14 +394,14 @@ func Lex(file, src string) ([]Token, error) {
 	return tokens, nil
 }
 
-func LexRecover(file, src string) ([]Token, source.Diagnostics) {
+func LexRecover(file, src string) ([]Token, foundation.Diagnostics) {
 	l := newLexer(file, src)
 	var out []Token
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	for {
 		t, err := l.next()
 		if err != nil {
-			diagnostic := *err.(*source.Diagnostic)
+			diagnostic := *err.(*foundation.Diagnostic)
 			diagnostic.Kind = "lexer"
 			diagnostics = append(diagnostics, diagnostic)
 			continue

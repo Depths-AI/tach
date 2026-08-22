@@ -3,21 +3,20 @@ package sema
 import (
 	"tach/src/ast"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/source"
-	"tach/src/types"
 )
 
 type programSymbol struct {
 	resource  flow.ResourceID
 	shape     flow.ShapeID
-	type_     *types.Type
-	constant  *types.Value
+	type_     *foundation.Type
+	constant  *foundation.ConstantValue
 	parameter int
 }
 
 func (c *Checker) lowerPrograms() error {
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	var declarations []*ast.FunctionDecl
 	for _, declaration := range c.ast.Decls {
 		function, ok := declaration.(*ast.FunctionDecl)
@@ -106,16 +105,16 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 				if err != nil {
 					return nil, err
 				}
-				if !types.IsTransientElement(elem) {
+				if !foundation.IsTransientElement(elem) {
 					return nil, diag(transient.Span, "transient element %s must have a fixed host-shareable non-atomic footprint", elem)
 				}
-				transientType := types.Runtime(elem)
+				transientType := foundation.RuntimeArrayOf(elem)
 				if x.Type != nil {
 					declared, err := c.resolveType(x.Type)
 					if err != nil {
 						return nil, err
 					}
-					if !types.Equal(declared, transientType) {
+					if !foundation.Equal(declared, transientType) {
 						return nil, diag(x.Type.GetSpan(), "program transient is declared as %s, but its initializer produces %s", declared, transientType)
 					}
 				}
@@ -138,11 +137,11 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 					if err != nil {
 						return nil, err
 					}
-					if !types.Equal(declared, types.TU32) {
+					if !foundation.Equal(declared, foundation.Uint32Type) {
 						return nil, diag(x.Type.GetSpan(), "program shape binding must be uint32, got %s", declared)
 					}
 				}
-				symbols[x.Name] = programSymbol{shape: shape, type_: types.TU32, parameter: -1}
+				symbols[x.Name] = programSymbol{shape: shape, type_: foundation.Uint32Type, parameter: -1}
 			}
 		case *ast.RunStmt:
 			sig := c.funcs[x.Stage]
@@ -223,8 +222,8 @@ func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols 
 	}
 	identifier, ok := call.Args[0].(*ast.IdentExpr)
 	symbol, exists := symbols[identifierName(identifier)]
-	pixel := types.Vec(types.TF32, 4)
-	if !ok || !exists || symbol.resource == 0 || symbol.type_.Kind != types.RuntimeArray || !types.Equal(symbol.type_.Elem, pixel) {
+	pixel := foundation.VectorOf(foundation.Float32Type, 4)
+	if !ok || !exists || symbol.resource == 0 || symbol.type_.Kind != foundation.RuntimeArrayKind || !foundation.Equal(symbol.type_.Elem, pixel) {
 		return nil, diag(call.Args[0].GetSpan(), "view pixels must be a vec<float32, 4> buffer or transient")
 	}
 	if version := program.Version(current[symbol.resource]); version == nil || !version.Defined {
@@ -291,7 +290,7 @@ func (c *Checker) bindRunArguments(program *flow.Program, dispatch *flow.Dispatc
 				return diag(argument.GetSpan(), "stage %s receives resource %s in multiple buffer formals", stage.Name, identifier.Name)
 			}
 			seen[symbol.resource] = true
-			if !types.Equal(stage.BufferParams[formal.Buffer].Type, symbol.type_) {
+			if !foundation.Equal(stage.BufferParams[formal.Buffer].Type, symbol.type_) {
 				return diag(argument.GetSpan(), "buffer argument for %s has type %s, want %s", formal.Name, symbol.type_, stage.BufferParams[formal.Buffer].Type)
 			}
 			dispatch.Buffers = append(dispatch.Buffers, flow.BufferArgument{Formal: formal.Buffer, Resource: symbol.resource, Input: current[symbol.resource]})
@@ -340,17 +339,17 @@ func finishResources(program *flow.Program, current map[flow.ResourceID]flow.Ver
 	}
 }
 
-func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, want *types.Type, symbols map[string]programSymbol) (flow.ValueArgument, error) {
+func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, want *foundation.Type, symbols map[string]programSymbol) (flow.ValueArgument, error) {
 	if identifier, ok := expression.(*ast.IdentExpr); ok {
 		symbol, exists := symbols[identifier.Name]
-		if exists && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(symbol.type_, want) {
+		if exists && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(symbol.type_, want) {
 			return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter}, nil
 		}
-		if exists && symbol.shape != 0 && types.Equal(want, types.TU32) {
+		if exists && symbol.shape != 0 && foundation.Equal(want, foundation.Uint32Type) {
 			return flow.ValueArgument{Kind: flow.ValueShape, Shape: symbol.shape}, nil
 		}
 	}
-	if symbol, path, got, ok := programPath(expression, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(got, want) {
+	if symbol, path, got, ok := programPath(expression, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(got, want) {
 		return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter, Path: path}, nil
 	}
 	if value, constant, err := c.tryConstant(expression, want, programEnvironment(symbols)); err != nil {
@@ -358,7 +357,7 @@ func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, 
 	} else if constant {
 		return flow.ValueArgument{Kind: flow.ValueConstant, Constant: value}, nil
 	}
-	if want.Kind == types.U32 {
+	if want.Kind == foundation.Uint32Kind {
 		shape, err := c.lowerShape(program, expression, symbols)
 		if err == nil {
 			return flow.ValueArgument{Kind: flow.ValueShape, Shape: shape}, nil
@@ -368,7 +367,7 @@ func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, 
 }
 
 func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol) (flow.ShapeID, error) {
-	if value, constant, err := c.tryConstant(expression, types.TU32, programEnvironment(symbols)); err != nil {
+	if value, constant, err := c.tryConstant(expression, foundation.Uint32Type, programEnvironment(symbols)); err != nil {
 		return 0, err
 	} else if constant {
 		return program.AddShape(flow.Shape{Op: flow.ShapeConstant, Value: value.Bits[0], Span: expression.GetSpan()}), nil
@@ -382,19 +381,19 @@ func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols
 		if symbol.shape != 0 {
 			return symbol.shape, nil
 		}
-		if symbol.parameter >= 0 && symbol.resource == 0 && types.Equal(symbol.type_, types.TU32) {
+		if symbol.parameter >= 0 && symbol.resource == 0 && foundation.Equal(symbol.type_, foundation.Uint32Type) {
 			return program.AddShape(flow.Shape{Op: flow.ShapeParameter, Parameter: symbol.parameter, Span: x.Span}), nil
 		}
 	case *ast.MemberExpr:
 		if x.Name == "length" {
-			if symbol, path, final, ok := programPath(x.Base, symbols); ok && symbol.resource != 0 && final.Kind == types.RuntimeArray {
+			if symbol, path, final, ok := programPath(x.Base, symbols); ok && symbol.resource != 0 && final.Kind == foundation.RuntimeArrayKind {
 				if resource := program.Resource(symbol.resource); resource != nil && resource.Kind == flow.Transient && len(path) == 0 {
 					return resource.Length, nil
 				}
 				return program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: symbol.resource, Path: path, Span: x.Span}), nil
 			}
 		}
-		if symbol, path, final, ok := programPath(x, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && types.Equal(final, types.TU32) {
+		if symbol, path, final, ok := programPath(x, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(final, foundation.Uint32Type) {
 			return program.AddShape(flow.Shape{Op: flow.ShapeParameter, Parameter: symbol.parameter, Path: path, Span: x.Span}), nil
 		}
 	case *ast.BinaryExpr:
@@ -433,17 +432,17 @@ func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols
 	return 0, diag(expression.GetSpan(), "expression is not a checked uint32 shape expression")
 }
 
-func programPath(expression ast.Expr, symbols map[string]programSymbol) (programSymbol, []string, *types.Type, bool) {
+func programPath(expression ast.Expr, symbols map[string]programSymbol) (programSymbol, []string, *foundation.Type, bool) {
 	switch x := expression.(type) {
 	case *ast.IdentExpr:
 		symbol, ok := symbols[x.Name]
 		return symbol, nil, symbol.type_, ok
 	case *ast.MemberExpr:
 		symbol, path, parent, ok := programPath(x.Base, symbols)
-		if !ok || parent == nil || parent.Kind != types.Struct {
+		if !ok || parent == nil || parent.Kind != foundation.StructKind {
 			return programSymbol{}, nil, nil, false
 		}
-		field := types.FieldIndex(parent, x.Name)
+		field := foundation.FieldIndex(parent, x.Name)
 		if field < 0 {
 			return programSymbol{}, nil, nil, false
 		}

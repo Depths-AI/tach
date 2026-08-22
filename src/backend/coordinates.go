@@ -3,8 +3,8 @@ package backend
 import (
 	"strconv"
 
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/types"
 )
 
 type CoordinateSpace uint8
@@ -60,7 +60,7 @@ func optimizeBlock(f *ir.Function, workgroup [3]uint32, coordinates *Coordinates
 	for _, in := range block.Instrs {
 		switch x := in.(type) {
 		case *ir.Const:
-			if x.Type.Kind == types.U32 {
+			if x.Type.Kind == foundation.Uint32Kind {
 				if value, err := strconv.ParseUint(x.Raw, 10, 32); err == nil {
 					constants[x.Result] = uint32(value)
 				}

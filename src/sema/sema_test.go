@@ -9,11 +9,10 @@ import (
 
 	"tach/src/ast"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/parser"
 	"tach/src/sema"
-	"tach/src/source"
-	"tach/src/types"
 )
 
 func lower(t *testing.T, name, source string) *flow.Module {
@@ -29,7 +28,7 @@ func lower(t *testing.T, name, source string) *flow.Module {
 	return module
 }
 
-func reject(t *testing.T, name, text, want string) source.Diagnostic {
+func reject(t *testing.T, name, text, want string) foundation.Diagnostic {
 	t.Helper()
 	parsed, err := parser.Parse(name, text)
 	if err != nil {
@@ -39,7 +38,7 @@ func reject(t *testing.T, name, text, want string) source.Diagnostic {
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("CheckAndLower error = %v, want %q", err, want)
 	}
-	var diagnostics source.Diagnostics
+	var diagnostics foundation.Diagnostics
 	if !errors.As(err, &diagnostics) || len(diagnostics) != 1 {
 		t.Fatalf("CheckAndLower error = %#v, want one source diagnostic", err)
 	}
@@ -630,13 +629,13 @@ func TestFloat16Encoding(t *testing.T) {
 		{1.00048828125, 0x3c00}, {1.00146484375, 0x3c02},
 		{math.Nextafter(1.00048828125, 2), 0x3c01}, {math.Nextafter(1.00146484375, 1), 0x3c01},
 	} {
-		bits, ok := types.Float16bits(test.value)
+		bits, ok := foundation.Float16Bits(test.value)
 		if !ok || bits != test.bits {
 			t.Errorf("Float16bits(%g) = %#04x, %v; want %#04x, true", test.value, bits, ok, test.bits)
 		}
 	}
 	for _, value := range []float64{65505, -65505} {
-		if _, ok := types.Float16bits(value); ok {
+		if _, ok := foundation.Float16Bits(value); ok {
 			t.Errorf("Float16bits(%g) accepted an out-of-range value", value)
 		}
 	}

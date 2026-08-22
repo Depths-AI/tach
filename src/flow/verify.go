@@ -3,8 +3,8 @@ package flow
 import (
 	"fmt"
 
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/types"
 )
 
 func Verify(m *Module) error {
@@ -42,10 +42,10 @@ func verifyProgram(m *Module, p *Program) error {
 		if parameter.Kind == BufferParameter {
 			bufferCount++
 			r := p.Resource(parameter.Resource)
-			if r == nil || r.Kind != External || r.Parameter != i || !types.Equal(r.Type, parameter.Type) {
+			if r == nil || r.Kind != External || r.Parameter != i || !foundation.Equal(r.Type, parameter.Type) {
 				return fmt.Errorf("buffer parameter %d has invalid resource", i)
 			}
-		} else if parameter.Kind != ValueParameter || !types.IsConstructible(parameter.Type) {
+		} else if parameter.Kind != ValueParameter || !foundation.IsConstructible(parameter.Type) {
 			return fmt.Errorf("parameter %d has invalid kind/type", i)
 		}
 	}
@@ -91,8 +91,8 @@ func verifyProgram(m *Module, p *Program) error {
 	}
 	if p.View != nil {
 		view, resource := p.View, p.Resource(p.View.Source)
-		pixel := types.Vec(types.TF32, 4)
-		if view.Format != SRGB8 || resource == nil || resource.Type.Kind != types.RuntimeArray || !types.Equal(resource.Type.Elem, pixel) {
+		pixel := foundation.VectorOf(foundation.Float32Type, 4)
+		if view.Format != SRGB8 || resource == nil || resource.Type.Kind != foundation.RuntimeArrayKind || !foundation.Equal(resource.Type.Elem, pixel) {
 			return fmt.Errorf("has invalid view source/format")
 		}
 		if p.Version(view.Input) == nil || p.Version(view.Input).Resource != view.Source || p.Shape(view.Width) == nil || p.Shape(view.Height) == nil {
@@ -125,7 +125,7 @@ func verifyProgram(m *Module, p *Program) error {
 				return fmt.Errorf("dispatch %d has invalid buffer argument %d", d.ID, formal)
 			}
 			seen[a.Resource] = true
-			if !types.Equal(stage.BufferParams[formal].Type, p.Resource(a.Resource).Type) {
+			if !foundation.Equal(stage.BufferParams[formal].Type, p.Resource(a.Resource).Type) {
 				return fmt.Errorf("dispatch %d buffer type mismatch", d.ID)
 			}
 			input := p.Version(a.Input)
@@ -178,7 +178,7 @@ func verifyShape(p *Program, id ShapeID, active map[ShapeID]bool) error {
 	case ShapeConstant:
 		return nil
 	case ShapeParameter:
-		if s.Parameter < 0 || s.Parameter >= len(p.Parameters) || p.Parameters[s.Parameter].Kind != ValueParameter || !types.Equal(pathType(p.Parameters[s.Parameter].Type, s.Path), types.TU32) {
+		if s.Parameter < 0 || s.Parameter >= len(p.Parameters) || p.Parameters[s.Parameter].Kind != ValueParameter || !foundation.Equal(pathType(p.Parameters[s.Parameter].Type, s.Path), foundation.Uint32Type) {
 			return fmt.Errorf("shape %d has invalid parameter", id)
 		}
 		return nil
@@ -188,7 +188,7 @@ func verifyShape(p *Program, id ShapeID, active map[ShapeID]bool) error {
 			return fmt.Errorf("shape %d has invalid resource", id)
 		}
 		final := pathType(resource.Type, s.Path)
-		if final == nil || final.Kind != types.RuntimeArray {
+		if final == nil || final.Kind != foundation.RuntimeArrayKind {
 			return fmt.Errorf("shape %d resource path is not a runtime array", id)
 		}
 		return nil
@@ -207,28 +207,28 @@ func verifyShape(p *Program, id ShapeID, active map[ShapeID]bool) error {
 	}
 }
 
-func validValue(p *Program, value ValueArgument, want *types.Type) bool {
+func validValue(p *Program, value ValueArgument, want *foundation.Type) bool {
 	switch value.Kind {
 	case ValueParameterRef:
-		return value.Parameter >= 0 && value.Parameter < len(p.Parameters) && p.Parameters[value.Parameter].Kind == ValueParameter && types.Equal(pathType(p.Parameters[value.Parameter].Type, value.Path), want)
+		return value.Parameter >= 0 && value.Parameter < len(p.Parameters) && p.Parameters[value.Parameter].Kind == ValueParameter && foundation.Equal(pathType(p.Parameters[value.Parameter].Type, value.Path), want)
 	case ValueConstant:
-		return value.Constant.Valid() && types.Equal(value.Constant.Type, want)
+		return value.Constant.Valid() && foundation.Equal(value.Constant.Type, want)
 	case ValueRepeat:
-		return want.Kind == types.U32
+		return want.Kind == foundation.Uint32Kind
 	case ValueShape:
-		return want.Kind == types.U32 && p.Shape(value.Shape) != nil
+		return want.Kind == foundation.Uint32Kind && p.Shape(value.Shape) != nil
 	default:
 		return false
 	}
 }
 
-func pathType(root *types.Type, path []string) *types.Type {
+func pathType(root *foundation.Type, path []string) *foundation.Type {
 	current := root
 	for _, name := range path {
-		if current == nil || current.Kind != types.Struct {
+		if current == nil || current.Kind != foundation.StructKind {
 			return nil
 		}
-		index := types.FieldIndex(current, name)
+		index := foundation.FieldIndex(current, name)
 		if index < 0 {
 			return nil
 		}

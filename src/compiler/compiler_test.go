@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"tach/src/foundation"
 	"tach/src/lexer"
 	"tach/src/parser"
-	"tach/src/source"
 )
 
 const baselineSource = `export function scale[i](values: buffer<float32[]>, factor: float32) {
@@ -472,7 +472,7 @@ func TestNegativeExamplesAttestStructuredErrorsAndWarnings(t *testing.T) {
 			if (one != nil) != expected.fails || (many != nil) != expected.fails {
 				t.Fatalf("fails=%v: one=%v many=%v", expected.fails, one, many)
 			}
-			var diagnostics source.Diagnostics
+			var diagnostics foundation.Diagnostics
 			if expected.fails {
 				var ok bool
 				diagnostics, ok = ErrorDiagnostics(one)
@@ -502,8 +502,8 @@ func TestNegativeExamplesAttestStructuredErrorsAndWarnings(t *testing.T) {
 				}
 			}
 			encoded, err := json.Marshal(struct {
-				Schema      int                `json:"schema"`
-				Diagnostics source.Diagnostics `json:"diagnostics"`
+				Schema      int                    `json:"schema"`
+				Diagnostics foundation.Diagnostics `json:"diagnostics"`
 			}{1, diagnostics})
 			if err != nil || !bytes.Contains(encoded, []byte(`"severity"`)) || !bytes.Contains(encoded, []byte(`"code"`)) || bytes.Contains(encoded, []byte(`"Kind"`)) {
 				t.Fatalf("machine diagnostics = %s, %v", encoded, err)

@@ -5,9 +5,8 @@ import (
 	"maps"
 
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/source"
-	"tach/src/types"
 )
 
 func OptimizeLogical(logical *flow.Module) error {
@@ -332,8 +331,8 @@ func promoteLoop(f *ir.Function, loop *ir.Loop, resources map[ir.PlaceID]int, ne
 	didNotRun, didRun := fresh(), fresh()
 	ranParameter, ranResult := fresh(), fresh()
 	before = append(before,
-		&ir.Const{Result: didNotRun, Type: types.TBool, Raw: "false", Span: loop.Span},
-		&ir.Const{Result: didRun, Type: types.TBool, Raw: "true", Span: loop.Span},
+		&ir.Const{Result: didNotRun, Type: foundation.BoolType, Raw: "false", Span: loop.Span},
+		&ir.Const{Result: didRun, Type: foundation.BoolType, Raw: "true", Span: loop.Span},
 	)
 	replacements := map[ir.ValueID]ir.ValueID{}
 	byLoad := map[*ir.Load]int{}
@@ -350,8 +349,8 @@ func promoteLoop(f *ir.Function, loop *ir.Loop, resources map[ir.PlaceID]int, ne
 		loop.Params = append(loop.Params, ir.LoopParam{ID: candidate.paramID, Type: candidate.load.Type, Init: candidate.initID})
 		loop.Results = append(loop.Results, ir.Result{ID: candidate.resultID, Type: candidate.load.Type})
 	}
-	loop.Params = append(loop.Params, ir.LoopParam{ID: ranParameter, Type: types.TBool, Init: didNotRun})
-	loop.Results = append(loop.Results, ir.Result{ID: ranResult, Type: types.TBool})
+	loop.Params = append(loop.Params, ir.LoopParam{ID: ranParameter, Type: foundation.BoolType, Init: didNotRun})
+	loop.Results = append(loop.Results, ir.Result{ID: ranResult, Type: foundation.BoolType})
 	rewriteBlockValues(loop.Body, func(id ir.ValueID) ir.ValueID {
 		if replacement := replacements[id]; replacement != 0 {
 			return replacement
@@ -400,16 +399,16 @@ func promoteLoop(f *ir.Function, loop *ir.Loop, resources map[ir.PlaceID]int, ne
 	return before, after
 }
 
-func zeroable(t *types.Type) bool {
-	return types.IsScalar(t) || t.Kind == types.Vector
+func zeroable(t *foundation.Type) bool {
+	return foundation.IsScalar(t) || t.Kind == foundation.VectorKind
 }
 
-func zeroValue(t *types.Type, span source.Span, fresh func() ir.ValueID, out []ir.Instr) (ir.ValueID, []ir.Instr) {
+func zeroValue(t *foundation.Type, span foundation.Span, fresh func() ir.ValueID, out []ir.Instr) (ir.ValueID, []ir.Instr) {
 	lanes := 1
-	if t.Kind == types.Vector {
+	if t.Kind == foundation.VectorKind {
 		lanes = t.Lanes
 	}
-	id, instructions := ir.MaterializeConstant(&types.Value{Type: t, Bits: make([]uint32, lanes)}, span, fresh)
+	id, instructions := ir.MaterializeConstant(&foundation.ConstantValue{Type: t, Bits: make([]uint32, lanes)}, span, fresh)
 	return id, append(out, instructions...)
 }
 

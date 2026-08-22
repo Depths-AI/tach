@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/types"
 )
 
 type ProjectInput struct {
@@ -94,7 +94,7 @@ type TypeRef struct {
 
 func DescribeProject(module *flow.Module, input ProjectInput) ([]byte, error) {
 	out := ProjectDescription{Schema: 2, Name: input.Name, Version: input.Version, Package: input.Package, Title: input.Title, Summary: input.Summary, Modules: []ModuleDescription{}}
-	typesByName := map[string]*types.Type{}
+	typesByName := map[string]*foundation.Type{}
 	for _, item := range module.Kernel.Structs {
 		typesByName[item.Name] = item
 	}
@@ -151,7 +151,7 @@ func describeFunction(function *ir.Function, doc flow.FunctionDocumentation) Fun
 		for _, parameter := range function.Params {
 			item.Parameters = append(item.Parameters, Parameter{Name: parameter.Name, Type: typeRef(parameter.Type), Description: doc.Parameters[parameter.Name]})
 		}
-		if function.Return.Kind != types.Void {
+		if function.Return.Kind != foundation.VoidKind {
 			item.Returns = &Return{Type: typeRef(function.Return), Description: doc.Returns}
 		}
 		return item
@@ -203,17 +203,17 @@ func bufferAccess(buffer ir.BufferSummary) flow.ResourceAccess {
 	return flow.ReadAccess
 }
 
-func typeRef(t *types.Type) TypeRef {
+func typeRef(t *foundation.Type) TypeRef {
 	kinds := [...]string{"invalid", "void", "bool", "i32", "u32", "f16", "f32", "vector", "struct", "atomic", "fixedArray", "runtimeArray"}
 	out := TypeRef{Tach: t.String(), Kind: kinds[t.Kind]}
 	switch t.Kind {
-	case types.Struct:
+	case foundation.StructKind:
 		out.Name = t.Name
-	case types.Vector:
+	case foundation.VectorKind:
 		out.Lanes = t.Lanes
 		item := typeRef(t.Elem)
 		out.Elem = &item
-	case types.Atomic, types.FixedArray, types.RuntimeArray:
+	case foundation.AtomicKind, foundation.FixedArrayKind, foundation.RuntimeArrayKind:
 		out.Count = t.Count
 		item := typeRef(t.Elem)
 		out.Elem = &item

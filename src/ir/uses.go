@@ -3,30 +3,30 @@ package ir
 import (
 	"fmt"
 
-	"tach/src/types"
+	"tach/src/foundation"
 )
 
 // UsesKind reports whether a type kind occurs anywhere in a module's declared
 // or instruction-level type surface.
-func UsesKind(module *Module, kind types.Kind) bool {
+func UsesKind(module *Module, kind foundation.TypeKind) bool {
 	for _, item := range module.Structs {
-		if types.Contains(item, kind) {
+		if foundation.Contains(item, kind) {
 			return true
 		}
 	}
 	var block func(*Block) bool
 	block = func(body *Block) bool {
 		for _, instruction := range body.Instrs {
-			if value, ok := instruction.(ValueDef); ok && types.Contains(value.ResultType(), kind) {
+			if value, ok := instruction.(ValueDef); ok && foundation.Contains(value.ResultType(), kind) {
 				return true
 			}
-			if place, ok := instruction.(PlaceDef); ok && types.Contains(place.PlaceType(), kind) {
+			if place, ok := instruction.(PlaceDef); ok && foundation.Contains(place.PlaceType(), kind) {
 				return true
 			}
 			switch item := instruction.(type) {
 			case *If:
 				for _, result := range item.Results {
-					if types.Contains(result.Type, kind) {
+					if foundation.Contains(result.Type, kind) {
 						return true
 					}
 				}
@@ -35,12 +35,12 @@ func UsesKind(module *Module, kind types.Kind) bool {
 				}
 			case *Loop:
 				for _, result := range item.Results {
-					if types.Contains(result.Type, kind) {
+					if foundation.Contains(result.Type, kind) {
 						return true
 					}
 				}
 				for _, parameter := range item.Params {
-					if types.Contains(parameter.Type, kind) {
+					if foundation.Contains(parameter.Type, kind) {
 						return true
 					}
 				}
@@ -57,21 +57,21 @@ func UsesKind(module *Module, kind types.Kind) bool {
 	}
 	for _, function := range module.Functions {
 		for _, parameter := range function.BufferParams {
-			if types.Contains(parameter.Type, kind) {
+			if foundation.Contains(parameter.Type, kind) {
 				return true
 			}
 		}
 		for _, parameter := range function.Params {
-			if types.Contains(parameter.Type, kind) {
+			if foundation.Contains(parameter.Type, kind) {
 				return true
 			}
 		}
 		for _, variable := range function.WorkgroupVars {
-			if types.Contains(variable.Type, kind) {
+			if foundation.Contains(variable.Type, kind) {
 				return true
 			}
 		}
-		if types.Contains(function.Return, kind) || block(function.Body) {
+		if foundation.Contains(function.Return, kind) || block(function.Body) {
 			return true
 		}
 	}

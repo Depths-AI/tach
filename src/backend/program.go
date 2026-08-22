@@ -5,9 +5,8 @@ import (
 
 	"tach/src/abi"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/layout"
-	"tach/src/types"
 )
 
 type Target string
@@ -47,7 +46,7 @@ type StorageBinding struct {
 	Buffer          int
 	Binding         uint32
 	Access          ir.Access
-	Type            *types.Type
+	Type            *foundation.Type
 	MinimumByteSize uint32
 	Texture         bool
 }
@@ -103,7 +102,7 @@ type Step struct {
 
 type Transient struct {
 	Resource        flow.ResourceID
-	Type            *types.Type
+	Type            *foundation.Type
 	Stride          uint32
 	Alignment       uint32
 	MinimumByteSize uint32
@@ -148,22 +147,22 @@ type Executable struct {
 
 func RequiredFeatures(executable *Executable) []string {
 	if executable.Target == Web {
-		if ir.UsesKind(executable.KernelModule, types.F16) {
+		if ir.UsesKind(executable.KernelModule, foundation.Float16Kind) {
 			return []string{ShaderF16}
 		}
 		return nil
 	}
 	features := []string{Synchronization2, ZeroInitializeWorkgroupMemory, VulkanMemoryModel}
-	if !ir.UsesKind(executable.KernelModule, types.F16) {
+	if !ir.UsesKind(executable.KernelModule, foundation.Float16Kind) {
 		return features
 	}
 	features = append(features, ShaderFloat16)
 	storage, uniform := false, false
 	for _, kernel := range executable.PhysicalKernels {
 		for _, binding := range kernel.Bindings {
-			storage = storage || types.Contains(binding.Type, types.F16)
+			storage = storage || foundation.Contains(binding.Type, foundation.Float16Kind)
 		}
-		uniform = uniform || kernel.Parameters != nil && types.Contains(kernel.Parameters.Type, types.F16)
+		uniform = uniform || kernel.Parameters != nil && foundation.Contains(kernel.Parameters.Type, foundation.Float16Kind)
 	}
 	if storage {
 		features = append(features, StorageBuffer16BitAccess)
@@ -200,7 +199,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 		return nil, fmt.Errorf("invalid target profile %q", profile.Target)
 	}
 	cloned := flow.Clone(logical)
-	executable := &Executable{Target: profile.Target, Logical: cloned, KernelModule: &ir.Module{Structs: append([]*types.Type(nil), cloned.Kernel.Structs...)}}
+	executable := &Executable{Target: profile.Target, Logical: cloned, KernelModule: &ir.Module{Structs: append([]*foundation.Type(nil), cloned.Kernel.Structs...)}}
 	for _, function := range cloned.Kernel.Functions {
 		if function.Kind == ir.Helper {
 			executable.KernelModule.Functions = append(executable.KernelModule.Functions, cloneFunction(function))
@@ -417,7 +416,7 @@ func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, p
 			}
 			shape := program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: argument.Resource, Path: path, Span: dispatch.Span})
 			formal := len(function.Params)
-			function.Params = append(function.Params, ir.Param{Name: fmt.Sprintf("__tach_length_%d", buffer), ID: next, Type: types.TU32})
+			function.Params = append(function.Params, ir.Param{Name: fmt.Sprintf("__tach_length_%d", buffer), ID: next, Type: foundation.Uint32Type})
 			function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: function.Params[formal].Name, Kind: ir.SourceValue, Value: next, Buffer: -1})
 			*values = append(*values, flow.ValueArgument{Formal: formal, Kind: flow.ValueShape, Shape: shape})
 			lengths[buffer], next = next, next+1
@@ -427,13 +426,13 @@ func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, p
 	return lengths
 }
 
-func f16RuntimePath(t *types.Type) ([]string, bool) {
-	if t.Kind == types.RuntimeArray {
-		return nil, t.Elem.Kind == types.F16
+func f16RuntimePath(t *foundation.Type) ([]string, bool) {
+	if t.Kind == foundation.RuntimeArrayKind {
+		return nil, t.Elem.Kind == foundation.Float16Kind
 	}
-	if t.Kind == types.Struct && len(t.Fields) > 0 {
+	if t.Kind == foundation.StructKind && len(t.Fields) > 0 {
 		tail := t.Fields[len(t.Fields)-1]
-		if tail.Type.Kind == types.RuntimeArray && tail.Type.Elem.Kind == types.F16 {
+		if tail.Type.Kind == foundation.RuntimeArrayKind && tail.Type.Elem.Kind == foundation.Float16Kind {
 			return []string{tail.Name}, true
 		}
 	}
@@ -512,7 +511,7 @@ func containsLoop(block *ir.Block) bool {
 func internalizeRepeat(function *ir.Function) error {
 	next := ir.MaxValueID(function)
 	next++
-	repeat := ir.Param{Name: "__tach_repeat", ID: next, Type: types.TU32}
+	repeat := ir.Param{Name: "__tach_repeat", ID: next, Type: foundation.Uint32Type}
 	function.Params = append(function.Params, repeat)
 	function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: repeat.Name, Kind: ir.SourceValue, Value: repeat.ID, Buffer: -1})
 	if !rewriteReturns(function.Body) {
@@ -533,17 +532,17 @@ func internalizeRepeat(function *ir.Function) error {
 	original := function.Body
 	function.Body = &ir.Block{
 		Instrs: []ir.Instr{
-			&ir.Const{Result: zero, Type: types.TU32, Raw: "0", Span: function.Span},
+			&ir.Const{Result: zero, Type: foundation.Uint32Type, Raw: "0", Span: function.Span},
 			&ir.Loop{
-				Results: []ir.Result{{ID: result, Type: types.TU32}},
-				Params:  []ir.LoopParam{{ID: parameter, Type: types.TU32, Init: zero}},
+				Results: []ir.Result{{ID: result, Type: foundation.Uint32Type}},
+				Params:  []ir.LoopParam{{ID: parameter, Type: foundation.Uint32Type, Init: zero}},
 				Cond: &ir.Block{Instrs: []ir.Instr{
-					&ir.Binary{Result: condition, Type: types.TBool, Op: "<", Left: parameter, Right: repeat.ID, Span: function.Span},
+					&ir.Binary{Result: condition, Type: foundation.BoolType, Op: "<", Left: parameter, Right: repeat.ID, Span: function.Span},
 				}, Term: &ir.Yield{Values: []ir.ValueID{condition}}},
 				Body: &ir.Block{Instrs: []ir.Instr{
 					&ir.Scope{Body: original, Span: function.Span},
-					&ir.Const{Result: one, Type: types.TU32, Raw: "1", Span: function.Span},
-					&ir.Binary{Result: incremented, Type: types.TU32, Op: "+", Left: parameter, Right: one, Span: function.Span},
+					&ir.Const{Result: one, Type: foundation.Uint32Type, Raw: "1", Span: function.Span},
+					&ir.Binary{Result: incremented, Type: foundation.Uint32Type, Op: "+", Left: parameter, Right: one, Span: function.Span},
 				}, Term: &ir.Continue{Values: []ir.ValueID{incremented}}},
 				Span: function.Span,
 			},
@@ -620,13 +619,13 @@ func chooseWorkgroup(function *ir.Function, profile Profile) ([3]uint32, error) 
 	}
 }
 
-func minimumByteSize(t *types.Type) (uint32, error) {
-	l, err := layout.Of(t)
+func minimumByteSize(t *foundation.Type) (uint32, error) {
+	l, err := foundation.LayoutOf(t)
 	if err != nil {
 		return 0, err
 	}
 	if l.Runtime {
-		if t.Kind == types.RuntimeArray {
+		if t.Kind == foundation.RuntimeArrayKind {
 			return l.Stride, nil
 		}
 		tail := l.Fields[len(l.Fields)-1]
@@ -673,7 +672,7 @@ func planTransients(program *flow.Program, omitted flow.ResourceID) []Transient 
 		if program.View != nil && program.View.Source == resource.ID {
 			last = len(program.Dispatches)
 		}
-		l, _ := layout.Of(resource.Type)
+		l, _ := foundation.LayoutOf(resource.Type)
 		color := 0
 		for {
 			overlap := false
@@ -770,7 +769,7 @@ func shapeProduct(program *flow.Program, product, left, right flow.ShapeID) bool
 func appendViewExtent(function *ir.Function, values *[]flow.ValueArgument, view *flow.View) (ir.ValueID, ir.ValueID) {
 	next := ir.MaxValueID(function) + 1
 	width, height := next, next+1
-	for _, parameter := range []ir.Param{{Name: "__tach_view_width", ID: width, Type: types.TU32}, {Name: "__tach_view_height", ID: height, Type: types.TU32}} {
+	for _, parameter := range []ir.Param{{Name: "__tach_view_width", ID: width, Type: foundation.Uint32Type}, {Name: "__tach_view_height", ID: height, Type: foundation.Uint32Type}} {
 		function.Params = append(function.Params, parameter)
 		function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: parameter.Name, Kind: ir.SourceValue, Value: parameter.ID, Buffer: -1})
 	}
@@ -783,7 +782,7 @@ func appendViewExtent(function *ir.Function, values *[]flow.ValueArgument, view 
 }
 
 func fuseView(function *ir.Function, binding int) error {
-	output := types.Runtime(types.TU32)
+	output := foundation.RuntimeArrayOf(foundation.Uint32Type)
 	function.BufferParams[binding].Type = output
 	places := map[ir.PlaceID]bool{}
 	next, stores := ir.MaxValueID(function)+1, 0
@@ -802,7 +801,7 @@ func fuseView(function *ir.Function, binding int) error {
 				}
 			case *ir.PlaceIndex:
 				if places[x.Base] {
-					x.Type, places[x.Result] = types.TU32, true
+					x.Type, places[x.Result] = foundation.Uint32Type, true
 				}
 			case *ir.Store:
 				if places[x.Place] {
@@ -844,12 +843,12 @@ func fuseView(function *ir.Function, binding int) error {
 }
 
 func projectionKernel(target Target) (PhysicalKernel, error) {
-	pixel, pixels := types.Vec(types.TF32, 4), types.Runtime(types.Vec(types.TF32, 4))
-	output := types.Runtime(types.TU32)
+	pixel, pixels := foundation.VectorOf(foundation.Float32Type, 4), foundation.RuntimeArrayOf(foundation.VectorOf(foundation.Float32Type, 4))
+	output := foundation.RuntimeArrayOf(foundation.Uint32Type)
 	function := &ir.Function{
 		Kind:    ir.Stage,
-		Indices: []ir.Param{{Name: "x", ID: 1, Type: types.TU32}, {Name: "y", ID: 2, Type: types.TU32}},
-		Params:  []ir.Param{{Name: "width", ID: 3, Type: types.TU32}, {Name: "height", ID: 4, Type: types.TU32}},
+		Indices: []ir.Param{{Name: "x", ID: 1, Type: foundation.Uint32Type}, {Name: "y", ID: 2, Type: foundation.Uint32Type}},
+		Params:  []ir.Param{{Name: "width", ID: 3, Type: foundation.Uint32Type}, {Name: "height", ID: 4, Type: foundation.Uint32Type}},
 		BufferParams: []ir.BufferParam{
 			{Name: "pixels", Type: pixels, Access: ir.Read},
 			{Name: "output", Type: output, Access: ir.Mutable},
@@ -860,7 +859,7 @@ func projectionKernel(target Target) (PhysicalKernel, error) {
 			{Name: "width", Kind: ir.SourceValue, Value: 3, Buffer: -1},
 			{Name: "height", Kind: ir.SourceValue, Value: 4, Buffer: -1},
 		},
-		Return:    types.TVoid,
+		Return:    foundation.VoidType,
 		Workgroup: ir.WorkgroupConstraint{Explicit: true, Size: [3]uint32{16, 16, 1}},
 	}
 	function.Body = projectionBody(pixel)
@@ -889,22 +888,22 @@ func srgbFunction() *ir.Function {
 	return &ir.Function{
 		Name:   srgbHelper,
 		Kind:   ir.Helper,
-		Params: []ir.Param{{Name: "value", ID: 1, Type: types.TF32}},
-		Return: types.TF32,
+		Params: []ir.Param{{Name: "value", ID: 1, Type: foundation.Float32Type}},
+		Return: foundation.Float32Type,
 		Body: &ir.Block{
 			Instrs: []ir.Instr{
-				&ir.Call{Result: 2, Type: types.TF32, Function: unitHelper, Args: []ir.ValueID{1}},
-				&ir.Const{Result: 3, Type: types.TF32, Raw: "0.0031308"},
-				&ir.Binary{Result: 4, Type: types.TBool, Op: "<=", Left: 2, Right: 3},
-				&ir.Const{Result: 5, Type: types.TF32, Raw: "12.92"},
-				&ir.Binary{Result: 6, Type: types.TF32, Op: "*", Left: 2, Right: 5},
-				&ir.Const{Result: 7, Type: types.TF32, Raw: "0.416666667"},
-				&ir.Intrinsic{Result: 8, Type: types.TF32, Kind: ir.IntrinsicPow, Args: []ir.ValueID{2, 7}},
-				&ir.Const{Result: 9, Type: types.TF32, Raw: "1.055"},
-				&ir.Binary{Result: 10, Type: types.TF32, Op: "*", Left: 8, Right: 9},
-				&ir.Const{Result: 11, Type: types.TF32, Raw: "0.055"},
-				&ir.Binary{Result: 12, Type: types.TF32, Op: "-", Left: 10, Right: 11},
-				&ir.If{Results: []ir.Result{{ID: 13, Type: types.TF32}}, Cond: 4, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{6}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{12}}}},
+				&ir.Call{Result: 2, Type: foundation.Float32Type, Function: unitHelper, Args: []ir.ValueID{1}},
+				&ir.Const{Result: 3, Type: foundation.Float32Type, Raw: "0.0031308"},
+				&ir.Binary{Result: 4, Type: foundation.BoolType, Op: "<=", Left: 2, Right: 3},
+				&ir.Const{Result: 5, Type: foundation.Float32Type, Raw: "12.92"},
+				&ir.Binary{Result: 6, Type: foundation.Float32Type, Op: "*", Left: 2, Right: 5},
+				&ir.Const{Result: 7, Type: foundation.Float32Type, Raw: "0.416666667"},
+				&ir.Intrinsic{Result: 8, Type: foundation.Float32Type, Kind: ir.IntrinsicPow, Args: []ir.ValueID{2, 7}},
+				&ir.Const{Result: 9, Type: foundation.Float32Type, Raw: "1.055"},
+				&ir.Binary{Result: 10, Type: foundation.Float32Type, Op: "*", Left: 8, Right: 9},
+				&ir.Const{Result: 11, Type: foundation.Float32Type, Raw: "0.055"},
+				&ir.Binary{Result: 12, Type: foundation.Float32Type, Op: "-", Left: 10, Right: 11},
+				&ir.If{Results: []ir.Result{{ID: 13, Type: foundation.Float32Type}}, Cond: 4, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{6}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{12}}}},
 			},
 			Term: &ir.Return{Value: 13, HasValue: true},
 		},
@@ -913,26 +912,26 @@ func srgbFunction() *ir.Function {
 
 func unitFunction() *ir.Function {
 	return &ir.Function{
-		Name: unitHelper, Kind: ir.Helper, Params: []ir.Param{{Name: "value", ID: 1, Type: types.TF32}}, Return: types.TF32,
+		Name: unitHelper, Kind: ir.Helper, Params: []ir.Param{{Name: "value", ID: 1, Type: foundation.Float32Type}}, Return: foundation.Float32Type,
 		Body: &ir.Block{
 			Instrs: []ir.Instr{
-				&ir.Const{Result: 2, Type: types.TF32, Raw: "0.0"},
-				&ir.Const{Result: 3, Type: types.TF32, Raw: "1.0"},
-				&ir.Binary{Result: 4, Type: types.TBool, Op: ">", Left: 1, Right: 2},
-				&ir.Binary{Result: 5, Type: types.TBool, Op: "<", Left: 1, Right: 3},
-				&ir.If{Results: []ir.Result{{ID: 6, Type: types.TF32}}, Cond: 5, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{1}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{3}}}},
-				&ir.If{Results: []ir.Result{{ID: 7, Type: types.TF32}}, Cond: 4, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{6}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{2}}}},
+				&ir.Const{Result: 2, Type: foundation.Float32Type, Raw: "0.0"},
+				&ir.Const{Result: 3, Type: foundation.Float32Type, Raw: "1.0"},
+				&ir.Binary{Result: 4, Type: foundation.BoolType, Op: ">", Left: 1, Right: 2},
+				&ir.Binary{Result: 5, Type: foundation.BoolType, Op: "<", Left: 1, Right: 3},
+				&ir.If{Results: []ir.Result{{ID: 6, Type: foundation.Float32Type}}, Cond: 5, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{1}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{3}}}},
+				&ir.If{Results: []ir.Result{{ID: 7, Type: foundation.Float32Type}}, Cond: 4, Then: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{6}}}, Else: &ir.Block{Term: &ir.Yield{Values: []ir.ValueID{2}}}},
 			},
 			Term: &ir.Return{Value: 7, HasValue: true},
 		},
 	}
 }
 
-func projectionBody(pixel *types.Type) *ir.Block {
+func projectionBody(pixel *foundation.Type) *ir.Block {
 	then := &ir.Block{Instrs: []ir.Instr{
-		&ir.Binary{Result: 8, Type: types.TU32, Op: "*", Left: 2, Right: 3},
-		&ir.Binary{Result: 9, Type: types.TU32, Op: "+", Left: 8, Right: 1},
-		&ir.PlaceRoot{Result: 1, Type: types.Runtime(pixel), Buffer: 0},
+		&ir.Binary{Result: 8, Type: foundation.Uint32Type, Op: "*", Left: 2, Right: 3},
+		&ir.Binary{Result: 9, Type: foundation.Uint32Type, Op: "+", Left: 8, Right: 1},
+		&ir.PlaceRoot{Result: 1, Type: foundation.RuntimeArrayOf(pixel), Buffer: 0},
 		&ir.PlaceIndex{Result: 2, Type: pixel, Base: 1, Index: 9},
 		&ir.Load{Result: 10, Type: pixel, Place: 2},
 	}}
@@ -940,16 +939,16 @@ func projectionBody(pixel *types.Type) *ir.Block {
 	packed, merged := packRGBA(10, &next)
 	then.Instrs = append(then.Instrs, packed...)
 	then.Instrs = append(then.Instrs,
-		&ir.PlaceRoot{Result: 3, Type: types.Runtime(types.TU32), Buffer: 1},
-		&ir.PlaceIndex{Result: 4, Type: types.TU32, Base: 3, Index: 9},
+		&ir.PlaceRoot{Result: 3, Type: foundation.RuntimeArrayOf(foundation.Uint32Type), Buffer: 1},
+		&ir.PlaceIndex{Result: 4, Type: foundation.Uint32Type, Base: 3, Index: 9},
 		&ir.Store{Place: 4, Value: merged},
 	)
 	then.Term = &ir.Yield{}
 	return &ir.Block{
 		Instrs: []ir.Instr{
-			&ir.Binary{Result: 5, Type: types.TBool, Op: "<", Left: 1, Right: 3},
-			&ir.Binary{Result: 6, Type: types.TBool, Op: "<", Left: 2, Right: 4},
-			&ir.Binary{Result: 7, Type: types.TBool, Op: "&&", Left: 5, Right: 6},
+			&ir.Binary{Result: 5, Type: foundation.BoolType, Op: "<", Left: 1, Right: 3},
+			&ir.Binary{Result: 6, Type: foundation.BoolType, Op: "<", Left: 2, Right: 4},
+			&ir.Binary{Result: 7, Type: foundation.BoolType, Op: "&&", Left: 5, Right: 6},
 			&ir.If{Cond: 7, Then: then, Else: &ir.Block{Term: &ir.Yield{}}},
 		},
 		Term: &ir.Return{},
@@ -966,43 +965,43 @@ func packRGBA(value ir.ValueID, next *ir.ValueID) ([]ir.Instr, ir.ValueID) {
 	channels := make([]ir.ValueID, 4)
 	for index := range channels {
 		channels[index] = newValue()
-		instructions = append(instructions, &ir.Extract{Result: channels[index], Type: types.TF32, Base: value, Index: index})
+		instructions = append(instructions, &ir.Extract{Result: channels[index], Type: foundation.Float32Type, Base: value, Index: index})
 	}
 	for index := range 3 {
 		encoded := newValue()
-		instructions = append(instructions, &ir.Call{Result: encoded, Type: types.TF32, Function: srgbHelper, Args: []ir.ValueID{channels[index]}})
+		instructions = append(instructions, &ir.Call{Result: encoded, Type: foundation.Float32Type, Function: srgbHelper, Args: []ir.ValueID{channels[index]}})
 		channels[index] = encoded
 	}
 	alpha := newValue()
-	instructions = append(instructions, &ir.Call{Result: alpha, Type: types.TF32, Function: unitHelper, Args: []ir.ValueID{channels[3]}})
+	instructions = append(instructions, &ir.Call{Result: alpha, Type: foundation.Float32Type, Function: unitHelper, Args: []ir.ValueID{channels[3]}})
 	channels[3] = alpha
 	scale, half := newValue(), newValue()
 	instructions = append(instructions,
-		&ir.Const{Result: scale, Type: types.TF32, Raw: "255.0"},
-		&ir.Const{Result: half, Type: types.TF32, Raw: "0.5"},
+		&ir.Const{Result: scale, Type: foundation.Float32Type, Raw: "255.0"},
+		&ir.Const{Result: half, Type: foundation.Float32Type, Raw: "0.5"},
 	)
 	packed := make([]ir.ValueID, 4)
 	for index, channel := range channels {
 		multiply, round, convert := newValue(), newValue(), newValue()
 		instructions = append(instructions,
-			&ir.Binary{Result: multiply, Type: types.TF32, Op: "*", Left: channel, Right: scale},
-			&ir.Binary{Result: round, Type: types.TF32, Op: "+", Left: multiply, Right: half},
-			&ir.Convert{Result: convert, Type: types.TU32, X: round, From: types.TF32},
+			&ir.Binary{Result: multiply, Type: foundation.Float32Type, Op: "*", Left: channel, Right: scale},
+			&ir.Binary{Result: round, Type: foundation.Float32Type, Op: "+", Left: multiply, Right: half},
+			&ir.Convert{Result: convert, Type: foundation.Uint32Type, X: round, From: foundation.Float32Type},
 		)
 		packed[index] = convert
 	}
 	for index := 1; index < 4; index++ {
 		shift, shifted := newValue(), newValue()
 		instructions = append(instructions,
-			&ir.Const{Result: shift, Type: types.TU32, Raw: fmt.Sprintf("%d", index*8)},
-			&ir.Binary{Result: shifted, Type: types.TU32, Op: "<<", Left: packed[index], Right: shift},
+			&ir.Const{Result: shift, Type: foundation.Uint32Type, Raw: fmt.Sprintf("%d", index*8)},
+			&ir.Binary{Result: shifted, Type: foundation.Uint32Type, Op: "<<", Left: packed[index], Right: shift},
 		)
 		packed[index] = shifted
 	}
 	merged := packed[0]
 	for index := 1; index < 4; index++ {
 		result := newValue()
-		instructions = append(instructions, &ir.Binary{Result: result, Type: types.TU32, Op: "|", Left: merged, Right: packed[index]})
+		instructions = append(instructions, &ir.Binary{Result: result, Type: foundation.Uint32Type, Op: "|", Left: merged, Right: packed[index]})
 		merged = result
 	}
 	return instructions, merged

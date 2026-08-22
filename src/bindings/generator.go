@@ -6,9 +6,8 @@ import (
 
 	"tach/src/backend"
 	"tach/src/flow"
+	"tach/src/foundation"
 	"tach/src/ir"
-	"tach/src/layout"
-	"tach/src/types"
 )
 
 type Artifacts struct {
@@ -250,7 +249,7 @@ func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metad
 }
 
 func externalResource(resource flow.Resource) (ExternalResourceMeta, error) {
-	l, err := layout.Of(resource.Type)
+	l, err := foundation.LayoutOf(resource.Type)
 	if err != nil {
 		return ExternalResourceMeta{}, err
 	}
@@ -283,7 +282,7 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 		item := PhysicalKernelMeta{EntryPoint: kernel.Entry, WorkgroupSize: kernel.Workgroup, Bindings: []BindingMeta{}}
 		for _, binding := range kernel.Bindings {
 			access := "read"
-			if binding.Access == ir.Mutable || types.ContainsAtomic(binding.Type) {
+			if binding.Access == ir.Mutable || foundation.ContainsAtomic(binding.Type) {
 				access = "read_write"
 			}
 			kind, name := "buffer", binding.Type.String()
@@ -550,39 +549,39 @@ func validFeatures(features []string, allowed ...string) bool {
 	return true
 }
 
-func describeHostLayout(t *types.Type) (*HostLayout, error) {
-	if t.Kind == types.Atomic {
+func describeHostLayout(t *foundation.Type) (*HostLayout, error) {
+	if t.Kind == foundation.AtomicKind {
 		return describeHostLayout(t.Elem)
 	}
-	l, err := layout.Of(t)
+	l, err := foundation.LayoutOf(t)
 	if err != nil {
 		return nil, err
 	}
 	out := &HostLayout{Size: l.Size, Stride: l.Stride, Runtime: l.Runtime}
 	switch t.Kind {
-	case types.Bool:
+	case foundation.BoolKind:
 		out.Kind = "bool"
 		out.Size = 4
-	case types.I32:
+	case foundation.Int32Kind:
 		out.Kind = "i32"
-	case types.U32:
+	case foundation.Uint32Kind:
 		out.Kind = "u32"
-	case types.F16:
+	case foundation.Float16Kind:
 		out.Kind = "f16"
-	case types.F32:
+	case foundation.Float32Kind:
 		out.Kind = "f32"
-	case types.Vector:
+	case foundation.VectorKind:
 		out.Kind = "vector"
 		out.Count = uint32(t.Lanes)
 		out.Elem, err = describeHostLayout(t.Elem)
-	case types.FixedArray:
+	case foundation.FixedArrayKind:
 		out.Kind = "array"
 		out.Count = t.Count
 		out.Elem, err = describeHostLayout(t.Elem)
-	case types.RuntimeArray:
+	case foundation.RuntimeArrayKind:
 		out.Kind = "runtime"
 		out.Elem, err = describeHostLayout(t.Elem)
-	case types.Struct:
+	case foundation.StructKind:
 		out.Kind = "struct"
 		out.Fields = []HostLayoutField{}
 		for i, field := range t.Fields {
@@ -597,21 +596,21 @@ func describeHostLayout(t *types.Type) (*HostLayout, error) {
 	}
 	return out, err
 }
-func parameterLayout(t *types.Type) (*HostLayout, error) {
-	if t.Kind == types.Bool {
+func parameterLayout(t *foundation.Type) (*HostLayout, error) {
+	if t.Kind == foundation.BoolKind {
 		return &HostLayout{Kind: "bool", Size: 4}, nil
 	}
 	return describeHostLayout(t)
 }
-func runtimeTail(t *types.Type) (uint32, uint32, error) {
-	l, e := layout.Of(t)
+func runtimeTail(t *foundation.Type) (uint32, uint32, error) {
+	l, e := foundation.LayoutOf(t)
 	if e != nil {
 		return 0, 0, e
 	}
-	if t.Kind == types.RuntimeArray {
+	if t.Kind == foundation.RuntimeArrayKind {
 		return 0, l.Stride, nil
 	}
-	if t.Kind != types.Struct || len(t.Fields) == 0 {
+	if t.Kind != foundation.StructKind || len(t.Fields) == 0 {
 		return 0, 0, fmt.Errorf("runtime type %s has no tail", t)
 	}
 	i := len(t.Fields) - 1
