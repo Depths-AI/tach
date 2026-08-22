@@ -11,8 +11,8 @@ This document defines names, resource identity, bytes, physical dispatch
 plans, launch geometry, lifetime, and synchronization.
 
 See [the language guide](language.md) for source semantics and
-[the IR guide](ir.md) for logical programs, kernel templates, and executable
-plans.
+[the IR guide](ir.md) for logical programs, kernel templates, and independent
+backend plans.
 
 ## 1. Three connected boundaries
 
@@ -43,8 +43,8 @@ it must not infer a shader entry from the public name.
 The contract has seven parts:
 
 1. **Program ABI:** public parameters, resources, and optional launch input.
-2. **Plan ABI:** ordered dispatches, target kernels, transients, barriers, and
-   optional terminal views.
+2. **Plan ABI:** each backend's ordered dispatches, physical kernels,
+   transients, barriers, and optional terminal views.
 3. **Binding ABI:** storage and parameter-block bindings for each physical
    kernel.
 4. **Memory ABI:** canonical host-visible bytes.
@@ -161,7 +161,7 @@ use the read/read-write requirement of their particular stage.
 
 ## 4. Canonical host layout
 
-`src/foundation.LayoutOf` computes one checked, target-independent layout.
+`compiler/foundation.LayoutOf` computes one checked, target-independent layout.
 Logical types do not acquire fake padding fields; offsets and padding exist
 only at the host boundary.
 
@@ -245,11 +245,10 @@ A scalar `float16[]` may have a logical byte extent not divisible by four,
 either from an odd direct element count or from its position after a struct
 prefix. Transfer APIs still require four-byte units. Drivers privately round
 physical transfer capacity up to four while preserving the logical
-codec/readback length. Target planning supplies the logical element count and
+codec/readback length. Each backend supplies the logical element count and
 runtime-tail path as a private parameter source whenever a stage reads
-`.length`; both lowerings use that value instead of deriving source semantics
-from a physical byte range. Padding never becomes a source-visible or
-dispatch-inferred element.
+`.length`; neither derives source semantics from a physical byte range.
+Padding never becomes a source-visible or dispatch-inferred element.
 
 ### Fixed resource wrapper size
 
@@ -267,20 +266,21 @@ All size arithmetic is checked against the 32-bit ABI limit.
 
 ## 5. Physical kernels and bindings
 
-Target lowering clones one logical indexed stage for every surviving program
-dispatch. The current policy is intentionally one physical kernel per
-dispatch, in target-plan order.
+Each backend independently clones one logical indexed stage for every
+surviving program dispatch. Both current policies intentionally produce one
+physical kernel per dispatch, in that backend's plan order.
 
 For each physical kernel:
 
-- the entry point is `_tach_kN` in target-plan order;
+- the entry point is `_tach_kN` in backend-plan order;
 - resource bindings are dense from binding `0`; surviving source inputs retain
   formal order and an optional terminal color output occupies its planned
   binding;
 - WebGPU uses group `0` and Vulkan uses descriptor set `0`;
 - each binding records read/read-write access, logical type, and minimum size;
-- each binding records whether it is a buffer or target color texture;
-- the selected workgroup is part of the target plan; and
+- Web bindings may identify the terminal color texture, while every SPIR-V
+  binding is a buffer;
+- the selected workgroup is part of that backend's plan; and
 - a parameter block, when present, takes the next binding.
 
 Binding numbers therefore restart for each physical kernel's pipeline layout.
@@ -288,25 +288,28 @@ They are not module-global public-resource IDs.
 
 ## 6. One value block per physical kernel
 
-After target-neutral Kernel IR optimization and backend parameter pruning,
-`src/ir.PlanHostParameters` flattens the remaining plain stage parameters into
-one private struct. It walks parameters in order and struct fields in
-declaration order. Numeric leaves retain their type; scalar-bool leaves become
-`uint32`. Boolean-vector leaves are rejected before ABI construction rather
-than being invented as integer vectors.
+After target-neutral Kernel IR optimization, each backend specializes and
+prunes its private stage clone, then calls `compiler/ir.PlanHostParameters` to
+flatten the remaining plain parameters into one private struct. The planner
+walks parameters in order and struct fields in declaration order. Numeric
+leaves retain their type; scalar-bool leaves become `uint32`. Boolean-vector
+leaves are rejected before ABI construction rather than being invented as
+integer vectors.
 
 The canonical layout determines every field offset and rounds the struct to
 its 16-byte alignment. A stage with no remaining values has no parameter
 block. A block is limited to 16 KiB, the portable floor shared by the target
-profiles.
+backends.
 
-The same plan drives WGSL, SPIR-V, embedded metadata, TypeScript packing, and
-the Vulkan runtime. Kernel IR continues to contain logical parameters; no
+The canonical layout algorithm gives both independently built blocks the same
+host meaning. Each block then drives only its backend's shader, embedded plan,
+and runtime packing. Kernel IR continues to contain logical parameters; no
 binding, physical bool, or padding member leaks into it.
 
 ## 7. Program plans and shape evaluation
 
-Each public program receives one plan per target. A plan contains:
+Each public program receives one independently constructed plan from each
+backend. A plan contains:
 
 ```text
 program index
@@ -329,16 +332,17 @@ from the materialized byte length, runtime-tail offset, and stride. A dispatch
 axis or transient length must be positive.
 
 Parameter-block value sources can reference public values/paths, a checked
-runtime shape expression, or the command repeat count. Source `const` arguments
-are substituted into a specialized physical stage before target planning, so
-they never occupy parameter-block leaves or runtime metadata.
+runtime shape expression, or the command repeat count. Each backend substitutes
+source `const` arguments into its specialized physical stage before finalizing
+the plan, so they never occupy parameter-block leaves or runtime metadata.
 
 ## 8. Transient allocation and synchronization
 
-Each transient records element type, stride, alignment, minimum size, length
-shape, first/last use, and an allocation color. Non-overlapping lifetimes can
-share a color. At preparation time the runtime evaluates byte sizes and gives
-each color one buffer large enough for the largest active requirement.
+Each backend derives a transient table containing element type, stride,
+alignment, minimum size, length shape, first/last use, and an allocation color.
+Non-overlapping lifetimes can share a color. At preparation time the selected
+runtime evaluates byte sizes and gives each color one buffer large enough for
+the largest active requirement.
 
 The WebGPU session retains scratch buffers by color and grows them
 geometrically. It separately reuses an offscreen view texture when the extent
@@ -363,7 +367,7 @@ plan repeatedly:
 stage A -> stage B -> stage A -> stage B -> ...
 ```
 
-For a one-dispatch program, target lowering may internalize repeat as an
+For a one-dispatch program, each backend may internalize repeat as an
 invocation-local loop only when the stage:
 
 - contains no source loop;
@@ -374,9 +378,9 @@ Under those proofs, each invocation can perform all repetitions while its
 values remain in registers, preserving observable behavior and removing
 repeat dispatches. Otherwise the host plan repeats the dispatch literally.
 
-The metadata field `repeat` records `"invocation-loop"` or `"program"`; native
-runtimes must obey it. A view command requires repeat `1`; target lowering
-does not internalize or repeat terminal projection.
+Each backend's metadata field `repeat` records `"invocation-loop"` or
+`"program"`; its runtime must obey it. A view command requires repeat `1`;
+neither backend internalizes or repeats terminal projection.
 
 ### View color and extent contract
 
@@ -387,8 +391,8 @@ source contains at least that many complete 16-byte pixels. Extra source
 elements are ignored.
 
 Each source pixel is linear `(red, green, blue, alpha)`: the color space a
-renderer thinks in, not the bytes a monitor wants. For each RGB channel,
-target lowering first clamps to `[0, 1]`, then applies:
+renderer thinks in, not the bytes a monitor wants. For each RGB channel, the
+portable view conversion first clamps to `[0, 1]`, then applies:
 
 ```text
 channel <= 0.0031308 ? 12.92 * channel
@@ -446,6 +450,8 @@ interface PublicProgram {
   view?: true;
 }
 
+// Conceptual common notation. Web and SPIR-V serialize and validate their
+// own private plan types; this interface documents their shared wire fields.
 interface TargetPlan {
   vulkan?: "1.3";
   spirv?: "1.6";
@@ -555,8 +561,11 @@ interface HostLayout {
 }
 ```
 
-Both targets are mandatory and contain parallel `kernels` and `programs`
-arrays. `targets.web.features` is absent unless the module needs `shader-f16`.
+Both targets are mandatory, but neither is produced by a shared target-plan
+type. The WGSL and SPIR-V lowerers independently serialize and validate their
+own `kernels` and `programs` arrays; the compiler driver embeds those validated
+JSON objects unchanged beneath `targets.web` and `targets.spirv`.
+`targets.web.features` is absent unless the module needs `shader-f16`.
 `targets.spirv` always records the three Vulkan 1.3 baseline features and adds
 `shaderFloat16`, `storageBuffer16BitAccess`, and/or
 `uniformAndStorageBuffer16BitAccess` exactly when emitted types and interfaces
@@ -569,7 +578,7 @@ targets.spirv.kernels[]     target-specific physical entries
 targets.spirv.programs[]    target-specific barriers and plan
 ```
 
-A public `view: true` requires one view in both target plans. Its terminal
+A public `view: true` requires one view in both backend plans. Its terminal
 step is separate from ordinary `steps`: a fused plan may have no ordinary
 steps because its final source dispatch became the projection. `output` names
 the terminal kernel binding reserved for color output and cannot also occur in
@@ -578,11 +587,12 @@ minimum size; SPIR-V uses a `buffer` binding for packed pixels. `outputColor`
 selects driver-owned reusable output allocation. `fused` distinguishes a
 rewritten final source dispatch from a standalone projector.
 
-Array indices are cross-references. Every program plan records its public
-program index; a dispatch step records a physical-kernel index; resource
-sources identify an external or transient table plus its index. Schema
-validation rejects dangling indices, mismatched target/program counts,
-invalid bindings, layouts, steps, shapes, and value sources.
+Within each backend object, array indices are cross-references. Every program
+plan records its public program index; a dispatch step records a
+physical-kernel index; resource sources identify an external or transient
+table plus its index. Schema validation rejects dangling indices, mismatched
+program counts, invalid bindings, layouts, steps, shapes, and value sources
+before the driver combines the two objects.
 
 Zero-valued optional numeric fields may be absent in JSON. Consumers must use
 the schema and discriminator fields rather than property presence as a general
@@ -947,8 +957,8 @@ surface at submission or synchronization boundaries rather than disappearing.
 
 ## 17. Tach-owned Vulkan 1.3 obligations
 
-The Deno driver and native library execute the target plan rather than merely
-loading one entry point:
+The Deno driver and native library execute the SPIR-V backend plan rather than
+merely loading one entry point:
 
 1. decode and validate schema-2 metadata;
 2. select the public program and matching SPIR-V program plan;
@@ -995,9 +1005,9 @@ version because generated JavaScript imports `@depths/tach/internal`. It does
 not re-export the runtime. A consumer installs both packages and imports
 `tach` separately.
 
-The one `index.js` embeds both executable plans and sibling URLs for compressed
-WGSL and SPIR-V. Browser and Deno consumers import the same facade; runtime host
-selection chooses the matching plan and shader. `tach build --verbose` adds
+The one `index.js` embeds both backend execution plans and sibling URLs for
+compressed WGSL and SPIR-V. Browser and Deno consumers import the same facade;
+runtime host selection chooses the matching plan and shader. `tach build --verbose` adds
 only compiler diagnostics. Docs-only generation preserves every compiled
 entry and changes only `README.md` and `docs/`.
 

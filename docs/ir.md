@@ -13,11 +13,11 @@ Tach has two target-independent intermediate representations:
   indexed stage or helper.
 
 The project frontend resolves imports and merges every kernel into one
-`ir.Module` containing one `ir.KernelModule`. Target lowering combines those
-representations into parallel WebGPU and Vulkan executable plans containing
-private physical kernels. IR dump methods remain contributor diagnostics and test
-oracles rather than a public command, emitted artifact, or accepted input
-language.
+optimized `ir.Module` containing one `ir.KernelModule`. That module is the sole
+semantic input to both backends. WGSL and SPIR-V independently clone it, choose
+their physical kernels and execution plans, emit their target, and validate the
+result. IR dump methods remain contributor diagnostics and test oracles rather
+than a public command, ordinary emitted artifact, or accepted input language.
 
 The identity boundary is:
 
@@ -75,10 +75,10 @@ stage @scale[i=%1](values=%b0: float32[] access=mutable, factor=%2: float32) wor
 }
 ```
 
-Target planning then creates one private `_tach_k0` kernel, selects
-`256 x 1 x 1`, maps `%s1` to the host launch axis, and records one dispatch.
-The public name `scale` stays in metadata and generated bindings, not in the
-shader entry ABI.
+Each backend then creates its own private `_tach_k0` kernel, selects
+`256 x 1 x 1`, maps `%s1` to the host launch axis, and records one dispatch in
+its private plan. The public name `scale` stays in common metadata and generated
+bindings, not in either shader entry ABI.
 
 ## 2. Flow module and public programs
 
@@ -135,8 +135,8 @@ Initial, Final         version IDs
 
 `External` resources come from public buffers and start defined. `Transient`
 resources come from `transient<T>(length)` and start undefined. Their logical
-type is a runtime array even though target plans later assign reusable scratch
-allocations.
+type is a runtime array even though each backend later assigns reusable scratch
+allocations in its own plan.
 
 Resource identity is stronger than a type. Different public buffers and
 different transients are non-aliasing resources until target scratch coloring
@@ -155,7 +155,7 @@ Version
   Defined
 ```
 
-`Defined` is not merely “some write occurred.” A previously undefined
+`Defined` is not merely "some write occurred." A previously undefined
 transient becomes defined only if the stage access summary proves a complete
 write for the dispatch domain. A later stage cannot read an undefined version.
 
@@ -193,12 +193,12 @@ Values[]           formal -> checked value source
 
 Buffer arguments are stored in formal order and cannot repeat a resource.
 Value sources are a public parameter/path, canonical compiler-evaluated
-constant, runtime shape, or backend-added repeat count. Target planning
-specializes each constant into its physical Kernel IR stage, removes the now
-unused formal, and rejects any constant that survives into runtime metadata.
+constant, runtime shape, or backend-added repeat count. Each backend specializes
+the constant into its own physical Kernel IR stage, removes the now-unused
+formal, and rejects any constant that survives into runtime metadata.
 
-Flow IR names a logical stage, not a physical kernel index. Target planning
-creates the latter.
+Flow IR names a logical stage, not a physical kernel index. Each backend creates
+the latter independently.
 
 ### Views
 
@@ -454,12 +454,12 @@ Vulkan 1.3 feature.
 - barrier uniformity.
 
 Semantic lowering verifies before Flow construction. The optimizer verifies
-before and after its pipeline. Executable-planning and binding boundaries
-verify again.
+before and after its pipeline. Each backend verifies its private plan before
+emission and validates its emitted WGSL or SPIR-V afterward.
 
 ## 10. Target-independent Kernel optimization
 
-The Kernel optimizer in `src/semantics` runs:
+The Kernel optimizer in `compiler/semantics` runs:
 
 ```text
 verify
@@ -502,13 +502,14 @@ Unused pure values and place paths are removed repeatedly. Stores, atomics,
 barriers, and other effects remain when their result is unused.
 
 Flow IR currently receives verification after this Kernel rewrite but no
-general rewrite pipeline. Terminal view fusion is a target-planning decision,
-not a logical Flow rewrite.
+general rewrite pipeline. Terminal view fusion is an independent backend
+planning decision, not a logical Flow rewrite.
 
 ## 11. From logical stages to executable plans
 
-Each backend clones Flow and Kernel IR. For every Flow dispatch it creates a
-`PhysicalKernel`:
+Each backend starts only from the verified, optimized `ir.Module`. It clones
+Flow and Kernel IR and, for every Flow dispatch, creates a private physical
+kernel with:
 
 ```text
 Entry
@@ -520,9 +521,10 @@ Coordinate mapping
 Optional logical lengths for scalar f16 runtime arrays
 ```
 
-It can internalize safe repeat, prune now-unused value parameters, select a
-portable workgroup, assign dense binding numbers, plan the value block, and
-replace exact workgroup-local coordinate arithmetic.
+The backend can internalize safe repeat, prune now-unused value parameters,
+select a portable workgroup, assign dense binding numbers, plan the value
+block, and replace exact workgroup-local coordinate arithmetic. There is no
+shared executable-plan object or target-profile switch above the backends.
 
 A `ProgramPlan` maps the public program to:
 
@@ -545,16 +547,16 @@ value. WGSL and SPIR-V both consume that value instead of deriving Tach
 semantics from the physical binding range. No IR-level padding element is
 invented.
 
-The current planner creates one physical kernel for every ordinary dispatch.
-It does not deduplicate identical stage clones or fuse adjacent source
+Each current backend planner creates one physical kernel for every ordinary
+dispatch. Neither deduplicates identical stage clones nor fuses adjacent source
 dispatches. A narrow terminal-view rule is the exception: when the last
 dispatch completely and exclusively writes one transient element at its exact
 1D coordinate, its domain equals `width * height`, and the transient is not
-otherwise needed, planning rewrites that final store through the shared pack
-sequence. Otherwise planning adds one standalone projection kernel. Both
+otherwise needed, that backend rewrites the final store through the portable
+pack sequence. Otherwise it adds its own standalone projection kernel. Both
 plans implement the same Flow view and the same packed RGBA8 `uint32` word.
-WGSL then unpacks those bytes with `unpack4x8unorm` into an `rgba8unorm` texture store. SPIR-V
-stores the word in a storage buffer.
+WGSL unpacks those bytes with `unpack4x8unorm` into an `rgba8unorm` storage
+texture; SPIR-V stores the word in a storage buffer.
 
 ## 12. Backend mapping
 
@@ -581,9 +583,10 @@ stores the word in a storage buffer.
 | view output | `rgba8unorm` storage texture | packed `uint32[]` RGBA8 scratch |
 | terminal view conversion | unpack packed word to `textureStore` | store packed `uint32` |
 
-Backend coordinate optimization may map exact modulo/row-major expressions to
-local coordinate inputs and remove dead global inputs. It never changes
-logical source/IR names.
+Each backend invokes coordinate simplification on its private function clone.
+It may map exact modulo/row-major expressions to local coordinate inputs and
+remove dead global inputs. It never changes the shared logical module or its
+source identities.
 
 ## 13. Extension rule
 
@@ -591,7 +594,8 @@ Source sugar belongs in lowering when existing IR already expresses its
 meaning. New per-invocation semantics must earn a Kernel IR instruction/type,
 verification, effects, optimization rules, and both backend mappings. New
 multi-dispatch or terminal-result semantics must earn a Flow node, verifier
-rule, target-plan representation, metadata, and both runtime implementations.
+rule, independent representation in both backend plans, common metadata, and
+both runtime implementations.
 
 Target-only instruction selection, physical layout, and dispatch planning
 belong after logical IR. Provider syntax and opcodes never become portable

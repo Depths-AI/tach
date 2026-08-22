@@ -450,9 +450,9 @@ code imports `scale`, `gradient`, and the rest from that package, and
 imports `tach` from `@depths/tach`. The same TypeScript runs in a
 browser (WebGPU) and in Deno (Vulkan). You do not choose a backend.
 
-The repository's browser and Deno tests compile this project and call
+The repository's browser and native Vulkan tests compile this project and call
 every public function. They are how we know the eighteen programs still
-mean the same thing on both hosts. A separate project, `showcase-ts`,
+mean the same thing on both hosts. A separate project, `showcase`,
 measures large workloads. It is not this folder.
 
 To explore locally, from the repository root:

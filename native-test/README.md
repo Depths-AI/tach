@@ -1,4 +1,4 @@
-# Tach Deno/Vulkan correctness harness
+# Tach native Vulkan correctness harness
 
 This private workspace asks the same product question as the browser
 harness, on the other host: do the eighteen public programs in `examples/`
@@ -74,8 +74,8 @@ From the repository root:
 
 ```sh
 npm ci --ignore-scripts
-npm run native
-npm test --workspace=@tach/deno-test
+npm run native-bindings
+npm test --workspace=@tach/native-test
 ```
 
 The test grants Deno only FFI and read access beyond npm resolution. It prints
@@ -86,7 +86,7 @@ generated.
 For static validation without hardware execution:
 
 ```sh
-npm run check --workspace=@tach/deno-test
+npm run check --workspace=@tach/native-test
 ```
 
 This lints and type-checks the standalone harness against the local package

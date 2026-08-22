@@ -158,15 +158,15 @@ From the repository root:
 
 ```sh
 npm run compiler
-npm run native
+npm run native-bindings
 npm run build --workspace=@depths/tach
-npm run benchmark --workspace=@tach/showcase-ts
+npm run benchmark --workspace=@tach/showcase
 ```
 
 Static validation without hardware execution is:
 
 ```sh
-npm run check --workspace=@tach/showcase-ts
+npm run check --workspace=@tach/showcase
 ```
 
 The build script compiles the Tach project once, copies the complete generated
@@ -179,10 +179,10 @@ SPIR-V plan.
 Every successful benchmark replaces ignored local reports with:
 
 ```text
-showcase-ts/reports/gpu.json
-showcase-ts/reports/gpu.md
-showcase-ts/reports/webgpu-procedural.png
-showcase-ts/reports/webgpu-mesh.png
+showcase/reports/gpu.json
+showcase/reports/gpu.md
+showcase/reports/webgpu-procedural.png
+showcase/reports/webgpu-mesh.png
 ```
 
 JSON is the machine-readable source and contains separate WebGPU and Vulkan host

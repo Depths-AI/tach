@@ -512,9 +512,9 @@ export function roundTrip(output: buffer<float32[]>, count: uint32) {
 
 `transient<T>(length)` yields a program-local `buffer<T[]>`. `T` must have a
 fixed, host-shareable, non-atomic footprint. A transient has no host argument
-or readback handle. The compiler proves that every read is preceded by a
-defining dispatch and assigns non-overlapping lifetimes to reusable scratch
-allocations.
+or readback handle. The language checker proves that every read is preceded by
+a defining dispatch. Each backend independently maps the proven non-overlapping
+lifetimes onto reusable scratch allocations.
 
 Stage buffer arguments in `run` must directly name a public buffer or
 transient. The same resource cannot fill two buffer formals of one stage. A
@@ -526,9 +526,9 @@ parameter-block fields.
 Every `run` contributes one ordered physical dispatch to the program plan.
 For a view program, the final `return view(...)` records a terminal projection
 after those dispatches. When the final dispatch completely writes one
-transient pixel per output pixel, target planning can fold projection into
-that dispatch. Otherwise it appends a target-owned projection kernel. This
-changes physical work, not source meaning.
+transient pixel per output pixel, each backend can fold projection into that
+dispatch. Otherwise it appends its own projection kernel. This changes
+physical work and representation, not source meaning.
 
 ## 6. Data types
 

@@ -2807,7 +2807,7 @@ per-host packages.
 ## 68. Unified browser and Deno host boundary
 
 `tach build` emits one package containing `index.js`, `index.d.ts`, compressed
-WGSL, and SPIR-V 1.6. The facade embeds both executable plans and URLs to the
+WGSL, and SPIR-V 1.6. The facade embeds both backend plans and URLs to the
 two sibling shader files. There is no target flag and no separate server
 facade.
 

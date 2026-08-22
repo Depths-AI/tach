@@ -194,7 +194,7 @@ npx tach build
 ```
 
 `fmt` formats every kernel in the project. `check` validates the complete
-project through both targets without writing output. `build` writes one
+project through both backends without writing output. `build` writes one
 cohesive generated package:
 
 Errors and optimization warnings include an exact source location, source
@@ -428,8 +428,10 @@ The host still receives one recipe constructor:
 await gpu.submit(transform(input, output, count, 2, 0.5));
 ```
 
-The compiler checks stage calls, domains, transient lifetimes, storage access,
-and synchronization before either target is emitted.
+The compiler checks stage calls, domains, transient lifetimes, and storage
+access once. Each backend then independently chooses its physical kernels,
+scratch reuse, barriers, bindings, and presentation representation before
+validating its own output.
 
 ## Produce and present a view
 
@@ -512,12 +514,12 @@ Other available commands are shown by `npx tach help`.
   programs, memory, synchronization, documentation, and diagnostics.
 - [Examples guide](examples/README.md) - the canonical kernels, what each
   one does, and why it is in the corpus.
-- [TypeScript guide](tach-ts/README.md) - runtime behavior, buffers, commands,
+- [TypeScript guide](tach/README.md) - runtime behavior, buffers, commands,
   execution, readback, errors, and generated bindings.
 - [AI-agent guide](docs/INSTRUCTIONS.md) - the complete language and tooling
   reference intended for programmatic consumption.
 - [Architecture guide](docs/architecture.md) - how projects move through the
-  frontend, two IRs, target planning, code generation, packaging, and runtime.
+  frontend, two IRs, independent backend lowering, packaging, and runtime.
 - [IR guide](docs/ir.md) - Flow programs, Kernel templates, verification,
   optimization, and backend mapping.
 - [ABI guide](docs/abi.md) - generated signatures, memory layout, metadata,
