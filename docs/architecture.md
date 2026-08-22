@@ -130,7 +130,7 @@ forward-slash identities. It resolves imports without concatenating or
 rewriting source, checks project-global declaration uniqueness, and validates
 both dependency DAGs.
 
-`src/source` owns positions, primary and related spans, ordered diagnostic
+`src/foundation` owns positions, primary and related spans, ordered diagnostic
 sets, and rendering inputs. `src/lexer` owns Unicode identifiers, strings used
 by imports and `@docs`, suffix-free numbers, preserved line-comment trivia,
 punctuation, and operators. Lexing advances after invalid UTF-8 input and
@@ -236,7 +236,7 @@ a backend must rediscover. `fma` remains one target-neutral typed intrinsic.
 
 ### Flow IR: public program semantics
 
-`src/flow` represents host-callable work around indexed stages:
+`src/ir/program.go` represents host-callable work around indexed stages:
 
 ```text
 Program
@@ -269,17 +269,17 @@ without encoding a dispatch graph by hand in TypeScript.
 
 ## 5. Verification and analysis
 
-`ir.Verify` checks the complete Kernel IR contract: unique IDs, structured
+`ir.VerifyKernel` checks the complete Kernel IR contract: unique IDs, structured
 availability, exact types, function roles, buffer/place paths, access rights,
 control results, loop carriers, runtime arrays, intrinsics, atomics, barriers,
 workgroup memory, and returns.
 
-`src/ir/uniformity.go` derives whether values and control are uniform within a
+`src/ir/kernel_uniformity.go` derives whether values and control are uniform within a
 workgroup. Constants and plain stage values are uniform; coordinates, mutable
 loads, and atomic results are varying. The verifier rejects barriers nested
 under varying control.
 
-`flow.Verify` first verifies its Kernel IR, then checks public program names,
+`ir.Verify` first verifies its Kernel IR, then checks public program names,
 parameters, resources, dense IDs, version chains, shape DAGs, stage references,
 argument types, resource non-aliasing, definition-before-read, and final
 versions. For a view it additionally proves the format, source element type,
@@ -291,7 +291,7 @@ as a recoverable variant.
 
 ## 6. Target-neutral optimization
 
-`src/opt.OptimizeLogical` currently optimizes the module's Kernel IR and then
+`src/opt.Optimize` currently optimizes the module's Kernel IR and then
 re-verifies the Flow module. `OptimizeKernel` applies, per function:
 
 1. common value/place elimination;
@@ -405,15 +405,16 @@ source, Flow IR, or logical Kernel IR.
 
 ## 9. Layout and parameter ABI
 
-`src/layout` computes the canonical host-visible representation: scalar/vector
-size and alignment, 16-byte struct alignment, field offsets, nested extents,
-array strides, runtime tails, and checked 32-bit sizes. SPIR-V Workgroup and
-Input `Aligned` operands use logical pointee alignment instead of this floor.
+`src/foundation` computes the canonical host-visible representation alongside
+the type model it lays out: scalar/vector size and alignment, 16-byte struct
+alignment, field offsets, nested extents, array strides, runtime tails, and
+checked 32-bit sizes. SPIR-V Workgroup and Input `Aligned` operands use logical
+pointee alignment instead of this floor.
 
-`src/abi` owns private entry names and immutable value blocks. It flattens each
-remaining physical-stage value parameter into numeric leaves, replacing bool
-leaves with physical `uint32`, then applies the same layout engine. Storage
-bindings precede the optional parameter block in group/set `0`.
+`src/ir/host.go` owns private entry names and immutable value blocks. It
+flattens each remaining physical-stage value parameter into numeric leaves,
+replacing bool leaves with physical `uint32`, then applies the foundation
+layout. Storage bindings precede the optional parameter block in group/set `0`.
 
 The plan drives:
 
@@ -520,7 +521,7 @@ checks.
 
 ## 12. Bindings and documentation
 
-`src/bindings.Generate` consumes the optimized project-wide `flow.Module` and
+`src/bindings.Generate` consumes the optimized project-wide `ir.Module` and
 both executable plans. It creates schema-2 metadata with public programs,
 public view flags, buffer/texture binding kinds, and both target plans,
 including each terminal view step and extent.
@@ -666,17 +667,13 @@ compiler's assumptions against real implementations.
 ## 15. Package responsibilities and dependencies
 
 ```text
-src/source       spans and ordered diagnostics
+src/foundation   source locations, diagnostics, types, constants, host layout
 src/lexer        tokens and preserved line-comment trivia
 src/ast          source-shaped declarations and imports
 src/parser       recovering grammar
-src/types        logical types and domain predicates
-src/ir           Kernel IR, verification, access, uniformity, use counts
-src/flow         Flow IR, resource versions, shapes, verification
+src/ir           Kernel and Flow IR, verification, analysis, host parameter plans
 src/sema         language checking and both IR lowerings
 src/opt          target-neutral Kernel IR optimization
-src/layout       canonical host-visible layout
-src/abi          private names and parameter blocks
 src/backend      target executable planning, coordinate lowering, target profile
 src/wgsl         WGSL emission and validation
 src/spirv        SPIR-V emission, decoding, validation, and summaries

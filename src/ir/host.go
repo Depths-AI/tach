@@ -1,6 +1,4 @@
-// Package abi owns target-independent external names and ABI identifiers used
-// by every Tach backend and generated host binding.
-package abi
+package ir
 
 import (
 	"fmt"
@@ -8,14 +6,13 @@ import (
 	"unicode"
 
 	"tach/src/foundation"
-	"tach/src/ir"
 )
 
-func PrivateEntry(index int) string { return fmt.Sprintf("_tach_k%d", index) }
+func PrivateEntryName(index int) string { return fmt.Sprintf("_tach_k%d", index) }
 
-// Mangle maps a Tach identifier to a conservative ASCII identifier for
+// MangleIdentifier maps a Tach identifier to a conservative ASCII identifier for
 // compiler-private symbols.
-func Mangle(s string) string {
+func MangleIdentifier(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if r == '_' {
@@ -69,18 +66,18 @@ var typeScriptKeywords = func() map[string]bool {
 	return keywords
 }()
 
-const maxParameterBytes = 16 * 1024
+const maxHostParameterBytes = 16 * 1024
 
-// ParameterBlock is the shared physical plan for immutable kernel values.
-type ParameterBlock struct {
-	Function *ir.Function
+// HostParameterBlock is the shared physical plan for immutable kernel values.
+type HostParameterBlock struct {
+	Function *Function
 	Binding  uint32
 	Type     *foundation.Type
 	Layout   foundation.TypeLayout
-	Fields   []ParameterField
+	Fields   []HostParameterField
 }
 
-type ParameterField struct {
+type HostParameterField struct {
 	Parameter int
 	Path      []string
 	Name      string
@@ -89,19 +86,19 @@ type ParameterField struct {
 	Offset    uint32
 }
 
-func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, error) {
-	if function == nil || function.Kind != ir.Stage {
+func PlanHostParameters(function *Function, binding uint32) (*HostParameterBlock, error) {
+	if function == nil || function.Kind != Stage {
 		return nil, fmt.Errorf("parameter planning requires a stage")
 	}
 	if len(function.Params) == 0 {
 		return nil, nil
 	}
-	block := &ParameterBlock{Function: function, Binding: binding, Type: &foundation.Type{Kind: foundation.StructKind, Name: "__tach_parameters_" + Mangle(function.Name)}}
+	block := &HostParameterBlock{Function: function, Binding: binding, Type: &foundation.Type{Kind: foundation.StructKind, Name: "__tach_parameters_" + MangleIdentifier(function.Name)}}
 	for parameter, value := range function.Params {
 		if !foundation.IsHostParameter(value.Type) {
 			return nil, fmt.Errorf("kernel %s parameter %s: type %s cannot cross the host parameter ABI", function.Name, value.Name, value.Type)
 		}
-		if err := flattenParameter(block, parameter, nil, value.Type); err != nil {
+		if err := flattenHostParameter(block, parameter, nil, value.Type); err != nil {
 			return nil, fmt.Errorf("kernel %s parameter %s: %w", function.Name, value.Name, err)
 		}
 	}
@@ -109,8 +106,8 @@ func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, err
 	if err != nil {
 		return nil, fmt.Errorf("kernel %s parameter block: %w", function.Name, err)
 	}
-	if physical.Size > maxParameterBytes {
-		return nil, fmt.Errorf("kernel %s parameter block is %d bytes; portable limit is %d", function.Name, physical.Size, maxParameterBytes)
+	if physical.Size > maxHostParameterBytes {
+		return nil, fmt.Errorf("kernel %s parameter block is %d bytes; portable limit is %d", function.Name, physical.Size, maxHostParameterBytes)
 	}
 	block.Layout = physical
 	for index := range block.Fields {
@@ -119,13 +116,13 @@ func PlanParameters(function *ir.Function, binding uint32) (*ParameterBlock, err
 	return block, nil
 }
 
-func flattenParameter(block *ParameterBlock, parameter int, path []string, logical *foundation.Type) error {
+func flattenHostParameter(block *HostParameterBlock, parameter int, path []string, logical *foundation.Type) error {
 	if logical == nil {
 		return fmt.Errorf("missing type")
 	}
 	if logical.Kind == foundation.StructKind {
 		for _, field := range logical.Fields {
-			if err := flattenParameter(block, parameter, appendPath(path, field.Name), field.Type); err != nil {
+			if err := flattenHostParameter(block, parameter, appendPath(path, field.Name), field.Type); err != nil {
 				return err
 			}
 		}
@@ -139,7 +136,7 @@ func flattenParameter(block *ParameterBlock, parameter int, path []string, logic
 	}
 	name := fmt.Sprintf("f%d", len(block.Fields))
 	block.Type.Fields = append(block.Type.Fields, foundation.TypeField{Name: name, Type: physical})
-	block.Fields = append(block.Fields, ParameterField{Parameter: parameter, Path: append([]string{}, path...), Name: name, Logical: logical, Physical: physical})
+	block.Fields = append(block.Fields, HostParameterField{Parameter: parameter, Path: append([]string{}, path...), Name: name, Logical: logical, Physical: physical})
 	return nil
 }
 

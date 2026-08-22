@@ -1,3 +1,5 @@
+// Package ir defines Tach's complete backend-independent program model:
+// kernel computation, multi-kernel execution, and host parameter planning.
 package ir
 
 import (
@@ -10,7 +12,7 @@ import (
 type ValueID uint32
 type PlaceID uint32
 
-type Module struct {
+type KernelModule struct {
 	Structs   []*foundation.Type
 	Functions []*Function
 }
@@ -531,7 +533,7 @@ type ExitScope struct{}
 
 func (*ExitScope) termNode() {}
 
-func (m *Module) Function(name string) *Function {
+func (m *KernelModule) Function(name string) *Function {
 	for _, f := range m.Functions {
 		if f.Name == name {
 			return f
@@ -540,11 +542,11 @@ func (m *Module) Function(name string) *Function {
 	return nil
 }
 
-func Clone(m *Module) *Module {
+func CloneKernel(m *KernelModule) *KernelModule {
 	if m == nil {
 		return nil
 	}
-	out := &Module{Structs: append([]*foundation.Type(nil), m.Structs...), Functions: make([]*Function, len(m.Functions))}
+	out := &KernelModule{Structs: append([]*foundation.Type(nil), m.Structs...), Functions: make([]*Function, len(m.Functions))}
 	for i, f := range m.Functions {
 		g := *f
 		g.Indices = append([]Param(nil), f.Indices...)
@@ -678,7 +680,7 @@ func cloneTerm(term Term) Term {
 	}
 }
 
-func Dump(m *Module) string {
+func DumpKernel(m *KernelModule) string {
 	var b strings.Builder
 	for _, s := range m.Structs {
 		fmt.Fprintf(&b, "type %s = {\n", s.Name)

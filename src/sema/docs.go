@@ -4,12 +4,12 @@ import (
 	"strings"
 
 	"tach/src/ast"
-	"tach/src/flow"
 	"tach/src/foundation"
+	"tach/src/ir"
 )
 
-func checkDocumentation(module *ast.Module) (flow.Documentation, error) {
-	docs := flow.Documentation{Types: map[string]flow.TypeDocumentation{}, Functions: map[string]flow.FunctionDocumentation{}}
+func checkDocumentation(module *ast.Module) (ir.Documentation, error) {
+	docs := ir.Documentation{Types: map[string]ir.TypeDocumentation{}, Functions: map[string]ir.FunctionDocumentation{}}
 	var diagnostics foundation.Diagnostics
 	moduleDocs, rest, err := takeDocs(module.Attrs)
 	if err != nil {
@@ -84,7 +84,7 @@ func takeDocs(attrs []ast.Attribute) (*ast.Attribute, []ast.Attribute, error) {
 	return docs, rest, duplicate
 }
 
-func readModuleDocs(attribute ast.Attribute, out *flow.Documentation) error {
+func readModuleDocs(attribute ast.Attribute, out *ir.Documentation) error {
 	seen := map[string]bool{}
 	for _, expression := range attribute.Args {
 		name, args, err := docClause(expression)
@@ -111,8 +111,8 @@ func readModuleDocs(attribute ast.Attribute, out *flow.Documentation) error {
 	return requireSummary(attribute, seen)
 }
 
-func readTypeDocs(attribute ast.Attribute, declaration *ast.TypeDecl) (flow.TypeDocumentation, error) {
-	out := flow.TypeDocumentation{Fields: map[string]string{}}
+func readTypeDocs(attribute ast.Attribute, declaration *ast.TypeDecl) (ir.TypeDocumentation, error) {
+	out := ir.TypeDocumentation{Fields: map[string]string{}}
 	fields := map[string]bool{}
 	for _, field := range declaration.Fields {
 		fields[field.Name] = true
@@ -152,8 +152,8 @@ func readTypeDocs(attribute ast.Attribute, declaration *ast.TypeDecl) (flow.Type
 	return out, requireSummary(attribute, seen)
 }
 
-func readFunctionDocs(attribute ast.Attribute, declaration *ast.FunctionDecl) (flow.FunctionDocumentation, error) {
-	out := flow.FunctionDocumentation{Parameters: map[string]string{}, Coordinates: map[string]string{}}
+func readFunctionDocs(attribute ast.Attribute, declaration *ast.FunctionDecl) (ir.FunctionDocumentation, error) {
+	out := ir.FunctionDocumentation{Parameters: map[string]string{}, Coordinates: map[string]string{}}
 	parameters, coordinates := map[string]bool{}, map[string]bool{}
 	for _, parameter := range declaration.Params {
 		parameters[parameter.Name] = true

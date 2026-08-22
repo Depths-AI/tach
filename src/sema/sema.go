@@ -12,15 +12,14 @@ import (
 	"sync"
 
 	"tach/src/ast"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
 
 type Checker struct {
 	ast           *ast.Module
-	mod           *ir.Module
-	flow          *flow.Module
+	kernel        *ir.KernelModule
+	module        *ir.Module
 	types         map[string]*foundation.Type
 	consts        map[string]*constantDef
 	funcs         map[string]*funcSig
@@ -44,7 +43,7 @@ type funcSig struct {
 	decl     *ast.FunctionDecl
 	indexed  bool
 	exported bool
-	view     flow.ViewFormat
+	view     ir.ViewFormat
 }
 type namedType struct {
 	name   string
@@ -100,19 +99,19 @@ func (b *fnBuilder) child(block *ir.Block) *fnBuilder {
 	return &fnBuilder{fn: b.fn, ids: b.ids, block: block, loop: b.loop, comptime: b.comptime}
 }
 
-func CheckAndLower(m *ast.Module) (*flow.Module, error) {
+func CheckAndLower(m *ast.Module) (*ir.Module, error) {
 	module, _, err := CheckAndLowerProject([]*ast.Module{m})
 	return module, err
 }
 
-func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow.Module, []flow.Documentation, error) {
+func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*ir.Module, []ir.Documentation, error) {
 	workers := runtime.GOMAXPROCS(0)
 	if len(requestedWorkers) > 0 && requestedWorkers[0] > 0 && requestedWorkers[0] < workers {
 		workers = requestedWorkers[0]
 	}
 	merged := &ast.Module{}
-	documentation := flow.Documentation{Types: map[string]flow.TypeDocumentation{}, Functions: map[string]flow.FunctionDocumentation{}}
-	files := make([]flow.Documentation, 0, len(modules))
+	documentation := ir.Documentation{Types: map[string]ir.TypeDocumentation{}, Functions: map[string]ir.FunctionDocumentation{}}
+	files := make([]ir.Documentation, 0, len(modules))
 	var documentationDiagnostics foundation.Diagnostics
 	for _, module := range modules {
 		docs, err := checkDocumentation(module)
@@ -131,8 +130,8 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 		}
 		merged.Decls = append(merged.Decls, module.Decls...)
 	}
-	kernel := &ir.Module{}
-	c := &Checker{ast: merged, mod: kernel, flow: &flow.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*foundation.Type{}, consts: map[string]*constantDef{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
+	kernel := &ir.KernelModule{}
+	c := &Checker{ast: merged, kernel: kernel, module: &ir.Module{Kernel: kernel, Documentation: documentation}, types: map[string]*foundation.Type{}, consts: map[string]*constantDef{}, funcs: map[string]*funcSig{}, owners: map[string]string{}, imports: map[string]map[string]bool{}, workers: workers}
 	for _, module := range modules {
 		file := strings.TrimSuffix(module.File, ".tach")
 		visible := map[string]bool{file: true}
@@ -166,11 +165,11 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 	if err := c.lowerFunctions(); err != nil {
 		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
-	inferBufferAccess(c.mod)
-	if err := checkRecursion(c.mod); err != nil {
+	inferBufferAccess(c.kernel)
+	if err := checkRecursion(c.kernel); err != nil {
 		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
-	if err := ir.Verify(c.mod); err != nil {
+	if err := ir.VerifyKernel(c.kernel); err != nil {
 		var diagnostic *foundation.Diagnostic
 		if errors.As(err, &diagnostic) {
 			return nil, nil, appendError(documentationDiagnostics, diagnostic).Sorted()
@@ -180,13 +179,13 @@ func CheckAndLowerProject(modules []*ast.Module, requestedWorkers ...int) (*flow
 	if err := c.lowerPrograms(); err != nil {
 		return nil, nil, appendError(documentationDiagnostics, err).Sorted()
 	}
-	if err := flow.Verify(c.flow); err != nil {
+	if err := ir.Verify(c.module); err != nil {
 		return nil, nil, fmt.Errorf("internal Flow IR verification failed: %w", err)
 	}
 	if len(documentationDiagnostics) > 0 {
 		return nil, nil, documentationDiagnostics.Sorted()
 	}
-	return c.flow, files, nil
+	return c.module, files, nil
 }
 
 func appendError(diagnostics foundation.Diagnostics, err error) foundation.Diagnostics {
@@ -235,7 +234,7 @@ func (c *Checker) collectTypes() error {
 		}
 		t := &foundation.Type{Kind: foundation.StructKind, Name: td.Name}
 		c.types[td.Name] = t
-		c.mod.Structs = append(c.mod.Structs, t)
+		c.kernel.Structs = append(c.kernel.Structs, t)
 	}
 	return nil
 }
@@ -286,7 +285,7 @@ func (c *Checker) resolveTypeFields() error {
 }
 
 func (c *Checker) checkRuntimeArrayPlacement() error {
-	for _, t := range c.mod.Structs {
+	for _, t := range c.kernel.Structs {
 		for i, f := range t.Fields {
 			if f.Type.Kind == foundation.RuntimeArrayKind {
 				if i != len(t.Fields)-1 {
@@ -329,7 +328,7 @@ func (c *Checker) checkTypeCycles() error {
 		state[t.Name] = 2
 		return nil
 	}
-	for _, t := range c.mod.Structs {
+	for _, t := range c.kernel.Structs {
 		if err := visit(t); err != nil {
 			return err
 		}
@@ -539,7 +538,7 @@ func (c *Checker) lowerFunctions() error {
 	functions := make([]*ir.Function, len(declarations))
 	errors := parallel(c.workers, len(declarations), func(index int) error {
 		local := *c
-		local.mod = &ir.Module{}
+		local.kernel = &ir.KernelModule{}
 		declaration := declarations[index]
 		var err error
 		if len(declaration.Indices) > 0 {
@@ -548,7 +547,7 @@ func (c *Checker) lowerFunctions() error {
 			err = local.lowerHelper(declaration)
 		}
 		if err == nil {
-			functions[index] = local.mod.Functions[0]
+			functions[index] = local.kernel.Functions[0]
 		}
 		return err
 	})
@@ -556,7 +555,7 @@ func (c *Checker) lowerFunctions() error {
 		if err != nil {
 			diagnostics = appendError(diagnostics, err)
 		} else {
-			c.mod.Functions = append(c.mod.Functions, functions[index])
+			c.kernel.Functions = append(c.kernel.Functions, functions[index])
 		}
 	}
 	if len(diagnostics) > 0 {
@@ -565,7 +564,7 @@ func (c *Checker) lowerFunctions() error {
 	return nil
 }
 
-func inferBufferAccess(m *ir.Module) {
+func inferBufferAccess(m *ir.KernelModule) {
 	for _, f := range m.Functions {
 		for i := range f.BufferParams {
 			f.BufferParams[i].Access = ir.Read
@@ -633,7 +632,7 @@ func (c *Checker) lowerHelper(d *ast.FunctionDecl) error {
 		}
 		f.Body.Term = &ir.Return{}
 	}
-	c.mod.Functions = append(c.mod.Functions, f)
+	c.kernel.Functions = append(c.kernel.Functions, f)
 	return nil
 }
 func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
@@ -689,7 +688,7 @@ func (c *Checker) lowerStage(d *ast.FunctionDecl) error {
 	if !f.Workgroup.Explicit && (len(f.WorkgroupVars) > 0 || blockHasBarrier(f.Body)) {
 		return diag(d.Span, "stage %s uses workgroup-scoped state or barriers and requires explicit @workgroup", d.Name)
 	}
-	c.mod.Functions = append(c.mod.Functions, f)
+	c.kernel.Functions = append(c.kernel.Functions, f)
 	return nil
 }
 func (c *Checker) parameterType(te ast.TypeExpr, allowBuffer bool) (*foundation.Type, bool, error) {
@@ -1861,13 +1860,13 @@ func ReservedName(name string) bool {
 	return foundation.ParseBuiltin(name) != nil
 }
 
-func viewType(expression ast.TypeExpr) (flow.ViewFormat, bool) {
+func viewType(expression ast.TypeExpr) (ir.ViewFormat, bool) {
 	generic, ok := expression.(*ast.GenericType)
 	if !ok || generic.Name != "view" || len(generic.Args) != 1 {
 		return 0, false
 	}
 	format, ok := generic.Args[0].(*ast.NamedType)
-	return flow.SRGB8, ok && format.Name == "srgb8"
+	return ir.SRGB8ViewFormat, ok && format.Name == "srgb8"
 }
 
 type detachedExpr struct {
@@ -2526,7 +2525,7 @@ func boolDiag(span foundation.Span, subject string, t *foundation.Type, maskHelp
 	return diagHelp(span, maskHelp, "%s is %s, want bool", subject, t)
 }
 
-func checkRecursion(m *ir.Module) error {
+func checkRecursion(m *ir.KernelModule) error {
 	graph := map[string][]string{}
 	for _, f := range m.Functions {
 		var walk func(*ir.Block)

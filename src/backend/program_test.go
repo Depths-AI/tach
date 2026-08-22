@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"tach/src/backend"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/opt"
@@ -63,7 +62,7 @@ func lower(t *testing.T, source string, profile backend.Profile) *backend.Execut
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.OptimizeLogical(m); err != nil {
+	if err := opt.Optimize(m); err != nil {
 		t.Fatal(err)
 	}
 	executable, err := backend.Lower(m, profile)
@@ -76,7 +75,7 @@ func lower(t *testing.T, source string, profile backend.Profile) *backend.Execut
 func TestPlannerInternalizesSafeRepeatAndPrunesDeadValues(t *testing.T) {
 	executable := lower(t, `export function scale[i](data: buffer<float32[]>, used: float32, unused: float32) { data[i] *= used; }`, backend.WebProfile)
 	plan := executable.Programs[0]
-	if plan.Repeat != backend.RepeatInvocationLoop || len(plan.Steps) != 1 || plan.Steps[0].Parameters[len(plan.Steps[0].Parameters)-1].Kind != flow.ValueRepeat {
+	if plan.Repeat != backend.RepeatInvocationLoop || len(plan.Steps) != 1 || plan.Steps[0].Parameters[len(plan.Steps[0].Parameters)-1].Kind != ir.ValueFromRepeat {
 		t.Fatalf("plan = %#v", plan)
 	}
 	kernel := executable.PhysicalKernels[0]
@@ -114,7 +113,7 @@ export function inspect[i](data: buffer<HalfSeries>, out: buffer<uint32[]>) {
 	}
 	argument := web.Programs[0].Steps[0].Parameters[formal]
 	shape := web.Logical.Programs[0].Shape(argument.Shape)
-	if argument.Kind != flow.ValueShape || shape == nil || len(shape.Path) != 1 || shape.Path[0] != "values" {
+	if argument.Kind != ir.ValueFromShape || shape == nil || len(shape.Path) != 1 || shape.Path[0] != "values" {
 		t.Fatalf("logical length source = %#v; shape = %#v", argument, shape)
 	}
 	spirv := lower(t, source, backend.SPIRVProfile)
@@ -159,9 +158,9 @@ export function halve(values: buffer<float16[]>) {
 		}
 	}
 	if !found {
-		t.Fatalf("specialized Float16 value missing from kernel:\n%s", ir.Dump(executable.KernelModule))
+		t.Fatalf("specialized Float16 value missing from kernel:\n%s", ir.DumpKernel(executable.KernelModule))
 	}
-	if dump := ir.Dump(executable.KernelModule); strings.Contains(dump, "const uint32 99") {
+	if dump := ir.DumpKernel(executable.KernelModule); strings.Contains(dump, "const uint32 99") {
 		t.Fatalf("unused compile-time argument was materialized:\n%s", dump)
 	}
 }
@@ -180,7 +179,7 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 	spirv := lower(t, source, backend.SPIRVProfile)
 	for _, executable := range []*backend.Executable{web, spirv} {
 		plan := executable.Programs[0]
-		if plan.View == nil || !plan.View.Fused || len(executable.PhysicalKernels) != 1 || len(plan.Steps) != 0 || len(plan.Transients) != 0 || plan.View.Step.Kernel != 0 || executable.Logical.Programs[0].Shape(plan.View.Width).Op != flow.ShapeParameter || executable.Logical.Programs[0].Shape(plan.View.Height).Op != flow.ShapeParameter {
+		if plan.View == nil || !plan.View.Fused || len(executable.PhysicalKernels) != 1 || len(plan.Steps) != 0 || len(plan.Transients) != 0 || plan.View.Step.Kernel != 0 || executable.Logical.Programs[0].Shape(plan.View.Width).Op != ir.ShapeParameter || executable.Logical.Programs[0].Shape(plan.View.Height).Op != ir.ShapeParameter {
 			t.Fatalf("view plan = %#v; kernels = %#v", plan.View, executable.PhysicalKernels)
 		}
 		kernel := executable.PhysicalKernels[plan.View.Step.Kernel]

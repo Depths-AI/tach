@@ -21,12 +21,15 @@ func (e verifyEnv) clone() verifyEnv {
 	return verifyEnv{maps.Clone(e.values), maps.Clone(e.places)}
 }
 
-func Verify(m *Module) error {
+func VerifyKernel(m *KernelModule) error {
 	if m == nil {
 		return fmt.Errorf("nil IR module")
 	}
 	names := map[string]bool{}
-	for _, s := range m.Structs {
+	for index, s := range m.Structs {
+		if s == nil {
+			return fmt.Errorf("module struct %d is nil", index)
+		}
 		if s.Kind != foundation.StructKind {
 			return fmt.Errorf("module struct %s is not a struct", s)
 		}
@@ -43,7 +46,10 @@ func Verify(m *Module) error {
 		}
 	}
 	fmap := map[string]*Function{}
-	for _, f := range m.Functions {
+	for index, f := range m.Functions {
+		if f == nil {
+			return fmt.Errorf("function %d is nil", index)
+		}
 		if _, ok := fmap[f.Name]; ok {
 			return fmt.Errorf("duplicate function %q", f.Name)
 		}
@@ -148,7 +154,7 @@ func verifyUniqueIDs(f *Function) error {
 	return walk(f.Body, "function "+f.Name)
 }
 
-func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
+func verifyFunction(m *KernelModule, f *Function, fmap map[string]*Function) error {
 	if err := verifyUniqueIDs(f); err != nil {
 		return err
 	}
@@ -271,7 +277,7 @@ func verifyFunction(m *Module, f *Function, fmap map[string]*Function) error {
 	return nil
 }
 
-func verifyBlock(m *Module, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string, loopTypes []*foundation.Type) (verifyEnv, error) {
+func verifyBlock(m *KernelModule, f *Function, b *Block, e verifyEnv, fmap map[string]*Function, termKind string, loopTypes []*foundation.Type) (verifyEnv, error) {
 	if b == nil {
 		return e, fmt.Errorf("nil block")
 	}

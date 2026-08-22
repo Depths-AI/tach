@@ -8,9 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"tach/src/abi"
 	"tach/src/backend"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
@@ -25,12 +23,12 @@ const (
 
 type program struct {
 	executable *backend.Executable
-	source     *ir.Module
+	source     *ir.KernelModule
 	functions  map[*ir.Function]*backend.Coordinates
 	kernels    map[*ir.Function]*backend.PhysicalKernel
 }
 
-func Lower(logical *flow.Module) (*backend.Executable, error) {
+func Lower(logical *ir.Module) (*backend.Executable, error) {
 	return backend.Lower(logical, backend.SPIRVProfile)
 }
 
@@ -100,7 +98,7 @@ func Emit(executable *backend.Executable) ([]byte, error) {
 
 type builder struct {
 	p *program
-	m *ir.Module
+	m *ir.KernelModule
 
 	nextID uint32
 
@@ -120,7 +118,7 @@ type builder struct {
 	constants       map[string]uint32
 	funcIDs         map[string]uint32
 	resourceIDs     map[*ir.Function][]uint32
-	parameterBlocks map[*ir.Function]*abi.ParameterBlock
+	parameterBlocks map[*ir.Function]*ir.HostParameterBlock
 	parameterIDs    map[*ir.Function]uint32
 	inputIDs        map[inputKind]uint32
 	workgroupIDs    map[string][]uint32
@@ -147,7 +145,7 @@ func newBuilder(p *program) *builder {
 		constants:       map[string]uint32{},
 		funcIDs:         map[string]uint32{},
 		resourceIDs:     map[*ir.Function][]uint32{},
-		parameterBlocks: map[*ir.Function]*abi.ParameterBlock{},
+		parameterBlocks: map[*ir.Function]*ir.HostParameterBlock{},
 		parameterIDs:    map[*ir.Function]uint32{},
 		inputIDs:        map[inputKind]uint32{},
 		workgroupIDs:    map[string][]uint32{},
@@ -801,7 +799,7 @@ func (s *fnEmitter) emitParameters() error {
 	return nil
 }
 
-func (s *fnEmitter) emitParameterValue(block *abi.ParameterBlock, parameter int, logical *foundation.Type, cursor *int) (uint32, error) {
+func (s *fnEmitter) emitParameterValue(block *ir.HostParameterBlock, parameter int, logical *foundation.Type, cursor *int) (uint32, error) {
 	if logical.Kind == foundation.StructKind {
 		values := make([]uint32, len(logical.Fields))
 		for index, field := range logical.Fields {

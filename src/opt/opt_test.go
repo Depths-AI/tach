@@ -10,7 +10,7 @@ import (
 	"tach/src/sema"
 )
 
-func optimized(t *testing.T, name, source string) *ir.Module {
+func optimized(t *testing.T, name, source string) *ir.KernelModule {
 	t.Helper()
 	a, err := parser.Parse(name, source)
 	if err != nil {
@@ -40,14 +40,14 @@ export function dead[i](out: buffer<float32[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := ir.Dump(m.Kernel)
+	before := ir.DumpKernel(m.Kernel)
 	if !strings.Contains(before, "intrinsic sin") || !strings.Contains(before, "intrinsic cos") {
 		t.Fatal("test setup produced no dead intrinsic tree")
 	}
 	if err := opt.OptimizeKernel(m.Kernel); err != nil {
 		t.Fatal(err)
 	}
-	after := ir.Dump(m.Kernel)
+	after := ir.DumpKernel(m.Kernel)
 	if strings.Contains(after, "intrinsic sin") || strings.Contains(after, "intrinsic cos") {
 		t.Fatalf("dead intrinsic tree survived optimization:\n%s", after)
 	}
@@ -61,7 +61,7 @@ export function common[i](out: buffer<uint32[]>) {
   let b = i + 1;
   if (i < out.length) { out[i] = a + b; }
 }`)
-	dump := ir.Dump(kernel)
+	dump := ir.DumpKernel(kernel)
 	if got := strings.Count(dump, " = + %1,"); got != 1 {
 		t.Fatalf("repeated index expression was emitted %d times, want one:\n%s", got, dump)
 	}
@@ -83,7 +83,7 @@ export function memory[i](values: buffer<float32[]>, source: buffer<float32[]>, 
   let after = values[0];
   values[1] = before + after + immutable + float32(length);
 }`)
-	dump := ir.Dump(kernel)
+	dump := ir.DumpKernel(kernel)
 	if got := strings.Count(dump, "load"); got != 3 {
 		t.Fatalf("got %d loads, want one immutable-buffer and two ordered mutable-buffer loads:\n%s", got, dump)
 	}
@@ -102,7 +102,7 @@ export function dead[i](out: buffer<float32[]>) {
   square(value);
   out[0] = 1.0;
 }`)
-	dump := ir.Dump(kernel)
+	dump := ir.DumpKernel(kernel)
 	for _, dead := range []string{"array.length", "load", "call @square"} {
 		if strings.Contains(dump, dead) {
 			t.Fatalf("dead %s survived:\n%s", dead, dump)
@@ -125,7 +125,7 @@ export function integrate[i](
     }
   }
 }`)
-	dump := ir.Dump(kernel)
+	dump := ir.DumpKernel(kernel)
 	outer, ok := kernel.Functions[0].Body.Instrs[len(kernel.Functions[0].Body.Instrs)-1].(*ir.If)
 	if !ok {
 		t.Fatalf("test setup has no bounds guard:\n%s", dump)
@@ -174,7 +174,7 @@ export function synchronized[i](data: buffer<uint32[]>, steps: uint32) {
     workgroupBarrier();
   }
 }`)
-	dump := ir.Dump(kernel)
+	dump := ir.DumpKernel(kernel)
 	loop := strings.Index(dump, "loop params=")
 	if loop < 0 || !strings.Contains(dump[loop:], "store &") {
 		t.Fatalf("synchronized memory update was incorrectly promoted:\n%s", dump)
@@ -191,7 +191,7 @@ export function controlled[i](data: buffer<float32[]>, steps: uint32) {
     if (data[i] > 4.0) { `+transfer+`; }
   }
 }`)
-		dump := ir.Dump(kernel)
+		dump := ir.DumpKernel(kernel)
 		loop := strings.Index(dump, "loop params=")
 		if loop < 0 || !strings.Contains(dump[loop:], "store &") {
 			t.Fatalf("%s loop memory update was incorrectly promoted:\n%s", transfer, dump)

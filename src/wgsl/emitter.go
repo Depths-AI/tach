@@ -4,21 +4,19 @@ import (
 	"fmt"
 	"strings"
 
-	"tach/src/abi"
 	"tach/src/backend"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
 
 type program struct {
 	executable *backend.Executable
-	source     *ir.Module
+	source     *ir.KernelModule
 	functions  map[*ir.Function]*backend.Coordinates
 	kernels    map[*ir.Function]*backend.PhysicalKernel
 }
 
-func Lower(logical *flow.Module) (*backend.Executable, error) {
+func Lower(logical *ir.Module) (*backend.Executable, error) {
 	return backend.Lower(logical, backend.WebProfile)
 }
 
@@ -53,20 +51,20 @@ func expression(f *backend.Coordinates, id ir.ValueID) (string, bool) {
 	return name + suffix, true
 }
 
-func mangleFunc(name string) string          { return "_tach_f_" + abi.Mangle(name) }
-func mangleType(name string) string          { return "_tach_t_" + abi.Mangle(name) }
+func mangleFunc(name string) string          { return "_tach_f_" + ir.MangleIdentifier(name) }
+func mangleType(name string) string          { return "_tach_t_" + ir.MangleIdentifier(name) }
 func resourceName(kernel, buffer int) string { return fmt.Sprintf("_tach_r%d_%d", kernel, buffer) }
 func wrapperName(kernel, buffer int) string {
 	return fmt.Sprintf("_tach_resource_%d_%d", kernel, buffer)
 }
-func fieldName(i int, name string) string { return fmt.Sprintf("f%d_%s", i, abi.Mangle(name)) }
+func fieldName(i int, name string) string { return fmt.Sprintf("f%d_%s", i, ir.MangleIdentifier(name)) }
 func workgroupName(f *ir.Function, i int) string {
-	return fmt.Sprintf("_tach_w_%s_%d", abi.Mangle(f.Name), i)
+	return fmt.Sprintf("_tach_w_%s_%d", ir.MangleIdentifier(f.Name), i)
 }
 
 type emitter struct {
 	p           *program
-	m           *ir.Module
+	m           *ir.KernelModule
 	b           strings.Builder
 	indent      int
 	structIndex map[string]int
@@ -234,15 +232,15 @@ func (e *emitter) emitResource(kernel, buffer int, r ir.BufferParam) {
 	e.line("@group(0) @binding(%d) var<storage, %s> %s: %s;", buffer, access, resourceName(kernel, buffer), w)
 }
 
-func parameterTypeName(block *abi.ParameterBlock) string {
-	return "_tach_parameters_" + abi.Mangle(block.Function.Name)
+func parameterTypeName(block *ir.HostParameterBlock) string {
+	return "_tach_parameters_" + ir.MangleIdentifier(block.Function.Name)
 }
 
-func parameterResourceName(block *abi.ParameterBlock) string {
-	return "_tach_p_" + abi.Mangle(block.Function.Name)
+func parameterResourceName(block *ir.HostParameterBlock) string {
+	return "_tach_p_" + ir.MangleIdentifier(block.Function.Name)
 }
 
-func (e *emitter) emitParameterBlock(block *abi.ParameterBlock) {
+func (e *emitter) emitParameterBlock(block *ir.HostParameterBlock) {
 	e.line("// Tach parameters: %s", block.Function.Name)
 	e.line("struct %s {", parameterTypeName(block))
 	e.indent++
@@ -340,7 +338,7 @@ func (e *emitter) emitFunction(f *ir.Function) error {
 	return nil
 }
 
-func (e *emitter) parameterExpression(block *abi.ParameterBlock, parameter int, logical *foundation.Type, cursor *int) (string, error) {
+func (e *emitter) parameterExpression(block *ir.HostParameterBlock, parameter int, logical *foundation.Type, cursor *int) (string, error) {
 	if logical.Kind == foundation.StructKind {
 		values := make([]string, len(logical.Fields))
 		for index, field := range logical.Fields {

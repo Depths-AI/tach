@@ -12,8 +12,8 @@ import (
 	"tach/src/ast"
 	"tach/src/backend"
 	"tach/src/bindings"
-	"tach/src/flow"
 	"tach/src/foundation"
+	"tach/src/ir"
 	"tach/src/opt"
 	"tach/src/sema"
 	"tach/src/spirv"
@@ -21,7 +21,7 @@ import (
 )
 
 type Result struct {
-	Module          *flow.Module
+	Module          *ir.Module
 	Web             *backend.Executable
 	SPIRVExecutable *backend.Executable
 	WGSL            string
@@ -136,7 +136,7 @@ func compile(cwd string, build bool, workers int) (*Result, error) {
 		project.Kernels[i].Documentation = documentation[i]
 	}
 	if build {
-		if err := opt.OptimizeLogical(logical); err != nil {
+		if err := opt.Optimize(logical); err != nil {
 			return nil, fmt.Errorf("IR optimization: %w", err)
 		}
 	}

@@ -22,7 +22,7 @@ func generateSource(t *testing.T, source string) (*Artifacts, *Metadata) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := opt.OptimizeLogical(logical); err != nil {
+	if err := opt.Optimize(logical); err != nil {
 		t.Fatal(err)
 	}
 	web, err := wgsl.Lower(logical)

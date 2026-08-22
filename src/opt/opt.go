@@ -4,23 +4,22 @@ import (
 	"fmt"
 	"maps"
 
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
 
-func OptimizeLogical(logical *flow.Module) error {
-	if logical == nil {
+func Optimize(module *ir.Module) error {
+	if module == nil {
 		return fmt.Errorf("nil logical module")
 	}
-	if err := OptimizeKernel(logical.Kernel); err != nil {
+	if err := OptimizeKernel(module.Kernel); err != nil {
 		return err
 	}
-	return flow.Verify(logical)
+	return ir.Verify(module)
 }
 
-func OptimizeKernel(m *ir.Module) error {
-	if err := ir.Verify(m); err != nil {
+func OptimizeKernel(m *ir.KernelModule) error {
+	if err := ir.VerifyKernel(m); err != nil {
 		return fmt.Errorf("pre-optimization IR verification: %w", err)
 	}
 	for _, f := range m.Functions {
@@ -33,7 +32,7 @@ func OptimizeKernel(m *ir.Module) error {
 			return fmt.Errorf("optimize function %s: %w", f.Name, err)
 		}
 	}
-	if err := ir.Verify(m); err != nil {
+	if err := ir.VerifyKernel(m); err != nil {
 		return fmt.Errorf("post-optimization IR verification: %w", err)
 	}
 	return nil
@@ -56,11 +55,11 @@ type placeKey struct {
 
 // commonValues removes repeated pure SSA computations while preserving the
 // structured dominance already present in Core IR.
-func commonValues(m *ir.Module, f *ir.Function) {
+func commonValues(m *ir.KernelModule, f *ir.Function) {
 	canonicalizeBlock(f, f.Body, map[ir.ValueID]ir.ValueID{}, map[ir.PlaceID]ir.PlaceID{}, map[ir.PlaceID]int{}, map[valueKey]ir.ValueID{}, map[placeKey]ir.PlaceID{})
 }
 
-func hoistLoopInvariants(m *ir.Module, f *ir.Function) {
+func hoistLoopInvariants(m *ir.KernelModule, f *ir.Function) {
 	resources := placeResourceRoots(f)
 	hoistNestedLoops(f, f.Body, resources)
 }
@@ -246,7 +245,7 @@ type promotedBufferValue struct {
 	initID   ir.ValueID
 }
 
-func promoteLoopBufferValues(m *ir.Module, f *ir.Function) {
+func promoteLoopBufferValues(m *ir.KernelModule, f *ir.Function) {
 	resources := placeResourceRoots(f)
 	next := ir.MaxValueID(f)
 	promoteNestedLoops(f, f.Body, resources, &next)

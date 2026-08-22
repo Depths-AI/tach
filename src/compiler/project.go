@@ -13,11 +13,10 @@ import (
 	"strings"
 	"sync"
 
-	"tach/src/abi"
 	"tach/src/ast"
 	"tach/src/bindings"
-	"tach/src/flow"
 	"tach/src/foundation"
+	"tach/src/ir"
 	"tach/src/parser"
 	"tach/src/sema"
 )
@@ -41,7 +40,7 @@ type kernel struct {
 	Path          string
 	Source        string
 	AST           *ast.Module
-	Documentation flow.Documentation
+	Documentation ir.Documentation
 }
 
 type project struct {
@@ -335,12 +334,12 @@ func (p *project) validate(diagnostics *foundation.Diagnostics) {
 		for _, declaration := range kernel.AST.Decls {
 			var name string
 			exported := false
-			validate := abi.ValidateExportName
+			validate := ir.ValidateExportName
 			switch item := declaration.(type) {
 			case *ast.TypeDecl:
 				name = item.Name
 				exported = true
-				validate = abi.ValidateExportTypeName
+				validate = ir.ValidateExportTypeName
 			case *ast.ConstDecl:
 				name = item.Name
 			case *ast.FunctionDecl:
@@ -348,7 +347,7 @@ func (p *project) validate(diagnostics *foundation.Diagnostics) {
 				exported = item.Exported
 				if exported {
 					for _, parameter := range item.Params {
-						if err := abi.ValidateExportName(parameter.Name); err != nil {
+						if err := ir.ValidateExportName(parameter.Name); err != nil {
 							*diagnostics = append(*diagnostics, foundation.Diagnostic{Kind: "export", Span: parameter.Span, Message: fmt.Sprintf("parameter name: %v", err)})
 						}
 					}

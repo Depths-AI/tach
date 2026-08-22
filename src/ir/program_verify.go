@@ -1,17 +1,16 @@
-package flow
+package ir
 
 import (
 	"fmt"
 
 	"tach/src/foundation"
-	"tach/src/ir"
 )
 
 func Verify(m *Module) error {
 	if m == nil || m.Kernel == nil {
 		return fmt.Errorf("flow module is missing Kernel IR")
 	}
-	if err := ir.Verify(m.Kernel); err != nil {
+	if err := VerifyKernel(m.Kernel); err != nil {
 		return fmt.Errorf("kernel IR: %w", err)
 	}
 	names := map[string]bool{}
@@ -39,13 +38,13 @@ func verifyProgram(m *Module, p *Program) error {
 		if parameter.Name == "" || parameter.Type == nil {
 			return fmt.Errorf("parameter %d is incomplete", i)
 		}
-		if parameter.Kind == BufferParameter {
+		if parameter.Kind == BufferParameterKind {
 			bufferCount++
 			r := p.Resource(parameter.Resource)
-			if r == nil || r.Kind != External || r.Parameter != i || !foundation.Equal(r.Type, parameter.Type) {
+			if r == nil || r.Kind != ExternalResourceKind || r.Parameter != i || !foundation.Equal(r.Type, parameter.Type) {
 				return fmt.Errorf("buffer parameter %d has invalid resource", i)
 			}
-		} else if parameter.Kind != ValueParameter || !foundation.IsConstructible(parameter.Type) {
+		} else if parameter.Kind != ValueParameterKind || !foundation.IsConstructible(parameter.Type) {
 			return fmt.Errorf("parameter %d has invalid kind/type", i)
 		}
 	}
@@ -56,13 +55,13 @@ func verifyProgram(m *Module, p *Program) error {
 		if r.ID != ResourceID(i+1) || r.Type == nil {
 			return fmt.Errorf("resource IDs must be dense from one")
 		}
-		if r.Kind != External && r.Kind != Transient {
+		if r.Kind != ExternalResourceKind && r.Kind != TransientResourceKind {
 			return fmt.Errorf("resource %d has invalid kind", r.ID)
 		}
 		if p.Version(r.Initial) == nil || p.Version(r.Final) == nil {
 			return fmt.Errorf("resource %d has invalid initial/final version", r.ID)
 		}
-		if r.Kind == Transient && p.Shape(r.Length) == nil {
+		if r.Kind == TransientResourceKind && p.Shape(r.Length) == nil {
 			return fmt.Errorf("transient %d has invalid length", r.ID)
 		}
 	}
@@ -92,7 +91,7 @@ func verifyProgram(m *Module, p *Program) error {
 	if p.View != nil {
 		view, resource := p.View, p.Resource(p.View.Source)
 		pixel := foundation.VectorOf(foundation.Float32Type, 4)
-		if view.Format != SRGB8 || resource == nil || resource.Type.Kind != foundation.RuntimeArrayKind || !foundation.Equal(resource.Type.Elem, pixel) {
+		if view.Format != SRGB8ViewFormat || resource == nil || resource.Type.Kind != foundation.RuntimeArrayKind || !foundation.Equal(resource.Type.Elem, pixel) {
 			return fmt.Errorf("has invalid view source/format")
 		}
 		if p.Version(view.Input) == nil || p.Version(view.Input).Resource != view.Source || p.Shape(view.Width) == nil || p.Shape(view.Height) == nil {
@@ -104,7 +103,7 @@ func verifyProgram(m *Module, p *Program) error {
 			return fmt.Errorf("dispatch IDs must be dense from one")
 		}
 		stage := m.Kernel.Function(d.Stage)
-		if stage == nil || stage.Kind != ir.Stage {
+		if stage == nil || stage.Kind != Stage {
 			return fmt.Errorf("dispatch %d references non-stage %q", d.ID, d.Stage)
 		}
 		if len(d.Domain) != len(stage.Indices) || len(d.Domain) < 1 || len(d.Domain) > 3 {
@@ -119,7 +118,7 @@ func verifyProgram(m *Module, p *Program) error {
 			return fmt.Errorf("dispatch %d argument count mismatch", d.ID)
 		}
 		seen := map[ResourceID]bool{}
-		summary := ir.AnalyzeAccess(stage)
+		summary := AnalyzeAccess(stage)
 		for formal, a := range d.Buffers {
 			if a.Formal != formal || p.Resource(a.Resource) == nil || seen[a.Resource] || current[a.Resource] != a.Input {
 				return fmt.Errorf("dispatch %d has invalid buffer argument %d", d.ID, formal)
@@ -132,7 +131,7 @@ func verifyProgram(m *Module, p *Program) error {
 			if input == nil || !input.Defined && summary.Buffers[formal].Read {
 				return fmt.Errorf("dispatch %d reads undefined resource %d", d.ID, a.Resource)
 			}
-			if stage.BufferParams[formal].Access == ir.Mutable {
+			if stage.BufferParams[formal].Access == Mutable {
 				v := p.Version(a.Output)
 				if v == nil || v.Resource != a.Resource || v.Previous != a.Input || v.Producer != d.ID {
 					return fmt.Errorf("dispatch %d has invalid output version", d.ID)
@@ -178,7 +177,7 @@ func verifyShape(p *Program, id ShapeID, active map[ShapeID]bool) error {
 	case ShapeConstant:
 		return nil
 	case ShapeParameter:
-		if s.Parameter < 0 || s.Parameter >= len(p.Parameters) || p.Parameters[s.Parameter].Kind != ValueParameter || !foundation.Equal(pathType(p.Parameters[s.Parameter].Type, s.Path), foundation.Uint32Type) {
+		if s.Parameter < 0 || s.Parameter >= len(p.Parameters) || p.Parameters[s.Parameter].Kind != ValueParameterKind || !foundation.Equal(pathType(p.Parameters[s.Parameter].Type, s.Path), foundation.Uint32Type) {
 			return fmt.Errorf("shape %d has invalid parameter", id)
 		}
 		return nil
@@ -209,13 +208,13 @@ func verifyShape(p *Program, id ShapeID, active map[ShapeID]bool) error {
 
 func validValue(p *Program, value ValueArgument, want *foundation.Type) bool {
 	switch value.Kind {
-	case ValueParameterRef:
-		return value.Parameter >= 0 && value.Parameter < len(p.Parameters) && p.Parameters[value.Parameter].Kind == ValueParameter && foundation.Equal(pathType(p.Parameters[value.Parameter].Type, value.Path), want)
-	case ValueConstant:
+	case ValueFromParameter:
+		return value.Parameter >= 0 && value.Parameter < len(p.Parameters) && p.Parameters[value.Parameter].Kind == ValueParameterKind && foundation.Equal(pathType(p.Parameters[value.Parameter].Type, value.Path), want)
+	case ValueFromConstant:
 		return value.Constant.Valid() && foundation.Equal(value.Constant.Type, want)
-	case ValueRepeat:
+	case ValueFromRepeat:
 		return want.Kind == foundation.Uint32Kind
-	case ValueShape:
+	case ValueFromShape:
 		return want.Kind == foundation.Uint32Kind && p.Shape(value.Shape) != nil
 	default:
 		return false

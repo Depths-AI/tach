@@ -3,7 +3,6 @@ package bindings
 import (
 	"encoding/json"
 
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
@@ -16,7 +15,7 @@ type ProjectInput struct {
 type KernelInput struct {
 	Module, Name, Identity string
 	Types, Functions       []string
-	Documentation          flow.Documentation
+	Documentation          ir.Documentation
 }
 
 type ProjectDescription struct {
@@ -92,7 +91,7 @@ type TypeRef struct {
 	Lanes int      `json:"lanes,omitempty"`
 }
 
-func DescribeProject(module *flow.Module, input ProjectInput) ([]byte, error) {
+func DescribeProject(module *ir.Module, input ProjectInput) ([]byte, error) {
 	out := ProjectDescription{Schema: 2, Name: input.Name, Version: input.Version, Package: input.Package, Title: input.Title, Summary: input.Summary, Modules: []ModuleDescription{}}
 	typesByName := map[string]*foundation.Type{}
 	for _, item := range module.Kernel.Structs {
@@ -102,7 +101,7 @@ func DescribeProject(module *flow.Module, input ProjectInput) ([]byte, error) {
 	for _, item := range module.Kernel.Functions {
 		functions[item.Name] = item
 	}
-	programs := map[string]*flow.Program{}
+	programs := map[string]*ir.Program{}
 	for _, item := range module.Programs {
 		programs[item.Name] = item
 	}
@@ -138,7 +137,7 @@ func DescribeProject(module *flow.Module, input ProjectInput) ([]byte, error) {
 	return append(encoded, '\n'), err
 }
 
-func describeFunction(function *ir.Function, doc flow.FunctionDocumentation) Function {
+func describeFunction(function *ir.Function, doc ir.FunctionDocumentation) Function {
 	role := "helper"
 	if function.Kind == ir.Stage {
 		role = "stage"
@@ -169,7 +168,7 @@ func describeFunction(function *ir.Function, doc flow.FunctionDocumentation) Fun
 	return item
 }
 
-func describeProgram(module *flow.Module, program *flow.Program, stage *ir.Function, doc flow.FunctionDocumentation) Function {
+func describeProgram(module *ir.Module, program *ir.Program, stage *ir.Function, doc ir.FunctionDocumentation) Function {
 	role := "program"
 	if stage != nil {
 		role = "kernel"
@@ -182,7 +181,7 @@ func describeProgram(module *flow.Module, program *flow.Program, stage *ir.Funct
 	}
 	access := module.ProgramAccess(program)
 	for _, parameter := range program.Parameters {
-		item.Parameters = append(item.Parameters, Parameter{Name: parameter.Name, Type: typeRef(parameter.Type), Buffer: parameter.Kind == flow.BufferParameter, Access: access[parameter.Resource].String(), Description: doc.Parameters[parameter.Name]})
+		item.Parameters = append(item.Parameters, Parameter{Name: parameter.Name, Type: typeRef(parameter.Type), Buffer: parameter.Kind == ir.BufferParameterKind, Access: access[parameter.Resource].String(), Description: doc.Parameters[parameter.Name]})
 	}
 	if program.View != nil {
 		item.Returns = &Return{Type: TypeRef{Tach: "view<srgb8>", Kind: "view", Name: "srgb8"}, Description: doc.Returns}
@@ -190,17 +189,17 @@ func describeProgram(module *flow.Module, program *flow.Program, stage *ir.Funct
 	return item
 }
 
-func bufferAccess(buffer ir.BufferSummary) flow.ResourceAccess {
+func bufferAccess(buffer ir.BufferSummary) ir.ResourceAccess {
 	if buffer.Atomic {
-		return flow.AtomicAccess
+		return ir.AtomicAccess
 	}
 	if buffer.Read && buffer.Write {
-		return flow.ReadWriteAccess
+		return ir.ReadWriteAccess
 	}
 	if buffer.Write {
-		return flow.WriteAccess
+		return ir.WriteAccess
 	}
-	return flow.ReadAccess
+	return ir.ReadAccess
 }
 
 func typeRef(t *foundation.Type) TypeRef {

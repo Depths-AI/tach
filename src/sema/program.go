@@ -2,14 +2,13 @@ package sema
 
 import (
 	"tach/src/ast"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
 
 type programSymbol struct {
-	resource  flow.ResourceID
-	shape     flow.ShapeID
+	resource  ir.ResourceID
+	shape     ir.ShapeID
 	type_     *foundation.Type
 	constant  *foundation.ConstantValue
 	parameter int
@@ -24,7 +23,7 @@ func (c *Checker) lowerPrograms() error {
 			declarations = append(declarations, function)
 		}
 	}
-	programs := make([]*flow.Program, len(declarations))
+	programs := make([]*ir.Program, len(declarations))
 	errors := parallel(c.workers, len(declarations), func(index int) error {
 		function := declarations[index]
 		var err error
@@ -40,7 +39,7 @@ func (c *Checker) lowerPrograms() error {
 			diagnostics = appendError(diagnostics, err)
 			continue
 		}
-		c.flow.Programs = append(c.flow.Programs, programs[index])
+		c.module.Programs = append(c.module.Programs, programs[index])
 	}
 	if len(diagnostics) > 0 {
 		return diagnostics
@@ -48,9 +47,9 @@ func (c *Checker) lowerPrograms() error {
 	return nil
 }
 
-func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*flow.Program, error) {
-	stage := c.mod.Function(declaration.Name)
-	program := &flow.Program{Name: declaration.Name, Span: declaration.Span, Indexed: true, Rank: len(stage.Indices)}
+func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*ir.Program, error) {
+	stage := c.kernel.Function(declaration.Name)
+	program := &ir.Program{Name: declaration.Name, Span: declaration.Span, Indexed: true, Rank: len(stage.Indices)}
 	symbols, current, err := c.addProgramParameters(program, declaration)
 	if err != nil {
 		return nil, err
@@ -58,9 +57,9 @@ func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*flow.Prog
 	if len(current) == 0 {
 		return nil, diag(declaration.Span, "public program %s requires at least one buffer parameter", declaration.Name)
 	}
-	dispatch := flow.Dispatch{Stage: stage.Name, Span: declaration.Span}
+	dispatch := ir.Dispatch{Stage: stage.Name, Span: declaration.Span}
 	for axis := range stage.Indices {
-		dispatch.Domain = append(dispatch.Domain, program.AddShape(flow.Shape{Op: flow.ShapeLaunchAxis, Axis: uint8(axis), Span: declaration.Span}))
+		dispatch.Domain = append(dispatch.Domain, program.AddShape(ir.Shape{Op: ir.ShapeLaunchAxis, Axis: uint8(axis), Span: declaration.Span}))
 	}
 	if err := c.bindStageArguments(program, &dispatch, stage, declaration.Params, symbols, current); err != nil {
 		return nil, err
@@ -73,11 +72,11 @@ func (c *Checker) lowerIndexedProgram(declaration *ast.FunctionDecl) (*flow.Prog
 	return program, nil
 }
 
-func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, error) {
+func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*ir.Program, error) {
 	if len(declaration.Attrs) > 0 {
 		return nil, diag(declaration.Span, "attributes are invalid on public program %s", declaration.Name)
 	}
-	program := &flow.Program{Name: declaration.Name, Span: declaration.Span}
+	program := &ir.Program{Name: declaration.Name, Span: declaration.Span}
 	symbols, current, err := c.addProgramParameters(program, declaration)
 	if err != nil {
 		return nil, err
@@ -122,8 +121,8 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 				if err != nil {
 					return nil, err
 				}
-				resource := program.AddResource(flow.Resource{Name: x.Name, Kind: flow.Transient, Type: transientType, Length: length, Parameter: -1, Span: x.Span})
-				initial := program.AddVersion(flow.Version{Resource: resource, Defined: false})
+				resource := program.AddResource(ir.Resource{Name: x.Name, Kind: ir.TransientResourceKind, Type: transientType, Length: length, Parameter: -1, Span: x.Span})
+				initial := program.AddVersion(ir.Version{Resource: resource, Defined: false})
 				program.Resource(resource).Initial = initial
 				symbols[x.Name] = programSymbol{resource: resource, type_: transientType, parameter: -1}
 				current[resource] = initial
@@ -151,7 +150,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 			if sig != nil && sig.exported && !sig.indexed {
 				return nil, diag(x.Span, "public program %q cannot be a run target", x.Stage)
 			}
-			stage := c.mod.Function(x.Stage)
+			stage := c.kernel.Function(x.Stage)
 			if stage != nil && !c.visible(x.Stage, x.Span.File) {
 				stage = nil
 			}
@@ -161,7 +160,7 @@ func (c *Checker) lowerProgram(declaration *ast.FunctionDecl) (*flow.Program, er
 			if len(x.Domain.Axes) != len(stage.Indices) {
 				return nil, diag(x.Domain.Span, "run domain has rank %d, stage %s has rank %d", len(x.Domain.Axes), stage.Name, len(stage.Indices))
 			}
-			dispatch := flow.Dispatch{Stage: stage.Name, Span: x.Span}
+			dispatch := ir.Dispatch{Stage: stage.Name, Span: x.Span}
 			for _, axis := range x.Domain.Axes {
 				shape, err := c.lowerShape(program, axis, symbols)
 				if err != nil {
@@ -214,7 +213,7 @@ func programEnvironment(symbols map[string]programSymbol) env {
 	return environment
 }
 
-func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) (*flow.View, error) {
+func (c *Checker) lowerView(program *ir.Program, expression ast.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) (*ir.View, error) {
 	call, ok := expression.(*ast.CallExpr)
 	name, named := callName(call)
 	if !ok || !named || name != "view" || len(call.Args) != 3 {
@@ -237,7 +236,7 @@ func (c *Checker) lowerView(program *flow.Program, expression ast.Expr, symbols 
 	if err != nil {
 		return nil, err
 	}
-	return &flow.View{Source: symbol.resource, Input: current[symbol.resource], Width: width, Height: height, Span: expression.GetSpan()}, nil
+	return &ir.View{Source: symbol.resource, Input: current[symbol.resource], Width: width, Height: height, Span: expression.GetSpan()}, nil
 }
 
 func callName(call *ast.CallExpr) (string, bool) {
@@ -248,27 +247,27 @@ func callName(call *ast.CallExpr) (string, bool) {
 	return identifierName(identifier), ok
 }
 
-func (c *Checker) addProgramParameters(program *flow.Program, declaration *ast.FunctionDecl) (map[string]programSymbol, map[flow.ResourceID]flow.VersionID, error) {
+func (c *Checker) addProgramParameters(program *ir.Program, declaration *ast.FunctionDecl) (map[string]programSymbol, map[ir.ResourceID]ir.VersionID, error) {
 	symbols := map[string]programSymbol{}
-	current := map[flow.ResourceID]flow.VersionID{}
+	current := map[ir.ResourceID]ir.VersionID{}
 	for position, parameter := range declaration.Params {
 		sig := c.funcs[declaration.Name].params[position]
 		if sig.buffer {
-			resource := program.AddResource(flow.Resource{Name: parameter.Name, Kind: flow.External, Type: sig.ty, Parameter: position, Span: parameter.Span})
-			initial := program.AddVersion(flow.Version{Resource: resource, Defined: true})
+			resource := program.AddResource(ir.Resource{Name: parameter.Name, Kind: ir.ExternalResourceKind, Type: sig.ty, Parameter: position, Span: parameter.Span})
+			initial := program.AddVersion(ir.Version{Resource: resource, Defined: true})
 			program.Resource(resource).Initial = initial
-			program.Parameters = append(program.Parameters, flow.Parameter{Name: parameter.Name, Kind: flow.BufferParameter, Type: sig.ty, Resource: resource, Span: parameter.Span})
+			program.Parameters = append(program.Parameters, ir.ProgramParameter{Name: parameter.Name, Kind: ir.BufferParameterKind, Type: sig.ty, Resource: resource, Span: parameter.Span})
 			symbols[parameter.Name] = programSymbol{resource: resource, type_: sig.ty, parameter: position}
 			current[resource] = initial
 		} else {
-			program.Parameters = append(program.Parameters, flow.Parameter{Name: parameter.Name, Kind: flow.ValueParameter, Type: sig.ty, Span: parameter.Span})
+			program.Parameters = append(program.Parameters, ir.ProgramParameter{Name: parameter.Name, Kind: ir.ValueParameterKind, Type: sig.ty, Span: parameter.Span})
 			symbols[parameter.Name] = programSymbol{type_: sig.ty, parameter: position}
 		}
 	}
 	return symbols, current, nil
 }
 
-func (c *Checker) bindStageArguments(program *flow.Program, dispatch *flow.Dispatch, stage *ir.Function, params []ast.Param, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) error {
+func (c *Checker) bindStageArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, params []ast.Param, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
 	args := make([]ast.Expr, len(params))
 	for i, parameter := range params {
 		args[i] = &ast.IdentExpr{Name: parameter.Name, Span: parameter.Span}
@@ -276,8 +275,8 @@ func (c *Checker) bindStageArguments(program *flow.Program, dispatch *flow.Dispa
 	return c.bindRunArguments(program, dispatch, stage, args, symbols, current)
 }
 
-func (c *Checker) bindRunArguments(program *flow.Program, dispatch *flow.Dispatch, stage *ir.Function, args []ast.Expr, symbols map[string]programSymbol, current map[flow.ResourceID]flow.VersionID) error {
-	seen := map[flow.ResourceID]bool{}
+func (c *Checker) bindRunArguments(program *ir.Program, dispatch *ir.Dispatch, stage *ir.Function, args []ast.Expr, symbols map[string]programSymbol, current map[ir.ResourceID]ir.VersionID) error {
+	seen := map[ir.ResourceID]bool{}
 	for sourcePosition, formal := range stage.SourceParams {
 		argument := args[sourcePosition]
 		if formal.Kind == ir.SourceBuffer {
@@ -293,7 +292,7 @@ func (c *Checker) bindRunArguments(program *flow.Program, dispatch *flow.Dispatc
 			if !foundation.Equal(stage.BufferParams[formal.Buffer].Type, symbol.type_) {
 				return diag(argument.GetSpan(), "buffer argument for %s has type %s, want %s", formal.Name, symbol.type_, stage.BufferParams[formal.Buffer].Type)
 			}
-			dispatch.Buffers = append(dispatch.Buffers, flow.BufferArgument{Formal: formal.Buffer, Resource: symbol.resource, Input: current[symbol.resource]})
+			dispatch.Buffers = append(dispatch.Buffers, ir.BufferArgument{Formal: formal.Buffer, Resource: symbol.resource, Input: current[symbol.resource]})
 			continue
 		}
 		value, err := c.lowerProgramValue(program, argument, stage.Params[len(dispatch.Values)].Type, symbols)
@@ -313,8 +312,8 @@ func identifierName(identifier *ast.IdentExpr) string {
 	return identifier.Name
 }
 
-func (c *Checker) finishDispatch(program *flow.Program, dispatch *flow.Dispatch, id flow.DispatchID, current map[flow.ResourceID]flow.VersionID) error {
-	stage := c.mod.Function(dispatch.Stage)
+func (c *Checker) finishDispatch(program *ir.Program, dispatch *ir.Dispatch, id ir.DispatchID, current map[ir.ResourceID]ir.VersionID) error {
+	stage := c.kernel.Function(dispatch.Stage)
 	summary := ir.AnalyzeAccess(stage)
 	for i := range dispatch.Buffers {
 		argument := &dispatch.Buffers[i]
@@ -325,7 +324,7 @@ func (c *Checker) finishDispatch(program *flow.Program, dispatch *flow.Dispatch,
 		}
 		if stage.BufferParams[argument.Formal].Access == ir.Mutable {
 			defined := input != nil && input.Defined || program.DispatchDefines(dispatch, *argument, access)
-			output := program.AddVersion(flow.Version{Resource: argument.Resource, Previous: argument.Input, Producer: id, Defined: defined})
+			output := program.AddVersion(ir.Version{Resource: argument.Resource, Previous: argument.Input, Producer: id, Defined: defined})
 			argument.Output = output
 			current[argument.Resource] = output
 		}
@@ -333,44 +332,44 @@ func (c *Checker) finishDispatch(program *flow.Program, dispatch *flow.Dispatch,
 	return nil
 }
 
-func finishResources(program *flow.Program, current map[flow.ResourceID]flow.VersionID) {
+func finishResources(program *ir.Program, current map[ir.ResourceID]ir.VersionID) {
 	for i := range program.Resources {
 		program.Resources[i].Final = current[program.Resources[i].ID]
 	}
 }
 
-func (c *Checker) lowerProgramValue(program *flow.Program, expression ast.Expr, want *foundation.Type, symbols map[string]programSymbol) (flow.ValueArgument, error) {
+func (c *Checker) lowerProgramValue(program *ir.Program, expression ast.Expr, want *foundation.Type, symbols map[string]programSymbol) (ir.ValueArgument, error) {
 	if identifier, ok := expression.(*ast.IdentExpr); ok {
 		symbol, exists := symbols[identifier.Name]
 		if exists && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(symbol.type_, want) {
-			return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter}, nil
+			return ir.ValueArgument{Kind: ir.ValueFromParameter, Parameter: symbol.parameter}, nil
 		}
 		if exists && symbol.shape != 0 && foundation.Equal(want, foundation.Uint32Type) {
-			return flow.ValueArgument{Kind: flow.ValueShape, Shape: symbol.shape}, nil
+			return ir.ValueArgument{Kind: ir.ValueFromShape, Shape: symbol.shape}, nil
 		}
 	}
 	if symbol, path, got, ok := programPath(expression, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(got, want) {
-		return flow.ValueArgument{Kind: flow.ValueParameterRef, Parameter: symbol.parameter, Path: path}, nil
+		return ir.ValueArgument{Kind: ir.ValueFromParameter, Parameter: symbol.parameter, Path: path}, nil
 	}
 	if value, constant, err := c.tryConstant(expression, want, programEnvironment(symbols)); err != nil {
-		return flow.ValueArgument{}, err
+		return ir.ValueArgument{}, err
 	} else if constant {
-		return flow.ValueArgument{Kind: flow.ValueConstant, Constant: value}, nil
+		return ir.ValueArgument{Kind: ir.ValueFromConstant, Constant: value}, nil
 	}
 	if want.Kind == foundation.Uint32Kind {
 		shape, err := c.lowerShape(program, expression, symbols)
 		if err == nil {
-			return flow.ValueArgument{Kind: flow.ValueShape, Shape: shape}, nil
+			return ir.ValueArgument{Kind: ir.ValueFromShape, Shape: shape}, nil
 		}
 	}
-	return flow.ValueArgument{}, diag(expression.GetSpan(), "program argument is not a supported %s value source", want)
+	return ir.ValueArgument{}, diag(expression.GetSpan(), "program argument is not a supported %s value source", want)
 }
 
-func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols map[string]programSymbol) (flow.ShapeID, error) {
+func (c *Checker) lowerShape(program *ir.Program, expression ast.Expr, symbols map[string]programSymbol) (ir.ShapeID, error) {
 	if value, constant, err := c.tryConstant(expression, foundation.Uint32Type, programEnvironment(symbols)); err != nil {
 		return 0, err
 	} else if constant {
-		return program.AddShape(flow.Shape{Op: flow.ShapeConstant, Value: value.Bits[0], Span: expression.GetSpan()}), nil
+		return program.AddShape(ir.Shape{Op: ir.ShapeConstant, Value: value.Bits[0], Span: expression.GetSpan()}), nil
 	}
 	switch x := expression.(type) {
 	case *ast.IdentExpr:
@@ -382,22 +381,22 @@ func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols
 			return symbol.shape, nil
 		}
 		if symbol.parameter >= 0 && symbol.resource == 0 && foundation.Equal(symbol.type_, foundation.Uint32Type) {
-			return program.AddShape(flow.Shape{Op: flow.ShapeParameter, Parameter: symbol.parameter, Span: x.Span}), nil
+			return program.AddShape(ir.Shape{Op: ir.ShapeParameter, Parameter: symbol.parameter, Span: x.Span}), nil
 		}
 	case *ast.MemberExpr:
 		if x.Name == "length" {
 			if symbol, path, final, ok := programPath(x.Base, symbols); ok && symbol.resource != 0 && final.Kind == foundation.RuntimeArrayKind {
-				if resource := program.Resource(symbol.resource); resource != nil && resource.Kind == flow.Transient && len(path) == 0 {
+				if resource := program.Resource(symbol.resource); resource != nil && resource.Kind == ir.TransientResourceKind && len(path) == 0 {
 					return resource.Length, nil
 				}
-				return program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: symbol.resource, Path: path, Span: x.Span}), nil
+				return program.AddShape(ir.Shape{Op: ir.ShapeResourceLength, Resource: symbol.resource, Path: path, Span: x.Span}), nil
 			}
 		}
 		if symbol, path, final, ok := programPath(x, symbols); ok && symbol.resource == 0 && symbol.parameter >= 0 && foundation.Equal(final, foundation.Uint32Type) {
-			return program.AddShape(flow.Shape{Op: flow.ShapeParameter, Parameter: symbol.parameter, Path: path, Span: x.Span}), nil
+			return program.AddShape(ir.Shape{Op: ir.ShapeParameter, Parameter: symbol.parameter, Path: path, Span: x.Span}), nil
 		}
 	case *ast.BinaryExpr:
-		op := map[string]flow.ShapeOp{"+": flow.ShapeAdd, "-": flow.ShapeSub, "*": flow.ShapeMul, "/": flow.ShapeDiv, "%": flow.ShapeRem}[x.Op]
+		op := map[string]ir.ShapeOp{"+": ir.ShapeAdd, "-": ir.ShapeSub, "*": ir.ShapeMul, "/": ir.ShapeDiv, "%": ir.ShapeRem}[x.Op]
 		if op == 0 {
 			break
 		}
@@ -409,13 +408,13 @@ func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols
 		if err != nil {
 			return 0, err
 		}
-		return program.AddShape(flow.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
+		return program.AddShape(ir.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
 	case *ast.CallExpr:
 		identifier, ok := x.Callee.(*ast.IdentExpr)
 		if !ok || len(x.Args) != 2 {
 			break
 		}
-		op := map[string]flow.ShapeOp{"min": flow.ShapeMin, "max": flow.ShapeMax, "ceilDiv": flow.ShapeCeilDiv}[identifier.Name]
+		op := map[string]ir.ShapeOp{"min": ir.ShapeMin, "max": ir.ShapeMax, "ceilDiv": ir.ShapeCeilDiv}[identifier.Name]
 		if op == 0 {
 			break
 		}
@@ -427,7 +426,7 @@ func (c *Checker) lowerShape(program *flow.Program, expression ast.Expr, symbols
 		if err != nil {
 			return 0, err
 		}
-		return program.AddShape(flow.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
+		return program.AddShape(ir.Shape{Op: op, Left: left, Right: right, Span: x.Span}), nil
 	}
 	return 0, diag(expression.GetSpan(), "expression is not a checked uint32 shape expression")
 }

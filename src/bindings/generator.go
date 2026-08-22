@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"tach/src/backend"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
@@ -164,8 +163,8 @@ type HostLayoutField struct {
 	Type   *HostLayout `json:"type"`
 }
 
-func Generate(logical *flow.Module, web, spirv *backend.Executable) (*Artifacts, error) {
-	if err := flow.Verify(logical); err != nil {
+func Generate(logical *ir.Module, web, spirv *backend.Executable) (*Artifacts, error) {
+	if err := ir.Verify(logical); err != nil {
 		return nil, err
 	}
 	metadata, err := buildMetadata(logical, web, spirv)
@@ -180,7 +179,7 @@ func Generate(logical *flow.Module, web, spirv *backend.Executable) (*Artifacts,
 	return &Artifacts{Metadata: metadata, MetadataJSON: metadataJSON}, nil
 }
 
-func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metadata, error) {
+func buildMetadata(logical *ir.Module, web, spirv *backend.Executable) (*Metadata, error) {
 	metadata := &Metadata{Schema: 2, Types: []TypeMetadata{}, Programs: []PublicProgramMeta{}}
 	for _, t := range logical.Kernel.Structs {
 		item := TypeMetadata{Name: t.Name, Fields: []FieldMeta{}}
@@ -191,9 +190,9 @@ func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metad
 	}
 	for _, program := range logical.Programs {
 		item := PublicProgramMeta{Name: program.Name, Parameters: []PublicParameterMeta{}, Resources: []ExternalResourceMeta{}, View: program.View != nil}
-		external := map[flow.ResourceID]int{}
+		external := map[ir.ResourceID]int{}
 		for _, resource := range program.Resources {
-			if resource.Kind != flow.External {
+			if resource.Kind != ir.ExternalResourceKind {
 				continue
 			}
 			index := len(item.Resources)
@@ -206,7 +205,7 @@ func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metad
 		}
 		for _, parameter := range program.Parameters {
 			p := PublicParameterMeta{Name: parameter.Name, Type: parameter.Type.String()}
-			if parameter.Kind == flow.BufferParameter {
+			if parameter.Kind == ir.BufferParameterKind {
 				p.Kind = "buffer"
 				index := external[parameter.Resource]
 				p.Resource = &index
@@ -248,7 +247,7 @@ func buildMetadata(logical *flow.Module, web, spirv *backend.Executable) (*Metad
 	return metadata, nil
 }
 
-func externalResource(resource flow.Resource) (ExternalResourceMeta, error) {
+func externalResource(resource ir.Resource) (ExternalResourceMeta, error) {
 	l, err := foundation.LayoutOf(resource.Type)
 	if err != nil {
 		return ExternalResourceMeta{}, err
@@ -348,7 +347,7 @@ func targetMetadata(executable *backend.Executable) (*TargetPlanMeta, error) {
 	return target, nil
 }
 
-func stepMetadata(program *flow.Program, kernels []backend.PhysicalKernel, step backend.Step) (StepMeta, error) {
+func stepMetadata(program *ir.Program, kernels []backend.PhysicalKernel, step backend.Step) (StepMeta, error) {
 	if step.Kind == backend.BarrierStepKind {
 		return barrierMetadata(step.Barrier), nil
 	}
@@ -395,20 +394,20 @@ func barrierMetadata(resources []backend.BarrierResource) StepMeta {
 	return out
 }
 
-func shapeExpression(program *flow.Program, id flow.ShapeID) (ShapeExpression, error) {
+func shapeExpression(program *ir.Program, id ir.ShapeID) (ShapeExpression, error) {
 	shape := program.Shape(id)
 	if shape == nil {
 		return ShapeExpression{}, fmt.Errorf("invalid shape %d", id)
 	}
 	out := ShapeExpression{Path: append([]string(nil), shape.Path...)}
 	switch shape.Op {
-	case flow.ShapeConstant:
+	case ir.ShapeConstant:
 		out.Op, out.Value = "constant", shape.Value
-	case flow.ShapeParameter:
+	case ir.ShapeParameter:
 		out.Op, out.Parameter = "parameter", shape.Parameter
-	case flow.ShapeResourceLength:
+	case ir.ShapeResourceLength:
 		out.Op, out.Resource = "resourceLength", externalResourceIndex(program, shape.Resource)
-	case flow.ShapeLaunchAxis:
+	case ir.ShapeLaunchAxis:
 		out.Op, out.Axis = "launchAxis", shape.Axis
 	default:
 		out.Op = shape.Op.String()
@@ -425,10 +424,10 @@ func shapeExpression(program *flow.Program, id flow.ShapeID) (ShapeExpression, e
 	return out, nil
 }
 
-func externalResourceIndex(program *flow.Program, id flow.ResourceID) int {
+func externalResourceIndex(program *ir.Program, id ir.ResourceID) int {
 	index := 0
 	for _, resource := range program.Resources {
-		if resource.Kind == flow.External {
+		if resource.Kind == ir.ExternalResourceKind {
 			if resource.ID == id {
 				return index
 			}
@@ -438,16 +437,16 @@ func externalResourceIndex(program *flow.Program, id flow.ResourceID) int {
 	return -1
 }
 
-func valueSource(program *flow.Program, argument flow.ValueArgument, fieldPath []string) (ValueSource, error) {
+func valueSource(program *ir.Program, argument ir.ValueArgument, fieldPath []string) (ValueSource, error) {
 	switch argument.Kind {
-	case flow.ValueParameterRef:
+	case ir.ValueFromParameter:
 		return ValueSource{Kind: "parameter", Parameter: argument.Parameter, Path: append(append([]string(nil), argument.Path...), fieldPath...)}, nil
-	case flow.ValueShape:
+	case ir.ValueFromShape:
 		expression, err := shapeExpression(program, argument.Shape)
 		return ValueSource{Kind: "shape", Expression: &expression}, err
-	case flow.ValueRepeat:
+	case ir.ValueFromRepeat:
 		return ValueSource{Kind: "repeat"}, nil
-	case flow.ValueConstant:
+	case ir.ValueFromConstant:
 		return ValueSource{}, fmt.Errorf("compile-time constant reached runtime metadata")
 	default:
 		return ValueSource{}, fmt.Errorf("invalid value source")

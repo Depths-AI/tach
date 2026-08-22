@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"tach/src/ast"
-	"tach/src/flow"
+	"tach/src/ir"
 	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
@@ -25,7 +25,7 @@ func emitSource(t *testing.T, name, source string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opt.OptimizeLogical(m)
+	opt.Optimize(m)
 	executable, err := spirv.Lower(m)
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func emitSource(t *testing.T, name, source string) []byte {
 	return bin
 }
 
-func particleModule(t *testing.T) *flow.Module {
+func particleModule(t *testing.T) *ir.Module {
 	t.Helper()
 	var modules []*ast.Module
 	for _, name := range []string{"types", "particles"} {
@@ -61,7 +61,7 @@ func particleModule(t *testing.T) *flow.Module {
 
 func TestParticlesSPIRV(t *testing.T) {
 	m := particleModule(t)
-	opt.OptimizeLogical(m)
+	opt.Optimize(m)
 	executable, err := spirv.Lower(m)
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ export function structMemory[i](out: buffer<uint32>) {
 
 func TestHostResourceAggregatesKeepExplicitLayout(t *testing.T) {
 	logical := particleModule(t)
-	if err := opt.OptimizeLogical(logical); err != nil {
+	if err := opt.Optimize(logical); err != nil {
 		t.Fatal(err)
 	}
 	executable, err := spirv.Lower(logical)

@@ -39,7 +39,7 @@ func (e uniformEnv) clone() uniformEnv {
 	return uniformEnv{values: maps.Clone(e.values), places: maps.Clone(e.places), loop: e.loop}
 }
 
-func verifyUniformity(m *Module, f *Function, fmap map[string]*Function) error {
+func verifyUniformity(m *KernelModule, f *Function, fmap map[string]*Function) error {
 	e := newUniformEnv()
 	for _, index := range f.Indices {
 		e.values[index.ID] = false
@@ -54,7 +54,7 @@ func verifyUniformity(m *Module, f *Function, fmap map[string]*Function) error {
 // analyzeUniformBlock returns the environment at the terminator and whether
 // control reaching that terminator is workgroup-uniform. checkBarriers is false
 // only during loop-carried fixed-point discovery.
-func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap map[string]*Function, control, checkBarriers bool) (uniformEnv, bool, error) {
+func analyzeUniformBlock(m *KernelModule, f *Function, b *Block, e uniformEnv, fmap map[string]*Function, control, checkBarriers bool) (uniformEnv, bool, error) {
 	value := func(id ValueID) bool { return e.values[id] }
 	for _, in := range b.Instrs {
 		switch x := in.(type) {
@@ -189,7 +189,7 @@ func analyzeUniformBlock(m *Module, f *Function, b *Block, e uniformEnv, fmap ma
 	return e, control, nil
 }
 
-func analyzeUniformLoop(m *Module, f *Function, loop *Loop, outer uniformEnv, fmap map[string]*Function, control, checkBarriers bool) (uniformEnv, bool, error) {
+func analyzeUniformLoop(m *KernelModule, f *Function, loop *Loop, outer uniformEnv, fmap map[string]*Function, control, checkBarriers bool) (uniformEnv, bool, error) {
 	paramUniform := make([]bool, len(loop.Params))
 	for i, p := range loop.Params {
 		paramUniform[i] = outer.values[p.Init]

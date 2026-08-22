@@ -21,7 +21,7 @@ func compileSourceForMutation(t *testing.T, source string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opt.OptimizeLogical(m)
+	opt.Optimize(m)
 	executable, err := Lower(m)
 	if err != nil {
 		t.Fatal(err)

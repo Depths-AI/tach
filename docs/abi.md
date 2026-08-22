@@ -161,9 +161,9 @@ use the read/read-write requirement of their particular stage.
 
 ## 4. Canonical host layout
 
-`src/layout` computes one checked, target-independent layout. Logical types do
-not acquire fake padding fields; offsets and padding exist only at the host
-boundary.
+`src/foundation.LayoutOf` computes one checked, target-independent layout.
+Logical types do not acquire fake padding fields; offsets and padding exist
+only at the host boundary.
 
 ### Scalars and vectors
 
@@ -289,11 +289,11 @@ They are not module-global public-resource IDs.
 ## 6. One value block per physical kernel
 
 After target-neutral Kernel IR optimization and backend parameter pruning,
-`src/abi` flattens the remaining plain stage parameters into one private
-struct. It walks parameters in order and struct fields in declaration order.
-Numeric leaves retain their type; scalar-bool leaves become `uint32`.
-Boolean-vector leaves are rejected before ABI construction rather than being
-invented as integer vectors.
+`src/ir.PlanHostParameters` flattens the remaining plain stage parameters into
+one private struct. It walks parameters in order and struct fields in
+declaration order. Numeric leaves retain their type; scalar-bool leaves become
+`uint32`. Boolean-vector leaves are rejected before ABI construction rather
+than being invented as integer vectors.
 
 The canonical layout determines every field offset and rounds the struct to
 its 16-byte alignment. A stage with no remaining values has no parameter

@@ -7,12 +7,11 @@ import (
 	"strings"
 
 	"tach/src/ast"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
 
-func warnings(project *project, module *flow.Module) foundation.Diagnostics {
+func warnings(project *project, module *ir.Module) foundation.Diagnostics {
 	owners := map[string]string{}
 	functions := map[string]*ast.FunctionDecl{}
 	constants := map[string]*ast.ConstDecl{}

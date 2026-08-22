@@ -3,8 +3,6 @@ package backend
 import (
 	"fmt"
 
-	"tach/src/abi"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 )
@@ -56,7 +54,7 @@ type PhysicalKernel struct {
 	Function       *ir.Function
 	Workgroup      [3]uint32
 	Bindings       []StorageBinding
-	Parameters     *abi.ParameterBlock
+	Parameters     *ir.HostParameterBlock
 	Coordinates    *Coordinates
 	Projection     bool
 	FusedView      bool
@@ -94,19 +92,19 @@ type BarrierResource struct {
 type Step struct {
 	Kind       StepKind
 	Kernel     int
-	Domain     []flow.ShapeID
+	Domain     []ir.ShapeID
 	Resources  []ResourceSource
-	Parameters []flow.ValueArgument
+	Parameters []ir.ValueArgument
 	Barrier    []BarrierResource
 }
 
 type Transient struct {
-	Resource        flow.ResourceID
+	Resource        ir.ResourceID
 	Type            *foundation.Type
 	Stride          uint32
 	Alignment       uint32
 	MinimumByteSize uint32
-	Length          flow.ShapeID
+	Length          ir.ShapeID
 	Color           int
 	FirstStep       int
 	LastStep        int
@@ -130,8 +128,8 @@ type ProgramPlan struct {
 
 type ViewPlan struct {
 	Step        Step
-	Width       flow.ShapeID
-	Height      flow.ShapeID
+	Width       ir.ShapeID
+	Height      ir.ShapeID
 	OutputColor int
 	Output      uint32
 	Fused       bool
@@ -139,8 +137,8 @@ type ViewPlan struct {
 
 type Executable struct {
 	Target          Target
-	Logical         *flow.Module
-	KernelModule    *ir.Module
+	Logical         *ir.Module
+	KernelModule    *ir.KernelModule
 	PhysicalKernels []PhysicalKernel
 	Programs        []ProgramPlan
 }
@@ -194,12 +192,12 @@ func (e *Executable) IndexFunctions() (map[*ir.Function]*Coordinates, map[*ir.Fu
 	return coordinates, kernels, nil
 }
 
-func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
+func Lower(logical *ir.Module, profile Profile) (*Executable, error) {
 	if profile.Target != Web && profile.Target != SPIRV {
 		return nil, fmt.Errorf("invalid target profile %q", profile.Target)
 	}
-	cloned := flow.Clone(logical)
-	executable := &Executable{Target: profile.Target, Logical: cloned, KernelModule: &ir.Module{Structs: append([]*foundation.Type(nil), cloned.Kernel.Structs...)}}
+	cloned := ir.Clone(logical)
+	executable := &Executable{Target: profile.Target, Logical: cloned, KernelModule: &ir.KernelModule{Structs: append([]*foundation.Type(nil), cloned.Kernel.Structs...)}}
 	for _, function := range cloned.Kernel.Functions {
 		if function.Kind == ir.Helper {
 			executable.KernelModule.Functions = append(executable.KernelModule.Functions, cloneFunction(function))
@@ -215,12 +213,12 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 	for programIndex, program := range cloned.Programs {
 		plan := ProgramPlan{Program: programIndex, Repeat: RepeatProgram}
 		fusedDispatch, fusedBinding := fusibleView(cloned, program)
-		omitted := flow.ResourceID(0)
+		omitted := ir.ResourceID(0)
 		if fusedDispatch >= 0 {
 			omitted = program.View.Source
 		}
 		kernelForDispatch := make([]int, len(program.Dispatches))
-		valuesForDispatch := make([][]flow.ValueArgument, len(program.Dispatches))
+		valuesForDispatch := make([][]ir.ValueArgument, len(program.Dispatches))
 		invocationRepeat := program.View == nil && len(program.Dispatches) == 1 && canInternalizeRepeat(cloned.Kernel.Function(program.Dispatches[0].Stage))
 		for dispatchIndex, dispatch := range program.Dispatches {
 			stage := cloned.Kernel.Function(dispatch.Stage)
@@ -228,12 +226,12 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 				return nil, fmt.Errorf("program %s dispatch references missing stage %s", program.Name, dispatch.Stage)
 			}
 			function := cloneFunction(stage)
-			values := append([]flow.ValueArgument(nil), dispatch.Values...)
+			values := append([]ir.ValueArgument(nil), dispatch.Values...)
 			if invocationRepeat {
 				if err := internalizeRepeat(function); err != nil {
 					return nil, err
 				}
-				values = append(values, flow.ValueArgument{Formal: len(values), Kind: flow.ValueRepeat})
+				values = append(values, ir.ValueArgument{Formal: len(values), Kind: ir.ValueFromRepeat})
 			}
 			values, err := specializeParameters(function, values)
 			if err != nil {
@@ -251,7 +249,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 			}
 			valuesForDispatch[dispatchIndex] = values
 			kernelIndex := len(executable.PhysicalKernels)
-			function.Name = abi.PrivateEntry(kernelIndex)
+			function.Name = ir.PrivateEntryName(kernelIndex)
 			workgroup, err := chooseWorkgroup(function, profile)
 			if err != nil {
 				return nil, err
@@ -272,7 +270,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 					physical.Bindings[fusedBinding].MinimumByteSize = 0
 				}
 			}
-			physical.Parameters, err = abi.PlanParameters(function, uint32(len(physical.Bindings)))
+			physical.Parameters, err = ir.PlanHostParameters(function, uint32(len(physical.Bindings)))
 			if err != nil {
 				return nil, err
 			}
@@ -292,11 +290,11 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 					plan.Steps = append(plan.Steps, Step{Kind: BarrierStepKind, Barrier: barrier})
 				}
 			}
-			step := Step{Kind: DispatchStepKind, Kernel: kernelForDispatch[dispatchIndex], Domain: append([]flow.ShapeID(nil), dispatch.Domain...), Parameters: valuesForDispatch[dispatchIndex]}
+			step := Step{Kind: DispatchStepKind, Kernel: kernelForDispatch[dispatchIndex], Domain: append([]ir.ShapeID(nil), dispatch.Domain...), Parameters: valuesForDispatch[dispatchIndex]}
 			for _, argument := range dispatch.Buffers {
 				resource := program.Resource(argument.Resource)
 				source := ResourceSource{Binding: uint32(argument.Formal), Resource: resourceIndex(program, resource, omitted)}
-				if resource.Kind == flow.External {
+				if resource.Kind == ir.ExternalResourceKind {
 					source.Kind = ExternalSource
 				} else {
 					source.Kind = TransientSource
@@ -340,17 +338,17 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 						return nil, err
 					}
 					viewKernel = len(executable.PhysicalKernels)
-					kernel.Entry = abi.PrivateEntry(viewKernel)
+					kernel.Entry = ir.PrivateEntryName(viewKernel)
 					kernel.Function.Name = kernel.Entry
 					executable.PhysicalKernels = append(executable.PhysicalKernels, kernel)
 					executable.KernelModule.Functions = append(executable.KernelModule.Functions, kernel.Function)
 				}
 				resource := program.Resource(view.Source)
 				source := ResourceSource{Binding: 0, Resource: resourceIndex(program, resource, omitted), Kind: ExternalSource}
-				if resource.Kind == flow.Transient {
+				if resource.Kind == ir.TransientResourceKind {
 					source.Kind = TransientSource
 				}
-				terminal.Step = Step{Kind: DispatchStepKind, Kernel: viewKernel, Domain: []flow.ShapeID{view.Width, view.Height}, Resources: []ResourceSource{source}, Parameters: []flow.ValueArgument{{Formal: 0, Kind: flow.ValueShape, Shape: view.Width}, {Formal: 1, Kind: flow.ValueShape, Shape: view.Height}}}
+				terminal.Step = Step{Kind: DispatchStepKind, Kernel: viewKernel, Domain: []ir.ShapeID{view.Width, view.Height}, Resources: []ResourceSource{source}, Parameters: []ir.ValueArgument{{Formal: 0, Kind: ir.ValueFromShape, Shape: view.Width}, {Formal: 1, Kind: ir.ValueFromShape, Shape: view.Height}}}
 				terminal.Output = 1
 			}
 			plan.View = terminal
@@ -363,7 +361,7 @@ func Lower(logical *flow.Module, profile Profile) (*Executable, error) {
 	return executable, nil
 }
 
-func specializeParameters(function *ir.Function, values []flow.ValueArgument) ([]flow.ValueArgument, error) {
+func specializeParameters(function *ir.Function, values []ir.ValueArgument) ([]ir.ValueArgument, error) {
 	uses, _, err := ir.UseCounts(function)
 	if err != nil {
 		return nil, err
@@ -373,13 +371,13 @@ func specializeParameters(function *ir.Function, values []flow.ValueArgument) ([
 	replacements := map[ir.ValueID]ir.ValueID{}
 	var definitions []ir.Instr
 	parameters := make([]ir.Param, 0, len(function.Params))
-	kept := make([]flow.ValueArgument, 0, len(values))
+	kept := make([]ir.ValueArgument, 0, len(values))
 	for index, parameter := range function.Params {
 		if uses[parameter.ID] == 0 {
 			continue
 		}
 		value := values[index]
-		if value.Kind != flow.ValueConstant {
+		if value.Kind != ir.ValueFromConstant {
 			value.Formal = len(kept)
 			parameters, kept = append(parameters, parameter), append(kept, value)
 			continue
@@ -402,7 +400,7 @@ func specializeParameters(function *ir.Function, values []flow.ValueArgument) ([
 	return kept, nil
 }
 
-func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, program *flow.Program, dispatch *flow.Dispatch) map[int]ir.ValueID {
+func appendLogicalLengths(function *ir.Function, values *[]ir.ValueArgument, program *ir.Program, dispatch *ir.Dispatch) map[int]ir.ValueID {
 	lengths := map[int]ir.ValueID{}
 	next := ir.MaxValueID(function) + 1
 	for buffer, parameter := range function.BufferParams {
@@ -414,11 +412,11 @@ func appendLogicalLengths(function *ir.Function, values *[]flow.ValueArgument, p
 			if argument.Formal != buffer {
 				continue
 			}
-			shape := program.AddShape(flow.Shape{Op: flow.ShapeResourceLength, Resource: argument.Resource, Path: path, Span: dispatch.Span})
+			shape := program.AddShape(ir.Shape{Op: ir.ShapeResourceLength, Resource: argument.Resource, Path: path, Span: dispatch.Span})
 			formal := len(function.Params)
 			function.Params = append(function.Params, ir.Param{Name: fmt.Sprintf("__tach_length_%d", buffer), ID: next, Type: foundation.Uint32Type})
 			function.SourceParams = append(function.SourceParams, ir.SourceParam{Name: function.Params[formal].Name, Kind: ir.SourceValue, Value: next, Buffer: -1})
-			*values = append(*values, flow.ValueArgument{Formal: formal, Kind: flow.ValueShape, Shape: shape})
+			*values = append(*values, ir.ValueArgument{Formal: formal, Kind: ir.ValueFromShape, Shape: shape})
 			lengths[buffer], next = next, next+1
 			break
 		}
@@ -580,7 +578,7 @@ func rewriteReturns(block *ir.Block) bool {
 }
 
 func cloneFunction(function *ir.Function) *ir.Function {
-	module := ir.Clone(&ir.Module{Functions: []*ir.Function{function}})
+	module := ir.CloneKernel(&ir.KernelModule{Functions: []*ir.Function{function}})
 	return module.Functions[0]
 }
 
@@ -634,7 +632,7 @@ func minimumByteSize(t *foundation.Type) (uint32, error) {
 	return l.Size, nil
 }
 
-func resourceIndex(program *flow.Program, resource *flow.Resource, omitted flow.ResourceID) int {
+func resourceIndex(program *ir.Program, resource *ir.Resource, omitted ir.ResourceID) int {
 	index := 0
 	for _, candidate := range program.Resources {
 		if candidate.ID == omitted {
@@ -650,10 +648,10 @@ func resourceIndex(program *flow.Program, resource *flow.Resource, omitted flow.
 	return -1
 }
 
-func planTransients(program *flow.Program, omitted flow.ResourceID) []Transient {
+func planTransients(program *ir.Program, omitted ir.ResourceID) []Transient {
 	var out []Transient
 	for _, resource := range program.Resources {
-		if resource.Kind != flow.Transient || resource.ID == omitted {
+		if resource.Kind != ir.TransientResourceKind || resource.ID == omitted {
 			continue
 		}
 		first, last := len(program.Dispatches), -1
@@ -692,9 +690,9 @@ func planTransients(program *flow.Program, omitted flow.ResourceID) []Transient 
 	return out
 }
 
-func between(program *flow.Program, before, after flow.Dispatch, omitted flow.ResourceID) []BarrierResource {
-	writes := map[flow.ResourceID]bool{}
-	touches := map[flow.ResourceID]bool{}
+func between(program *ir.Program, before, after ir.Dispatch, omitted ir.ResourceID) []BarrierResource {
+	writes := map[ir.ResourceID]bool{}
+	touches := map[ir.ResourceID]bool{}
 	for _, argument := range before.Buffers {
 		if argument.Output != 0 {
 			writes[argument.Resource] = true
@@ -707,7 +705,7 @@ func between(program *flow.Program, before, after flow.Dispatch, omitted flow.Re
 	for _, resource := range program.Resources {
 		if writes[resource.ID] && touches[resource.ID] {
 			kind := ExternalSource
-			if resource.Kind == flow.Transient {
+			if resource.Kind == ir.TransientResourceKind {
 				kind = TransientSource
 			}
 			out = append(out, BarrierResource{Kind: kind, Resource: resourceIndex(program, &resource, omitted)})
@@ -716,14 +714,14 @@ func between(program *flow.Program, before, after flow.Dispatch, omitted flow.Re
 	return out
 }
 
-func fusibleView(module *flow.Module, program *flow.Program) (int, int) {
+func fusibleView(module *ir.Module, program *ir.Program) (int, int) {
 	if program.View == nil || len(program.Dispatches) == 0 {
 		return -1, -1
 	}
 	resource := program.Resource(program.View.Source)
 	version := program.Version(program.View.Input)
 	last := len(program.Dispatches) - 1
-	if resource == nil || resource.Kind != flow.Transient || version == nil || version.Producer != program.Dispatches[last].ID || !shapeProduct(program, resource.Length, program.View.Width, program.View.Height) {
+	if resource == nil || resource.Kind != ir.TransientResourceKind || version == nil || version.Producer != program.Dispatches[last].ID || !shapeProduct(program, resource.Length, program.View.Width, program.View.Height) {
 		return -1, -1
 	}
 	for _, dispatch := range program.Dispatches[:last] {
@@ -751,22 +749,22 @@ func fusibleView(module *flow.Module, program *flow.Program) (int, int) {
 	return -1, -1
 }
 
-func shapeProduct(program *flow.Program, product, left, right flow.ShapeID) bool {
+func shapeProduct(program *ir.Program, product, left, right ir.ShapeID) bool {
 	shape := program.Shape(product)
-	if shape != nil && shape.Op == flow.ShapeMul && (shape.Left == left && shape.Right == right || shape.Left == right && shape.Right == left) {
+	if shape != nil && shape.Op == ir.ShapeMul && (shape.Left == left && shape.Right == right || shape.Left == right && shape.Right == left) {
 		return true
 	}
 	a, b := program.Shape(left), program.Shape(right)
 	if a == nil || b == nil {
 		return false
 	}
-	if (product == left && b.Op == flow.ShapeConstant && b.Value == 1) || (product == right && a.Op == flow.ShapeConstant && a.Value == 1) {
+	if (product == left && b.Op == ir.ShapeConstant && b.Value == 1) || (product == right && a.Op == ir.ShapeConstant && a.Value == 1) {
 		return true
 	}
-	return shape != nil && shape.Op == flow.ShapeConstant && a.Op == flow.ShapeConstant && b.Op == flow.ShapeConstant && uint64(a.Value)*uint64(b.Value) == uint64(shape.Value)
+	return shape != nil && shape.Op == ir.ShapeConstant && a.Op == ir.ShapeConstant && b.Op == ir.ShapeConstant && uint64(a.Value)*uint64(b.Value) == uint64(shape.Value)
 }
 
-func appendViewExtent(function *ir.Function, values *[]flow.ValueArgument, view *flow.View) (ir.ValueID, ir.ValueID) {
+func appendViewExtent(function *ir.Function, values *[]ir.ValueArgument, view *ir.View) (ir.ValueID, ir.ValueID) {
 	next := ir.MaxValueID(function) + 1
 	width, height := next, next+1
 	for _, parameter := range []ir.Param{{Name: "__tach_view_width", ID: width, Type: foundation.Uint32Type}, {Name: "__tach_view_height", ID: height, Type: foundation.Uint32Type}} {
@@ -775,8 +773,8 @@ func appendViewExtent(function *ir.Function, values *[]flow.ValueArgument, view 
 	}
 	formal := len(*values)
 	*values = append(*values,
-		flow.ValueArgument{Formal: formal, Kind: flow.ValueShape, Shape: view.Width},
-		flow.ValueArgument{Formal: formal + 1, Kind: flow.ValueShape, Shape: view.Height},
+		ir.ValueArgument{Formal: formal, Kind: ir.ValueFromShape, Shape: view.Width},
+		ir.ValueArgument{Formal: formal + 1, Kind: ir.ValueFromShape, Shape: view.Height},
 	)
 	return width, height
 }
@@ -873,7 +871,7 @@ func projectionKernel(target Target) (PhysicalKernel, error) {
 		{Buffer: 1, Binding: 1, Access: ir.Mutable, Type: output, MinimumByteSize: outputBytes, Texture: target == Web},
 	}
 	var err error
-	physical.Parameters, err = abi.PlanParameters(function, 2)
+	physical.Parameters, err = ir.PlanHostParameters(function, 2)
 	if err != nil {
 		return PhysicalKernel{}, err
 	}
@@ -1011,15 +1009,15 @@ func Verify(executable *Executable) error {
 	if executable == nil || executable.Logical == nil || executable.KernelModule == nil {
 		return fmt.Errorf("incomplete executable")
 	}
-	if err := flow.Verify(executable.Logical); err != nil {
+	if err := ir.Verify(executable.Logical); err != nil {
 		return fmt.Errorf("logical module: %w", err)
 	}
-	if err := ir.Verify(executable.KernelModule); err != nil {
+	if err := ir.VerifyKernel(executable.KernelModule); err != nil {
 		return fmt.Errorf("physical kernel module: %w", err)
 	}
 	entries := map[string]bool{}
 	for i, kernel := range executable.PhysicalKernels {
-		if kernel.Entry != abi.PrivateEntry(i) || kernel.Function == nil || kernel.Function.Name != kernel.Entry || entries[kernel.Entry] {
+		if kernel.Entry != ir.PrivateEntryName(i) || kernel.Function == nil || kernel.Function.Name != kernel.Entry || entries[kernel.Entry] {
 			return fmt.Errorf("physical kernel %d has invalid private entry", i)
 		}
 		entries[kernel.Entry] = true

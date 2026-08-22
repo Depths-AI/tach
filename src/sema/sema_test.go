@@ -8,14 +8,13 @@ import (
 	"testing"
 
 	"tach/src/ast"
-	"tach/src/flow"
 	"tach/src/foundation"
 	"tach/src/ir"
 	"tach/src/parser"
 	"tach/src/sema"
 )
 
-func lower(t *testing.T, name, source string) *flow.Module {
+func lower(t *testing.T, name, source string) *ir.Module {
 	t.Helper()
 	parsed, err := parser.Parse(name, source)
 	if err != nil {
@@ -63,7 +62,7 @@ func TestParticlesEndToIR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(m.Kernel)
+	dump := ir.DumpKernel(m.Kernel)
 	for _, want := range []string{"stage @integrate[i=%1]", "place.index", "call @integrateParticle"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("IR missing %q:\n%s", want, dump)
@@ -126,7 +125,7 @@ export function image(width: uint32, height: uint32): view<srgb8> {
 		t.Fatal(err)
 	}
 	program := module.Programs[0]
-	if program.Name != "image" || len(program.Resources) != 1 || program.Resources[0].Kind != flow.Transient || program.View == nil || program.View.Format != flow.SRGB8 || program.View.Source != program.Resources[0].ID {
+	if program.Name != "image" || len(program.Resources) != 1 || program.Resources[0].Kind != ir.TransientResourceKind || program.View == nil || program.View.Format != ir.SRGB8ViewFormat || program.View.Source != program.Resources[0].ID {
 		t.Fatalf("view program = %#v", program)
 	}
 	invalid := []struct {
@@ -183,7 +182,7 @@ export function constants[i](out: buffer<vec<float32, 3>[]>) {
 	if function == nil || function.Workgroup.Size != [3]uint32{8, 1, 1} || len(function.WorkgroupVars) != 1 || function.WorkgroupVars[0].Type.Count != 64 {
 		t.Fatalf("constant structural lowering = %#v", function)
 	}
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{"const uint32 16", "const float32 0.8", "const float32 0.6"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("constant IR missing %q:\n%s", want, dump)
@@ -231,7 +230,7 @@ export function algebra[i](
     vectorOut[i] = unit * broadcast.x;
   }
 }`)
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{
 		"const uint32 243",
 		"const uint32 4294967295",
@@ -367,7 +366,7 @@ export function halfMath[i](values: buffer<vec<float16, 4>[]>, factor: float16) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{"float16", "vec<float16, 4>", "intrinsic normalize", ": float16 -> float32", ": float32 -> float16"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("Float16 IR missing %q:\n%s", want, dump)
@@ -403,7 +402,7 @@ export function control[i](out: buffer<float32[]>, half: buffer<vec<float16, 4>[
 	if err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{"intrinsic fma", "continue [", "break ["} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("control/FMA IR missing %q:\n%s", want, dump)
@@ -435,7 +434,7 @@ export function boundsAtomic[i](values: buffer<vec<float32, 2>[]>, half: buffer<
     if (observed != 0) { atomicAdd(state[i], 1); }
   }
 }`)
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{"const float32 1", "intrinsic min", "intrinsic max", "intrinsic clamp", "atomic_compare_exchange", "vec<float32, 2>", "float16"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("bounds/CAS IR missing %q:\n%s", want, dump)
@@ -496,7 +495,7 @@ export function inferred[i](out: buffer<vec<float32, 4>[]>) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{"intrinsic fma", "intrinsic sin", "intrinsic pow", "intrinsic abs", "intrinsic normalize", "intrinsic dot", "vec<float16, 3>", "vec<float32, 4>"} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("inferred IR missing %q:\n%s", want, dump)
@@ -545,7 +544,7 @@ function choose(value: vec<float32, 4>): vec<float32, 4> {
 export function masks[i](out: buffer<vec<float32, 4>[]>) {
   if (i < out.length) { out[i] = choose(vec(float32(i) - 2.0, -0.5, 0.0, 2.0)); }
 }`)
-	dump := ir.Dump(module.Kernel)
+	dump := ir.DumpKernel(module.Kernel)
 	for _, want := range []string{"vec<bool, 4>", "intrinsic all", "intrinsic any", "intrinsic select", " = & ", " = | ", " = ^ "} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("mask IR missing %q:\n%s", want, dump)

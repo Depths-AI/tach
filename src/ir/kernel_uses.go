@@ -8,7 +8,7 @@ import (
 
 // UsesKind reports whether a type kind occurs anywhere in a module's declared
 // or instruction-level type surface.
-func UsesKind(module *Module, kind foundation.TypeKind) bool {
+func UsesKind(module *KernelModule, kind foundation.TypeKind) bool {
 	for _, item := range module.Structs {
 		if foundation.Contains(item, kind) {
 			return true

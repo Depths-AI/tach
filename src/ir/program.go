@@ -1,12 +1,12 @@
-package flow
+package ir
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
 	"tach/src/foundation"
-	"tach/src/ir"
 )
 
 type ResourceID uint32
@@ -15,7 +15,7 @@ type ShapeID uint32
 type DispatchID uint32
 
 type Module struct {
-	Kernel        *ir.Module
+	Kernel        *KernelModule
 	Programs      []*Program
 	Documentation Documentation
 }
@@ -58,7 +58,7 @@ func (m *Module) ProgramAccess(program *Program) map[ResourceID]ResourceAccess {
 		if stage == nil {
 			continue
 		}
-		summary := ir.AnalyzeAccess(stage)
+		summary := AnalyzeAccess(stage)
 		for _, argument := range dispatch.Buffers {
 			current, buffer := modes[argument.Resource], summary.Buffers[argument.Formal]
 			current.read, current.write, current.atomic = current.read || buffer.Read, current.write || buffer.Write, current.atomic || buffer.Atomic
@@ -81,16 +81,16 @@ func (m *Module) ProgramAccess(program *Program) map[ResourceID]ResourceAccess {
 	return out
 }
 
-type ParameterKind uint8
+type ProgramParameterKind uint8
 
 const (
-	BufferParameter ParameterKind = iota + 1
-	ValueParameter
+	BufferParameterKind ProgramParameterKind = iota + 1
+	ValueParameterKind
 )
 
-type Parameter struct {
+type ProgramParameter struct {
 	Name     string
-	Kind     ParameterKind
+	Kind     ProgramParameterKind
 	Type     *foundation.Type
 	Resource ResourceID
 	Span     foundation.Span
@@ -99,8 +99,8 @@ type Parameter struct {
 type ResourceKind uint8
 
 const (
-	External ResourceKind = iota + 1
-	Transient
+	ExternalResourceKind ResourceKind = iota + 1
+	TransientResourceKind
 )
 
 type Resource struct {
@@ -160,18 +160,18 @@ type BufferArgument struct {
 	Output   VersionID
 }
 
-type ValueKind uint8
+type ValueSourceKind uint8
 
 const (
-	ValueParameterRef ValueKind = iota + 1
-	ValueConstant
-	ValueShape
-	ValueRepeat
+	ValueFromParameter ValueSourceKind = iota + 1
+	ValueFromConstant
+	ValueFromShape
+	ValueFromRepeat
 )
 
 type ValueArgument struct {
 	Formal    int
-	Kind      ValueKind
+	Kind      ValueSourceKind
 	Parameter int
 	Path      []string
 	Constant  *foundation.ConstantValue
@@ -190,11 +190,11 @@ type Dispatch struct {
 type ViewFormat uint8
 
 const (
-	SRGB8 ViewFormat = iota + 1
+	SRGB8ViewFormat ViewFormat = iota + 1
 )
 
 func (f ViewFormat) String() string {
-	if f == SRGB8 {
+	if f == SRGB8ViewFormat {
 		return "srgb8"
 	}
 	return fmt.Sprintf("viewFormat(%d)", f)
@@ -214,7 +214,7 @@ type Program struct {
 	Span       foundation.Span
 	Indexed    bool
 	Rank       int
-	Parameters []Parameter
+	Parameters []ProgramParameter
 	Resources  []Resource
 	Versions   []Version
 	Shapes     []Shape
@@ -226,7 +226,7 @@ type Program struct {
 	nextDisp   DispatchID
 }
 
-func (p *Program) DispatchDefines(dispatch *Dispatch, argument BufferArgument, access ir.BufferSummary) bool {
+func (p *Program) DispatchDefines(dispatch *Dispatch, argument BufferArgument, access BufferSummary) bool {
 	resource := p.Resource(argument.Resource)
 	return access.CoordinateWrite && resource != nil && resource.Length != 0 && len(dispatch.Domain) == 1 && dispatch.Domain[0] == resource.Length
 }
@@ -289,10 +289,10 @@ func Clone(m *Module) *Module {
 	if m == nil {
 		return nil
 	}
-	out := &Module{Kernel: ir.Clone(m.Kernel), Programs: make([]*Program, len(m.Programs))}
+	out := &Module{Kernel: CloneKernel(m.Kernel), Programs: make([]*Program, len(m.Programs)), Documentation: cloneDocumentation(m.Documentation)}
 	for i, p := range m.Programs {
 		q := *p
-		q.Parameters = append([]Parameter(nil), p.Parameters...)
+		q.Parameters = append([]ProgramParameter(nil), p.Parameters...)
 		q.Resources = append([]Resource(nil), p.Resources...)
 		q.Versions = append([]Version(nil), p.Versions...)
 		q.Shapes = append([]Shape(nil), p.Shapes...)
@@ -321,6 +321,19 @@ func Clone(m *Module) *Module {
 	return out
 }
 
+func cloneDocumentation(documentation Documentation) Documentation {
+	out := Documentation{Title: documentation.Title, Summary: documentation.Summary, Types: maps.Clone(documentation.Types), Functions: maps.Clone(documentation.Functions)}
+	for name, doc := range out.Types {
+		doc.Fields = maps.Clone(doc.Fields)
+		out.Types[name] = doc
+	}
+	for name, doc := range out.Functions {
+		doc.Parameters, doc.Coordinates = maps.Clone(doc.Parameters), maps.Clone(doc.Coordinates)
+		out.Functions[name] = doc
+	}
+	return out
+}
+
 func Dump(m *Module) string {
 	var b strings.Builder
 	for _, p := range m.Programs {
@@ -329,7 +342,7 @@ func Dump(m *Module) string {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			if parameter.Kind == BufferParameter {
+			if parameter.Kind == BufferParameterKind {
 				fmt.Fprintf(&b, "%s=%%r%d: buffer<%s>", parameter.Name, parameter.Resource, parameter.Type)
 			} else {
 				fmt.Fprintf(&b, "%s: %s", parameter.Name, parameter.Type)
@@ -338,7 +351,7 @@ func Dump(m *Module) string {
 		b.WriteString(") {\n")
 		for _, resource := range p.Resources {
 			fmt.Fprintf(&b, "  resource %%r%d %s kind=%s initial=%%v%d final=%%v%d", resource.ID, resource.Name, resourceKind(resource.Kind), resource.Initial, resource.Final)
-			if resource.Kind == Transient {
+			if resource.Kind == TransientResourceKind {
 				fmt.Fprintf(&b, " length=%%s%d", resource.Length)
 			}
 			b.WriteByte('\n')
@@ -368,7 +381,7 @@ func Dump(m *Module) string {
 }
 
 func resourceKind(kind ResourceKind) string {
-	if kind == External {
+	if kind == ExternalResourceKind {
 		return "external"
 	}
 	return "transient"

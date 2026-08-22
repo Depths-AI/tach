@@ -7,8 +7,8 @@ import (
 	"tach/src/foundation"
 )
 
-func validStage() *Module {
-	return &Module{Functions: []*Function{{
+func validStage() *KernelModule {
+	return &KernelModule{Functions: []*Function{{
 		Name:         "write",
 		Kind:         Stage,
 		Indices:      []Param{{Name: "i", ID: 1, Type: foundation.Uint32Type}},
@@ -27,12 +27,12 @@ func validStage() *Module {
 }
 
 func TestVerifyFunctionLocalBuffers(t *testing.T) {
-	if err := Verify(validStage()); err != nil {
+	if err := VerifyKernel(validStage()); err != nil {
 		t.Fatal(err)
 	}
 	m := validStage()
 	m.Functions[0].SourceParams = nil
-	if err := Verify(m); err == nil || !strings.Contains(err.Error(), "buffer") {
+	if err := VerifyKernel(m); err == nil || !strings.Contains(err.Error(), "buffer") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -40,11 +40,11 @@ func TestVerifyFunctionLocalBuffers(t *testing.T) {
 func TestVerifyScopeExit(t *testing.T) {
 	m := validStage()
 	m.Functions[0].Body = &Block{Instrs: []Instr{&Scope{Body: &Block{Term: &ExitScope{}}}}, Term: &Return{}}
-	if err := Verify(m); err != nil {
+	if err := VerifyKernel(m); err != nil {
 		t.Fatal(err)
 	}
 	m.Functions[0].Body.Term = &ExitScope{}
-	if err := Verify(m); err == nil {
+	if err := VerifyKernel(m); err == nil {
 		t.Fatal("accepted exit_scope outside scope")
 	}
 }
@@ -55,8 +55,8 @@ func TestVerifyUsesIntrinsicSignatureRules(t *testing.T) {
 		&Const{Result: 2, Type: foundation.Int32Type, Raw: "1"},
 		&Intrinsic{Result: 3, Type: foundation.Int32Type, Kind: IntrinsicClamp, Args: []ValueID{1, 1, 2}},
 	}, Term: &Return{Value: 3, HasValue: true}}}
-	module := &Module{Functions: []*Function{function}}
-	if err := Verify(module); err != nil {
+	module := &KernelModule{Functions: []*Function{function}}
+	if err := VerifyKernel(module); err != nil {
 		t.Fatal(err)
 	}
 	for _, instruction := range function.Body.Instrs[:2] {
@@ -64,7 +64,7 @@ func TestVerifyUsesIntrinsicSignatureRules(t *testing.T) {
 	}
 	function.Return = foundation.Float32Type
 	function.Body.Instrs[2].(*Intrinsic).Type = foundation.Float32Type
-	if err := Verify(module); err != nil {
+	if err := VerifyKernel(module); err != nil {
 		t.Fatal(err)
 	}
 	for _, instruction := range function.Body.Instrs[:2] {
@@ -72,7 +72,7 @@ func TestVerifyUsesIntrinsicSignatureRules(t *testing.T) {
 	}
 	function.Return = foundation.BoolType
 	function.Body.Instrs[2].(*Intrinsic).Type = foundation.BoolType
-	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "does not accept bool") {
+	if err := VerifyKernel(module); err == nil || !strings.Contains(err.Error(), "does not accept bool") {
 		t.Fatalf("invalid intrinsic domain error = %v", err)
 	}
 }
@@ -90,12 +90,12 @@ func TestVerifyMaskIntrinsicShapes(t *testing.T) {
 		&Intrinsic{Result: 7, Type: foundation.BoolType, Kind: IntrinsicAll, Args: []ValueID{3}},
 		selection,
 	}, Term: &Return{Value: 8, HasValue: true}}}
-	module := &Module{Functions: []*Function{function}}
-	if err := Verify(module); err != nil {
+	module := &KernelModule{Functions: []*Function{function}}
+	if err := VerifyKernel(module); err != nil {
 		t.Fatal(err)
 	}
 	selection.Args[0] = 6
-	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "boolean-vector mask") {
+	if err := VerifyKernel(module); err == nil || !strings.Contains(err.Error(), "boolean-vector mask") {
 		t.Fatalf("invalid select mask error = %v", err)
 	}
 }
@@ -118,12 +118,12 @@ func TestVerifyAtomicCompareExchangeShape(t *testing.T) {
 			operation,
 		}, Term: &Return{}},
 	}
-	module := &Module{Functions: []*Function{function}}
-	if err := Verify(module); err != nil {
+	module := &KernelModule{Functions: []*Function{function}}
+	if err := VerifyKernel(module); err != nil {
 		t.Fatal(err)
 	}
 	operation.Expected = 0
-	if err := Verify(module); err == nil || !strings.Contains(err.Error(), "result/operand shape") {
+	if err := VerifyKernel(module); err == nil || !strings.Contains(err.Error(), "result/operand shape") {
 		t.Fatalf("invalid compare-exchange shape error = %v", err)
 	}
 }

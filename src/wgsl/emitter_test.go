@@ -6,15 +6,15 @@ import (
 	"testing"
 
 	"tach/src/ast"
-	"tach/src/flow"
+	"tach/src/ir"
 	"tach/src/opt"
 	"tach/src/parser"
 	"tach/src/sema"
 	"tach/src/wgsl"
 )
 
-func emit(m *flow.Module) (string, error) {
-	if err := opt.OptimizeLogical(m); err != nil {
+func emit(m *ir.Module) (string, error) {
+	if err := opt.Optimize(m); err != nil {
 		return "", err
 	}
 	executable, err := wgsl.Lower(m)

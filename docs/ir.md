@@ -13,7 +13,7 @@ Tach has two target-independent intermediate representations:
   indexed stage or helper.
 
 The project frontend resolves imports and merges every kernel into one
-`flow.Module` containing one `ir.Module`. Target lowering combines those
+`ir.Module` containing one `ir.KernelModule`. Target lowering combines those
 representations into parallel WebGPU and Vulkan executable plans containing
 private physical kernels. IR dump methods remain contributor diagnostics and test
 oracles rather than a public command, emitted artifact, or accepted input
@@ -82,7 +82,7 @@ shader entry ABI.
 
 ## 2. Flow module and public programs
 
-A `flow.Module` contains:
+An `ir.Module` contains:
 
 ```text
 Kernel          shared Kernel IR module
@@ -228,7 +228,7 @@ output buffer.
 
 ## 3. Flow verification
 
-`flow.Verify` first verifies the shared Kernel IR, then proves:
+`ir.Verify` first verifies the shared Kernel IR, then proves:
 
 - unique public program names and at least one dispatch per program;
 - at least one external buffer for ordinary programs, while view programs may
@@ -249,7 +249,7 @@ to rediscover program dataflow from shader text.
 
 ## 4. Kernel module and functions
 
-An `ir.Module` contains logical struct types and functions. Resources are not
+An `ir.KernelModule` contains logical struct types and functions. Resources are not
 module-global: every indexed stage has its own ordered `BufferParams`.
 
 Function roles are:
@@ -438,7 +438,7 @@ Vulkan 1.3 feature.
 
 ## 9. Kernel verification
 
-`ir.Verify` checks, among other invariants:
+`ir.VerifyKernel` checks, among other invariants:
 
 - valid module types, function roles, and workgroup constraints;
 - unique nonzero value/place definitions and structured availability;
